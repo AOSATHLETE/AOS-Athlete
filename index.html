@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <script>window.AppSDK={getItem:function(k){try{var v=localStorage.getItem(k);return Promise.resolve(v!==null?JSON.parse(v):null);}catch(e){return Promise.resolve(null);}},setItem:function(k,v){try{if(v===null||v===undefined){localStorage.removeItem(k);}else{localStorage.setItem(k,JSON.stringify(v));}}catch(e){}return Promise.resolve();},ai:{chat:function(o){return Promise.resolve({content:'AI Coach is available in AOS via Copilot. All tracking features work fully here!'});}}};</script>
-  <script id="AOS_PATCH_JS">
 
+<script id="AOS_PATCH_JS">
 /* ══════════════════════════════════════════════════════════════
    1. AOS AUTH MANAGER  (loads first — all other modules depend on this)
    ══════════════════════════════════════════════════════════════ */
@@ -157,8 +157,8 @@
         challengePts       : cPts,
         totalScore         : (athlete.baseScore || 0) + cPts,
         history            : cp.history || [],
-        challengesCompleted: teamChallenges.filter(ch => ch.completedBy && (ch.completedBy||[]).includes(athlete.id)).length,
-        challengesJoined   : teamChallenges.filter(ch => ch.joinedBy    && (ch.joinedBy||[]).includes(athlete.id)).length
+        challengesCompleted: teamChallenges.filter(ch => ch.completedBy && ch.completedBy.includes(athlete.id)).length,
+        challengesJoined   : teamChallenges.filter(ch => ch.joinedBy    && ch.joinedBy.includes(athlete.id)).length
       };
     });
     merged.sort((a,b) => b.totalScore - a.totalScore);
@@ -418,8 +418,8 @@
       return;
     }
     container.innerHTML = challenges.map(ch => {
-      const joined    = (ch.joinedBy||[]).includes(currentUser);
-      const completed = (ch.completedBy||[]).includes(currentUser);
+      const joined    = ch.joinedBy.includes(currentUser);
+      const completed = ch.completedBy.includes(currentUser);
       const endLabel  = ch.endDate
         ? new Date(ch.endDate+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'})
         : 'No end date';
@@ -439,7 +439,7 @@
         <div class="tc-tags">
           ${ch.target?`<span class="tc-tag">🎯 Goal: ${ch.target}</span>`:''}
           <span class="tc-tag">📅 Ends: ${endLabel}</span>
-          <span class="tc-tag">👥 ${(ch.joinedBy||[]).length} joined</span>
+          <span class="tc-tag">👥 ${ch.joinedBy.length} joined</span>
           <span class="tc-pts">🏆 ${ch.points} pts</span>
         </div>${btn}</div>`;
     }).join('');
@@ -510,7 +510,8 @@
   document.addEventListener('DOMContentLoaded', renderTeamChallenges);
 
 })();
-
+</script>
+<script>
 window.AOS_NOTIFY={
   _granted:false,
   init:async function(){
@@ -547,185 +548,6 @@ window.AOS_TASK_POINTS=0; /* running total of task points for leaderboard */
 </script>
 <!-- Netlify Identity: only needed on Netlify deployments -->
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;800;900&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
-<style id="AOS_PATCH_CSS">
-
-/* ╔══════════════════════════════╗
-   ║  CHALLENGE BUILDER STYLES   ║
-   ╚══════════════════════════════╝ */
-
-.cb-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1100;
-  opacity:0;pointer-events:none;transition:opacity .3s}
-.cb-overlay.open{opacity:1;pointer-events:all}
-.cb-sheet{position:fixed;left:0;right:0;bottom:0;background:#12122a;
-  border-radius:22px 22px 0 0;z-index:1101;padding:0 0 48px;
-  transform:translateY(100%);max-height:92vh;overflow-y:auto;
-  transition:transform .38s cubic-bezier(.32,1.25,.55,1)}
-.cb-sheet.open{transform:translateY(0)}
-.cb-handle{width:42px;height:5px;border-radius:3px;
-  background:rgba(255,255,255,.22);margin:14px auto 4px}
-.cb-header{display:flex;align-items:center;justify-content:space-between;
-  padding:10px 20px 14px}
-.cb-header h2{font-size:1.18rem;color:#fff;margin:0;font-weight:700}
-.cb-close-btn{background:rgba(255,255,255,.1);border:none;color:#fff;
-  width:34px;height:34px;border-radius:50%;font-size:1.1rem;cursor:pointer;
-  display:flex;align-items:center;justify-content:center}
-.cb-types{display:flex;gap:8px;padding:0 16px 16px;overflow-x:auto;scrollbar-width:none}
-.cb-types::-webkit-scrollbar{display:none}
-.cb-type-pill{flex-shrink:0;padding:7px 15px;border-radius:20px;
-  border:1.5px solid rgba(255,255,255,.18);color:#bbb;font-size:.78rem;
-  cursor:pointer;background:transparent;transition:all .2s;
-  white-space:nowrap;font-weight:600}
-.cb-type-pill.active{background:#7c3aed;border-color:#7c3aed;color:#fff;
-  box-shadow:0 0 14px rgba(124,58,237,.5)}
-.cb-section-label{font-size:.7rem;color:#9ca3af;letter-spacing:.07em;
-  text-transform:uppercase;padding:0 16px 8px;display:block}
-.cb-emoji-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;padding:0 16px 16px}
-.cb-emoji-btn{font-size:1.5rem;background:rgba(255,255,255,.07);
-  border:1.5px solid transparent;border-radius:10px;padding:8px;
-  cursor:pointer;transition:all .15s;text-align:center}
-.cb-emoji-btn.selected{border-color:#7c3aed;background:rgba(124,58,237,.28);
-  transform:scale(1.12)}
-.cb-form{padding:0 16px;display:flex;flex-direction:column;gap:14px}
-.cb-field-label{font-size:.74rem;color:#9ca3af;margin-bottom:4px;display:block}
-.cb-input,.cb-textarea,.cb-select{width:100%;background:rgba(255,255,255,.08);
-  border:1.5px solid rgba(255,255,255,.14);border-radius:10px;color:#fff;
-  padding:11px 13px;font-size:.9rem;outline:none;box-sizing:border-box;
-  transition:border-color .2s;font-family:inherit}
-.cb-input:focus,.cb-textarea:focus,.cb-select:focus{border-color:#7c3aed}
-.cb-textarea{min-height:72px;resize:vertical}
-.cb-select option{background:#12122a}
-.cb-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.cb-points-row{display:flex;align-items:center;gap:10px;padding:0 16px;margin-bottom:4px}
-.cb-points-badge{display:inline-flex;align-items:center;gap:6px;
-  background:rgba(250,204,21,.12);border:1px solid rgba(250,204,21,.3);
-  border-radius:20px;padding:6px 15px;font-size:.82rem;color:#fbbf24;font-weight:700}
-.cb-points-note{font-size:.74rem;color:#6b7280}
-.cb-preview{margin:14px 16px 0;background:rgba(124,58,237,.1);
-  border:1.5px solid rgba(124,58,237,.28);border-radius:14px;padding:14px}
-.cb-preview-label{font-size:.68rem;color:#9ca3af;margin-bottom:10px;
-  letter-spacing:.07em;text-transform:uppercase}
-.cb-preview-card{display:flex;align-items:flex-start;gap:12px}
-.cb-preview-emoji{font-size:2.2rem;line-height:1}
-.cb-preview-info{flex:1;min-width:0}
-.cb-preview-title{font-size:1rem;color:#fff;font-weight:700;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.cb-preview-desc{font-size:.78rem;color:#9ca3af;margin-top:3px}
-.cb-preview-meta{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
-.cb-preview-tag{font-size:.71rem;padding:3px 10px;border-radius:10px;
-  background:rgba(255,255,255,.1);color:#d1d5db}
-.cb-preview-pts{font-size:.71rem;padding:3px 10px;border-radius:10px;
-  background:rgba(250,204,21,.15);color:#fbbf24}
-.cb-submit{margin:18px 16px 0;background:linear-gradient(135deg,#7c3aed,#6d28d9);
-  color:#fff;border:none;border-radius:12px;padding:15px;font-size:1rem;
-  font-weight:700;cursor:pointer;width:calc(100% - 32px);
-  transition:opacity .2s;display:block}
-.cb-submit:hover{opacity:.88}
-.cb-submit:disabled{opacity:.38;cursor:not-allowed}
-.cb-toast{position:fixed;bottom:110px;left:50%;transform:translateX(-50%);
-  background:#10b981;color:#fff;border-radius:10px;padding:11px 24px;
-  font-size:.9rem;font-weight:700;z-index:1300;opacity:0;
-  pointer-events:none;transition:opacity .3s;white-space:nowrap}
-.cb-toast.show{opacity:1}
-.team-challenge-card{background:rgba(255,255,255,.06);border-radius:14px;
-  padding:14px;margin-bottom:12px;border:1.5px solid rgba(255,255,255,.1)}
-.tc-header{display:flex;align-items:center;gap:10px;margin-bottom:8px}
-.tc-emoji{font-size:1.7rem}
-.tc-meta{flex:1;min-width:0}
-.tc-title{font-size:.96rem;color:#fff;font-weight:700}
-.tc-type-badge{font-size:.68rem;padding:2px 9px;border-radius:8px;
-  background:rgba(124,58,237,.3);color:#c4b5fd;margin-left:auto;
-  white-space:nowrap;flex-shrink:0}
-.tc-desc{font-size:.8rem;color:#9ca3af;margin-bottom:10px}
-.tc-tags{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
-.tc-tag{font-size:.71rem;padding:3px 10px;border-radius:10px;
-  background:rgba(255,255,255,.08);color:#d1d5db}
-.tc-pts{font-size:.71rem;padding:3px 10px;border-radius:10px;
-  background:rgba(250,204,21,.15);color:#fbbf24;font-weight:700}
-.tc-join-btn{width:100%;padding:10px;border-radius:10px;border:none;
-  font-size:.85rem;font-weight:700;cursor:pointer;transition:all .2s}
-.tc-join-btn.join{background:rgba(124,58,237,.3);color:#c4b5fd;
-  border:1px solid rgba(124,58,237,.4)}
-.tc-join-btn.join:hover{background:#7c3aed;color:#fff}
-.tc-join-btn.joined{background:rgba(16,185,129,.2);color:#6ee7b7;
-  border:1px solid rgba(16,185,129,.3);cursor:default}
-
-/* ╔══════════════════════════════╗
-   ║  LEADERBOARD STYLES         ║
-   ╚══════════════════════════════╝ */
-
-.lb-wrap{padding:0 16px 24px}
-.lb-tab-row{display:flex;gap:8px;margin-bottom:16px}
-.lb-tab{flex:1;padding:9px;border-radius:10px;
-  border:1.5px solid rgba(255,255,255,.15);background:transparent;
-  color:#9ca3af;font-size:.84rem;font-weight:700;cursor:pointer;
-  transition:all .2s;text-align:center}
-.lb-tab.active{background:#7c3aed;border-color:#7c3aed;color:#fff;
-  box-shadow:0 0 14px rgba(124,58,237,.4)}
-.lb-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px}
-.lb-stat{background:rgba(255,255,255,.06);border-radius:12px;padding:12px;text-align:center}
-.lb-stat-val{font-size:1.3rem;font-weight:800;color:#fff}
-.lb-stat-lbl{font-size:.68rem;color:#9ca3af;margin-top:2px}
-.lb-list{display:flex;flex-direction:column;gap:10px}
-.lb-row{display:flex;align-items:center;gap:12px;background:rgba(255,255,255,.06);
-  border-radius:14px;padding:12px 14px;border:1.5px solid rgba(255,255,255,.08);
-  transition:all .2s;cursor:pointer}
-.lb-row:hover{border-color:rgba(124,58,237,.4);background:rgba(124,58,237,.08)}
-.lb-row.top-1{border-color:rgba(250,204,21,.4);background:rgba(250,204,21,.07)}
-.lb-row.top-2{border-color:rgba(156,163,175,.35);background:rgba(156,163,175,.06)}
-.lb-row.top-3{border-color:rgba(180,83,9,.35);background:rgba(180,83,9,.06)}
-.lb-row.is-me{border-color:rgba(124,58,237,.55);background:rgba(124,58,237,.13)}
-.lb-rank{font-size:1.1rem;font-weight:900;min-width:28px;text-align:center}
-.lb-rank.r1{color:#facc15}
-.lb-rank.r2{color:#d1d5db}
-.lb-rank.r3{color:#b45309}
-.lb-rank.rn{color:#6b7280;font-size:.9rem}
-.lb-avatar{width:38px;height:38px;border-radius:50%;
-  background:linear-gradient(135deg,#7c3aed,#2563eb);
-  display:flex;align-items:center;justify-content:center;
-  font-size:.9rem;font-weight:800;color:#fff;flex-shrink:0}
-.lb-name-col{flex:1;min-width:0}
-.lb-name{font-size:.92rem;color:#fff;font-weight:700;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.lb-meta-row{display:flex;gap:6px;margin-top:3px;flex-wrap:wrap}
-.lb-badge{font-size:.64rem;padding:2px 8px;border-radius:8px;
-  background:rgba(255,255,255,.08);color:#9ca3af}
-.lb-challenge-badge{background:rgba(124,58,237,.2);color:#c4b5fd}
-.lb-streak-badge{background:rgba(249,115,22,.15);color:#fb923c}
-.lb-pts-col{text-align:right;flex-shrink:0}
-.lb-pts-total{font-size:1.1rem;font-weight:900;color:#facc15}
-.lb-pts-breakdown{font-size:.68rem;color:#6b7280;margin-top:2px;white-space:nowrap}
-.lb-history{display:none;padding:10px 14px 2px;
-  border-top:1px solid rgba(255,255,255,.08);margin-top:6px}
-.lb-history.open{display:block}
-.lb-history-item{display:flex;justify-content:space-between;align-items:center;
-  padding:5px 0;border-bottom:1px solid rgba(255,255,255,.05)}
-.lb-history-item:last-child{border-bottom:none}
-.lb-hi-reason{font-size:.76rem;color:#9ca3af}
-.lb-hi-pts{font-size:.76rem;color:#4ade80;font-weight:700}
-.lb-hi-date{font-size:.68rem;color:#4b5563}
-.lb-empty{text-align:center;padding:48px 20px;color:#6b7280}
-.lb-empty-icon{font-size:2.4rem;margin-bottom:10px}
-.lb-empty-title{color:#9ca3af;font-weight:600;margin-bottom:6px}
-.lb-empty-sub{font-size:.8rem}
-.lb-my-rank-card{background:rgba(124,58,237,.12);
-  border:1.5px solid rgba(124,58,237,.3);border-radius:14px;padding:14px;
-  margin-bottom:16px;display:flex;align-items:center;
-  justify-content:space-between;gap:12px}
-.lb-my-rank-left{display:flex;align-items:center;gap:10px}
-.lb-my-rank-label{font-size:.72rem;color:#a78bfa;font-weight:700;
-  letter-spacing:.05em;text-transform:uppercase}
-.lb-my-rank-num{font-size:1.6rem;font-weight:900;color:#fff}
-.lb-my-pts-label{font-size:.72rem;color:#a78bfa;font-weight:700;
-  letter-spacing:.05em;text-transform:uppercase;text-align:right}
-.lb-my-pts-num{font-size:1.6rem;font-weight:900;color:#facc15;text-align:right}
-.lb-legend{display:flex;align-items:center;gap:8px;margin-bottom:12px;
-  padding:10px 12px;background:rgba(250,204,21,.07);border-radius:10px;
-  border:1px solid rgba(250,204,21,.2)}
-.lb-legend-dot{width:10px;height:10px;border-radius:50%;background:#facc15;flex-shrink:0}
-.lb-legend-text{font-size:.76rem;color:#fbbf24}
-
-</style>
-
 <style>
 :root{--navy:#111111;--navy-light:#0A1A2F;--gold:#00E0FF;--gold-dark:#00B8D4;--green:#2ecc71;--white:#F5FAFF;--white-dim:#8899aa;--danger:#e74c3c;--warning:#f39c12;--card-bg:#0A1A2F;--border:rgba(0,224,255,0.12);--radius:12px;--shadow:0 4px 20px rgba(0,0,0,0.3)}
 *{box-sizing:border-box;margin:0;padding:0}
@@ -952,6 +774,184 @@ select option{background:var(--navy-light)}
 .demo-btn{background:rgba(0,224,255,0.08);border:1px solid rgba(0,224,255,0.2);border-radius:6px;color:var(--gold);font-size:11px;font-weight:600;padding:4px 10px;cursor:pointer}
 .demo-btn:hover{background:rgba(0,224,255,0.15)}
 
+
+
+/* === AOS PATCH CSS === */
+/* ╔══════════════════════════════╗
+   ║  CHALLENGE BUILDER STYLES   ║
+   ╚══════════════════════════════╝ */
+
+.cb-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1100;
+  opacity:0;pointer-events:none;transition:opacity .3s}
+.cb-overlay.open{opacity:1;pointer-events:all}
+.cb-sheet{position:fixed;left:0;right:0;bottom:0;background:#12122a;
+  border-radius:22px 22px 0 0;z-index:1101;padding:0 0 48px;
+  transform:translateY(100%);max-height:92vh;overflow-y:auto;
+  transition:transform .38s cubic-bezier(.32,1.25,.55,1)}
+.cb-sheet.open{transform:translateY(0)}
+.cb-handle{width:42px;height:5px;border-radius:3px;
+  background:rgba(255,255,255,.22);margin:14px auto 4px}
+.cb-header{display:flex;align-items:center;justify-content:space-between;
+  padding:10px 20px 14px}
+.cb-header h2{font-size:1.18rem;color:#fff;margin:0;font-weight:700}
+.cb-close-btn{background:rgba(255,255,255,.1);border:none;color:#fff;
+  width:34px;height:34px;border-radius:50%;font-size:1.1rem;cursor:pointer;
+  display:flex;align-items:center;justify-content:center}
+.cb-types{display:flex;gap:8px;padding:0 16px 16px;overflow-x:auto;scrollbar-width:none}
+.cb-types::-webkit-scrollbar{display:none}
+.cb-type-pill{flex-shrink:0;padding:7px 15px;border-radius:20px;
+  border:1.5px solid rgba(255,255,255,.18);color:#bbb;font-size:.78rem;
+  cursor:pointer;background:transparent;transition:all .2s;
+  white-space:nowrap;font-weight:600}
+.cb-type-pill.active{background:#7c3aed;border-color:#7c3aed;color:#fff;
+  box-shadow:0 0 14px rgba(124,58,237,.5)}
+.cb-section-label{font-size:.7rem;color:#9ca3af;letter-spacing:.07em;
+  text-transform:uppercase;padding:0 16px 8px;display:block}
+.cb-emoji-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;padding:0 16px 16px}
+.cb-emoji-btn{font-size:1.5rem;background:rgba(255,255,255,.07);
+  border:1.5px solid transparent;border-radius:10px;padding:8px;
+  cursor:pointer;transition:all .15s;text-align:center}
+.cb-emoji-btn.selected{border-color:#7c3aed;background:rgba(124,58,237,.28);
+  transform:scale(1.12)}
+.cb-form{padding:0 16px;display:flex;flex-direction:column;gap:14px}
+.cb-field-label{font-size:.74rem;color:#9ca3af;margin-bottom:4px;display:block}
+.cb-input,.cb-textarea,.cb-select{width:100%;background:rgba(255,255,255,.08);
+  border:1.5px solid rgba(255,255,255,.14);border-radius:10px;color:#fff;
+  padding:11px 13px;font-size:.9rem;outline:none;box-sizing:border-box;
+  transition:border-color .2s;font-family:inherit}
+.cb-input:focus,.cb-textarea:focus,.cb-select:focus{border-color:#7c3aed}
+.cb-textarea{min-height:72px;resize:vertical}
+.cb-select option{background:#12122a}
+.cb-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.cb-points-row{display:flex;align-items:center;gap:10px;padding:0 16px;margin-bottom:4px}
+.cb-points-badge{display:inline-flex;align-items:center;gap:6px;
+  background:rgba(250,204,21,.12);border:1px solid rgba(250,204,21,.3);
+  border-radius:20px;padding:6px 15px;font-size:.82rem;color:#fbbf24;font-weight:700}
+.cb-points-note{font-size:.74rem;color:#6b7280}
+.cb-preview{margin:14px 16px 0;background:rgba(124,58,237,.1);
+  border:1.5px solid rgba(124,58,237,.28);border-radius:14px;padding:14px}
+.cb-preview-label{font-size:.68rem;color:#9ca3af;margin-bottom:10px;
+  letter-spacing:.07em;text-transform:uppercase}
+.cb-preview-card{display:flex;align-items:flex-start;gap:12px}
+.cb-preview-emoji{font-size:2.2rem;line-height:1}
+.cb-preview-info{flex:1;min-width:0}
+.cb-preview-title{font-size:1rem;color:#fff;font-weight:700;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cb-preview-desc{font-size:.78rem;color:#9ca3af;margin-top:3px}
+.cb-preview-meta{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.cb-preview-tag{font-size:.71rem;padding:3px 10px;border-radius:10px;
+  background:rgba(255,255,255,.1);color:#d1d5db}
+.cb-preview-pts{font-size:.71rem;padding:3px 10px;border-radius:10px;
+  background:rgba(250,204,21,.15);color:#fbbf24}
+.cb-submit{margin:18px 16px 0;background:linear-gradient(135deg,#7c3aed,#6d28d9);
+  color:#fff;border:none;border-radius:12px;padding:15px;font-size:1rem;
+  font-weight:700;cursor:pointer;width:calc(100% - 32px);
+  transition:opacity .2s;display:block}
+.cb-submit:hover{opacity:.88}
+.cb-submit:disabled{opacity:.38;cursor:not-allowed}
+.cb-toast{position:fixed;bottom:110px;left:50%;transform:translateX(-50%);
+  background:#10b981;color:#fff;border-radius:10px;padding:11px 24px;
+  font-size:.9rem;font-weight:700;z-index:1300;opacity:0;
+  pointer-events:none;transition:opacity .3s;white-space:nowrap}
+.cb-toast.show{opacity:1}
+.team-challenge-card{background:rgba(255,255,255,.06);border-radius:14px;
+  padding:14px;margin-bottom:12px;border:1.5px solid rgba(255,255,255,.1)}
+.tc-header{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.tc-emoji{font-size:1.7rem}
+.tc-meta{flex:1;min-width:0}
+.tc-title{font-size:.96rem;color:#fff;font-weight:700}
+.tc-type-badge{font-size:.68rem;padding:2px 9px;border-radius:8px;
+  background:rgba(124,58,237,.3);color:#c4b5fd;margin-left:auto;
+  white-space:nowrap;flex-shrink:0}
+.tc-desc{font-size:.8rem;color:#9ca3af;margin-bottom:10px}
+.tc-tags{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.tc-tag{font-size:.71rem;padding:3px 10px;border-radius:10px;
+  background:rgba(255,255,255,.08);color:#d1d5db}
+.tc-pts{font-size:.71rem;padding:3px 10px;border-radius:10px;
+  background:rgba(250,204,21,.15);color:#fbbf24;font-weight:700}
+.tc-join-btn{width:100%;padding:10px;border-radius:10px;border:none;
+  font-size:.85rem;font-weight:700;cursor:pointer;transition:all .2s}
+.tc-join-btn.join{background:rgba(124,58,237,.3);color:#c4b5fd;
+  border:1px solid rgba(124,58,237,.4)}
+.tc-join-btn.join:hover{background:#7c3aed;color:#fff}
+.tc-join-btn.joined{background:rgba(16,185,129,.2);color:#6ee7b7;
+  border:1px solid rgba(16,185,129,.3);cursor:default}
+
+/* ╔══════════════════════════════╗
+   ║  LEADERBOARD STYLES         ║
+   ╚══════════════════════════════╝ */
+
+.lb-wrap{padding:0 16px 24px}
+.lb-tab-row{display:flex;gap:8px;margin-bottom:16px}
+.lb-tab{flex:1;padding:9px;border-radius:10px;
+  border:1.5px solid rgba(255,255,255,.15);background:transparent;
+  color:#9ca3af;font-size:.84rem;font-weight:700;cursor:pointer;
+  transition:all .2s;text-align:center}
+.lb-tab.active{background:#7c3aed;border-color:#7c3aed;color:#fff;
+  box-shadow:0 0 14px rgba(124,58,237,.4)}
+.lb-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px}
+.lb-stat{background:rgba(255,255,255,.06);border-radius:12px;padding:12px;text-align:center}
+.lb-stat-val{font-size:1.3rem;font-weight:800;color:#fff}
+.lb-stat-lbl{font-size:.68rem;color:#9ca3af;margin-top:2px}
+.lb-list{display:flex;flex-direction:column;gap:10px}
+.lb-row{display:flex;align-items:center;gap:12px;background:rgba(255,255,255,.06);
+  border-radius:14px;padding:12px 14px;border:1.5px solid rgba(255,255,255,.08);
+  transition:all .2s;cursor:pointer}
+.lb-row:hover{border-color:rgba(124,58,237,.4);background:rgba(124,58,237,.08)}
+.lb-row.top-1{border-color:rgba(250,204,21,.4);background:rgba(250,204,21,.07)}
+.lb-row.top-2{border-color:rgba(156,163,175,.35);background:rgba(156,163,175,.06)}
+.lb-row.top-3{border-color:rgba(180,83,9,.35);background:rgba(180,83,9,.06)}
+.lb-row.is-me{border-color:rgba(124,58,237,.55);background:rgba(124,58,237,.13)}
+.lb-rank{font-size:1.1rem;font-weight:900;min-width:28px;text-align:center}
+.lb-rank.r1{color:#facc15}
+.lb-rank.r2{color:#d1d5db}
+.lb-rank.r3{color:#b45309}
+.lb-rank.rn{color:#6b7280;font-size:.9rem}
+.lb-avatar{width:38px;height:38px;border-radius:50%;
+  background:linear-gradient(135deg,#7c3aed,#2563eb);
+  display:flex;align-items:center;justify-content:center;
+  font-size:.9rem;font-weight:800;color:#fff;flex-shrink:0}
+.lb-name-col{flex:1;min-width:0}
+.lb-name{font-size:.92rem;color:#fff;font-weight:700;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lb-meta-row{display:flex;gap:6px;margin-top:3px;flex-wrap:wrap}
+.lb-badge{font-size:.64rem;padding:2px 8px;border-radius:8px;
+  background:rgba(255,255,255,.08);color:#9ca3af}
+.lb-challenge-badge{background:rgba(124,58,237,.2);color:#c4b5fd}
+.lb-streak-badge{background:rgba(249,115,22,.15);color:#fb923c}
+.lb-pts-col{text-align:right;flex-shrink:0}
+.lb-pts-total{font-size:1.1rem;font-weight:900;color:#facc15}
+.lb-pts-breakdown{font-size:.68rem;color:#6b7280;margin-top:2px;white-space:nowrap}
+.lb-history{display:none;padding:10px 14px 2px;
+  border-top:1px solid rgba(255,255,255,.08);margin-top:6px}
+.lb-history.open{display:block}
+.lb-history-item{display:flex;justify-content:space-between;align-items:center;
+  padding:5px 0;border-bottom:1px solid rgba(255,255,255,.05)}
+.lb-history-item:last-child{border-bottom:none}
+.lb-hi-reason{font-size:.76rem;color:#9ca3af}
+.lb-hi-pts{font-size:.76rem;color:#4ade80;font-weight:700}
+.lb-hi-date{font-size:.68rem;color:#4b5563}
+.lb-empty{text-align:center;padding:48px 20px;color:#6b7280}
+.lb-empty-icon{font-size:2.4rem;margin-bottom:10px}
+.lb-empty-title{color:#9ca3af;font-weight:600;margin-bottom:6px}
+.lb-empty-sub{font-size:.8rem}
+.lb-my-rank-card{background:rgba(124,58,237,.12);
+  border:1.5px solid rgba(124,58,237,.3);border-radius:14px;padding:14px;
+  margin-bottom:16px;display:flex;align-items:center;
+  justify-content:space-between;gap:12px}
+.lb-my-rank-left{display:flex;align-items:center;gap:10px}
+.lb-my-rank-label{font-size:.72rem;color:#a78bfa;font-weight:700;
+  letter-spacing:.05em;text-transform:uppercase}
+.lb-my-rank-num{font-size:1.6rem;font-weight:900;color:#fff}
+.lb-my-pts-label{font-size:.72rem;color:#a78bfa;font-weight:700;
+  letter-spacing:.05em;text-transform:uppercase;text-align:right}
+.lb-my-pts-num{font-size:1.6rem;font-weight:900;color:#facc15;text-align:right}
+.lb-legend{display:flex;align-items:center;gap:8px;margin-bottom:12px;
+  padding:10px 12px;background:rgba(250,204,21,.07);border-radius:10px;
+  border:1px solid rgba(250,204,21,.2)}
+.lb-legend-dot{width:10px;height:10px;border-radius:50%;background:#facc15;flex-shrink:0}
+.lb-legend-text{font-size:.76rem;color:#fbbf24}
+
 </style>
 
 <meta name="theme-color" content="#111111">
@@ -1175,39 +1175,11 @@ var AppSDK = {
 <div data-id="34" id="sec-admin" class="section"></div>
 <div data-id="35" id="sec-profile" class="section"></div>
 <div data-id="36" id="sec-trainer" class="section"></div>
-<div class="section" id="sec-leaderboard">
-  <div class="lb-wrap" id="leaderboardRoot">
+<div class="lb-wrap" id="leaderboardRoot">
   <div class="lb-tab-row">
     <button class="lb-tab active" id="lbTabIndividual" onclick="switchLbTab('individual')">👤 Individual</button>
     <button class="lb-tab"        id="lbTabTeam"       onclick="switchLbTab('team')">👥 Team</button>
   </div>
-  <div class="lb-my-rank-card" id="lbMyRankCard">
-    <div class="lb-my-rank-left">
-      <div>
-        <div class="lb-my-rank-label">Your Rank</div>
-        <div class="lb-my-rank-num" id="lbMyRankNum">—</div>
-      </div>
-    </div>
-    <div>
-      <div class="lb-my-pts-label">Total Points</div>
-      <div class="lb-my-pts-num" id="lbMyPtsNum">0 pts</div>
-    </div>
-  </div>
-  <div class="lb-summary">
-    <div class="lb-stat"><div class="lb-stat-val" id="lbStatPlayers">0</div><div class="lb-stat-lbl">Athletes</div></div>
-    <div class="lb-stat"><div class="lb-stat-val" id="lbStatChallenges">0</div><div class="lb-stat-lbl">Challenges</div></div>
-    <div class="lb-stat"><div class="lb-stat-val" id="lbStatPtsPool">0</div><div class="lb-stat-lbl">Pts Awarded</div></div>
-  </div>
-  <div class="lb-legend">
-    <div class="lb-legend-dot"></div>
-    <div class="lb-legend-text">🏆 Challenge points merge with base scores and update live</div>
-  </div>
-  <div class="lb-list" id="lbList"></div>
-  <div id="teamChallengesContainer"></div>
-
-</div>
-
-</div>
 <div class="section" id="sec-referral"></div>
 <div class="section" id="sec-subscription"></div>
 <div id="sec-parent" class="section"></div>
@@ -6425,7 +6397,6 @@ var AOS_AUTH = {
   demoLogin: function(roleKey){
     var demo = this.DEMO_ACCOUNTS[roleKey];
     if(!demo) return;
-    AOS_DemoLogin(rolekey);
     this.enterApp({
       userId: this.genId(roleKey),
       name:   demo.name,
@@ -6586,7 +6557,6 @@ var AOS_AUTH = {
           if(errEl){errEl.textContent='Incorrect password. Try again.';errEl.classList.add('show');} return;
         }
       }
-      AOS_EmailLogin(acct.email, acct.name, acct.role || 'player');
       AOS_AUTH.enterApp({userId:acct.userId,name:acct.name||email.split('@')[0],email:email,role:acct.role||'player',orgCode:acct.orgCode||'ORG-0001',dob:acct.dob||''});
     });
   },
@@ -6811,7 +6781,6 @@ var AOS_AUTH = {
     if(typeof netlifyIdentity !== 'undefined'){
       netlifyIdentity.on('login', function(user){
         netlifyIdentity.close();
-        AOS_EmailLogin(user.email, user.user_metadata.full_name, 'player');
         self.handleNIUser(user);
       });
       netlifyIdentity.on('logout', function(){
@@ -6855,14 +6824,14 @@ setTimeout(function(){
 },4000);
 
 /* ── Expose logout globally ───────────────────────────────────────── */
-function logout(){ 
-  AOS_Auth.logout();
-  AOS_AUTH.logout();
- }
+function logout(){
+    if(window.AOS_Auth) AOS_Auth.logout(); AOS_AUTH.logout(); }
 
 </script>
 
 
+
+<div id="teamChallengesContainer"></div>
 
 <div class="cb-overlay" id="cbOverlay" onclick="closeChallengeBuilder()"></div>
 
@@ -6936,7 +6905,6 @@ function logout(){
 </div>
 
 <div class="cb-toast" id="cbToast">✅ Challenge launched! Team can join now.</div>
-<button onclick="openChallengeBuilder()">🏁 Create Challenge</button>
-<div id="teamChallengesContainer"></div>
+
 </body>
 </html>
