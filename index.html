@@ -3,516 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <script>window.AppSDK={getItem:function(k){try{var v=localStorage.getItem(k);return Promise.resolve(v!==null?JSON.parse(v):null);}catch(e){return Promise.resolve(null);}},setItem:function(k,v){try{if(v===null||v===undefined){localStorage.removeItem(k);}else{localStorage.setItem(k,JSON.stringify(v));}}catch(e){}return Promise.resolve();},ai:{chat:function(o){return Promise.resolve({content:'AI Coach is available in AOS via Copilot. All tracking features work fully here!'});}}};</script>
-  <script id="AOS_PATCH_JS">
-
-/* ══════════════════════════════════════════════════════════════
-   1. AOS AUTH MANAGER  (loads first — all other modules depend on this)
-   ══════════════════════════════════════════════════════════════ */
-(function(){
-
-  window.AOS_Auth = {
-    login: function(profile){
-      if(!profile || !profile.id){ console.warn('AOS_Auth.login: profile.id required'); return; }
-      profile.role      = (profile.role || 'player').toLowerCase();
-      profile.avatar    = profile.avatar || _initials(profile.name || profile.id);
-      profile.baseScore = profile.baseScore || 0;
-      profile.streak    = profile.streak    || 0;
-      localStorage.setItem('aos_current_user',    profile.id);
-      localStorage.setItem('aos_current_role',    profile.role);
-      localStorage.setItem('aos_current_profile', JSON.stringify(profile));
-      AOS_Auth._registerAthlete(profile);
-      AOS_Auth._refreshAll();
-      console.log('[AOS_Auth] Logged in:', profile.id, '(' + profile.role + ')');
-    },
-    logout: function(){
-      ['aos_current_user','aos_current_role','aos_current_profile']
-        .forEach(k => localStorage.removeItem(k));
-      AOS_Auth._refreshAll();
-    },
-    getUserId:  function(){ return localStorage.getItem('aos_current_user') || null; },
-    getRole:    function(){ return localStorage.getItem('aos_current_role') || 'player'; },
-    getProfile: function(){
-      try{ return JSON.parse(localStorage.getItem('aos_current_profile') || 'null'); }
-      catch(e){ return null; }
-    },
-    getRegistry: function(){
-      try{ return JSON.parse(localStorage.getItem('aos_athlete_registry') || '[]'); }
-      catch(e){ return []; }
-    },
-    _registerAthlete: function(profile){
-      const reg = AOS_Auth.getRegistry();
-      const idx = reg.findIndex(a => a.id === profile.id);
-      if(idx >= 0){
-        reg[idx] = { ...reg[idx], ...profile,
-          baseScore: Math.max(reg[idx].baseScore || 0, profile.baseScore || 0) };
-      } else {
-        reg.push(profile);
-      }
-      localStorage.setItem('aos_athlete_registry', JSON.stringify(reg));
-    },
-    _refreshAll: function(){
-      if(typeof renderLeaderboard    === 'function') renderLeaderboard();
-      if(typeof renderTeamChallenges === 'function') renderTeamChallenges();
-    }
-  };
-
-  /* Demo profiles — update names/scores to match your real data */
-  const DEMO_PROFILES = {
-    player : { id:'player_0',  name:'Demo Player',   role:'player',  pos:'P',  avatar:'DP', baseScore:200, streak:3 },
-    coach  : { id:'coach_0',   name:'Coach Martinez', role:'coach',  pos:null, avatar:'CM', baseScore:0,   streak:0 },
-    trainer: { id:'trainer_0', name:'Demo Trainer',   role:'trainer',pos:null, avatar:'DT', baseScore:0,   streak:0 },
-    org    : { id:'org_0',     name:'Demo Org',       role:'org',    pos:null, avatar:'DO', baseScore:0,   streak:0 },
-    parent : { id:'parent_0',  name:'Demo Parent',    role:'parent', pos:null, avatar:'DP', baseScore:0,   streak:0 }
-  };
-
-  window.AOS_DemoLogin = function(role){
-    const profile = DEMO_PROFILES[(role||'').toLowerCase()];
-    if(!profile){ console.warn('AOS_DemoLogin: unknown role', role); return; }
-    AOS_Auth.login(profile);
-  };
-
-  window.AOS_EmailLogin = function(email, name, role){
-    const safeEmail = email.toLowerCase().replace(/[^a-z0-9]/g,'_');
-    const id        = (role || 'player') + '_' + safeEmail;
-    const reg       = AOS_Auth.getRegistry();
-    const existing  = reg.find(a => a.email === email.toLowerCase());
-    const profile   = existing || {
-      id, name: name || email.split('@')[0], email: email.toLowerCase(),
-      role: role || 'player', pos: null,
-      avatar: _initials(name || email), baseScore: 0, streak: 0
-    };
-    AOS_Auth.login(profile);
-    return profile;
-  };
-
-  /* Restore session on every page load */
-  document.addEventListener('DOMContentLoaded', function(){
-    if(localStorage.getItem('aos_current_user')){
-      AOS_Auth._refreshAll();
-    }
-  });
-
-  function _initials(name){
-    if(!name) return '??';
-    return name.trim().split(/\s+/).map(w=>w[0]||'').join('').toUpperCase().slice(0,2);
-  }
-
-})();
-
-
-/* ══════════════════════════════════════════════════════════════
-   2. DYNAMIC ROSTER + LEADERBOARD MERGE ENGINE
-   ══════════════════════════════════════════════════════════════ */
-(function(){
-
-  /* ── Seed roster — update these with your real athletes ── */
-  const SEED_ROSTER = [
-    { id:'player_1',  name:'Avery Johnson',  pos:'P',  baseScore:420, streak:12, avatar:'AJ' },
-    { id:'player_2',  name:'Jordan Cruz',    pos:'C',  baseScore:390, streak:11, avatar:'JC' },
-    { id:'player_3',  name:'Casey Morales',  pos:'2B', baseScore:370, streak:10, avatar:'CM' },
-    { id:'player_4',  name:'Drew Martinez',  pos:'CF', baseScore:360, streak:13, avatar:'DM' },
-    { id:'player_5',  name:'Riley Thompson', pos:'SS', baseScore:340, streak:9,  avatar:'RT' },
-    { id:'player_6',  name:'Morgan Lee',     pos:'1B', baseScore:320, streak:8,  avatar:'ML' },
-    { id:'player_7',  name:'Taylor Brooks',  pos:'LF', baseScore:310, streak:7,  avatar:'TB' },
-    { id:'player_8',  name:'Jamie Wilson',   pos:'3B', baseScore:295, streak:6,  avatar:'JW' },
-    { id:'player_9',  name:'Alex Rivera',    pos:'RF', baseScore:280, streak:9,  avatar:'AR' },
-    { id:'player_10', name:'Sam Davis',      pos:'DH', baseScore:260, streak:5,  avatar:'SD' },
-  ];
-
-  window.getDynamicRoster = function(){
-    const registry  = (window.AOS_Auth && AOS_Auth.getRegistry()) || [];
-    const rosterMap = {};
-    SEED_ROSTER.forEach(a => { rosterMap[a.id] = { ...a }; });
-    registry.forEach(reg => {
-      if(reg.role && reg.role !== 'player') return;
-      if(rosterMap[reg.id]){
-        rosterMap[reg.id] = {
-          ...rosterMap[reg.id],
-          name     : reg.name      || rosterMap[reg.id].name,
-          avatar   : reg.avatar    || rosterMap[reg.id].avatar,
-          pos      : reg.pos       || rosterMap[reg.id].pos,
-          streak   : Math.max(reg.streak    || 0, rosterMap[reg.id].streak    || 0),
-          baseScore: Math.max(reg.baseScore || 0, rosterMap[reg.id].baseScore || 0)
-        };
-      } else {
-        rosterMap[reg.id] = {
-          id: reg.id, name: reg.name || 'Athlete',
-          pos: reg.pos || null, avatar: reg.avatar || '??',
-          baseScore: reg.baseScore || 0, streak: reg.streak || 0
-        };
-      }
-    });
-    return Object.values(rosterMap);
-  };
-
-  window.getMergedLeaderboard = function(){
-    const roster         = getDynamicRoster();
-    const challengePts   = JSON.parse(localStorage.getItem('aos_leaderboard')      || '{}');
-    const teamChallenges = JSON.parse(localStorage.getItem('aos_team_challenges')  || '[]');
-    const merged = roster.map(athlete => {
-      const cp  = challengePts[athlete.id] || { points:0, history:[] };
-      const cPts = cp.points || 0;
-      return {
-        ...athlete,
-        challengePts       : cPts,
-        totalScore         : (athlete.baseScore || 0) + cPts,
-        history            : cp.history || [],
-        challengesCompleted: teamChallenges.filter(ch => ch.completedBy && (ch.completedBy||[]).includes(athlete.id)).length,
-        challengesJoined   : teamChallenges.filter(ch => ch.joinedBy    && (ch.joinedBy||[]).includes(athlete.id)).length
-      };
-    });
-    merged.sort((a,b) => b.totalScore - a.totalScore);
-    let rank = 1;
-    merged.forEach((a,i) => {
-      a.rank = (i > 0 && merged[i].totalScore === merged[i-1].totalScore) ? merged[i-1].rank : rank;
-      rank++;
-    });
-    return merged;
-  };
-
-  /* Score sync utility */
-  window.AOS_Auth_SyncScore = function(playerId, metrics){
-    if(!playerId || !metrics) return;
-    const score = Math.round(
-      (metrics.readinessScore || 0) * 20 +
-      (metrics.trainingStreak || 0) * 10 +
-      (metrics.sessionsLogged || 0) *  5 +
-      (metrics.goalsCompleted || 0) * 25
-    );
-    const reg = (window.AOS_Auth && AOS_Auth.getRegistry()) || [];
-    const idx = reg.findIndex(a => a.id === playerId);
-    if(idx >= 0){
-      reg[idx].baseScore = Math.max(reg[idx].baseScore || 0, score);
-      reg[idx].streak    = metrics.trainingStreak || reg[idx].streak || 0;
-      localStorage.setItem('aos_athlete_registry', JSON.stringify(reg));
-    }
-    if(typeof renderLeaderboard === 'function') renderLeaderboard();
-  };
-
-  /* Team aggregate for Team tab */
-  function getTeamLeaderboard(){
-    const merged   = getMergedLeaderboard();
-    const totalPts = merged.reduce((s,a)=>s+a.totalScore,0);
-    const totalCh  = merged.reduce((s,a)=>s+a.challengesCompleted,0);
-    return [{
-      id:'team_aos', name:'AOS Softball', avatar:'🥎', isTeam:true, rank:1,
-      totalScore : totalPts,
-      avgScore   : Math.round(totalPts / (merged.length||1)),
-      challengesCompleted: totalCh,
-      topStreak  : Math.max(...merged.map(a=>a.streak), 0),
-      members    : merged.length
-    }];
-  }
-
-  let _lbTab = 'individual';
-
-  window.switchLbTab = function(tab){
-    _lbTab = tab;
-    document.getElementById('lbTabIndividual').classList.toggle('active', tab==='individual');
-    document.getElementById('lbTabTeam').classList.toggle('active', tab==='team');
-    renderLeaderboard();
-  };
-
-  window.renderLeaderboard = function(){
-    const list = document.getElementById('lbList');
-    if(!list) return;
-    const currentUser    = (window.AOS_Auth && AOS_Auth.getUserId()) || 'player_0';
-    const allMerged      = getMergedLeaderboard();
-    const challenges     = JSON.parse(localStorage.getItem('aos_team_challenges')||'[]');
-    const totalChalPts   = allMerged.reduce((s,a)=>s+a.challengePts,0);
-    const data           = _lbTab === 'team' ? getTeamLeaderboard() : allMerged;
-
-    _setText('lbStatPlayers',    allMerged.length);
-    _setText('lbStatChallenges', challenges.length);
-    _setText('lbStatPtsPool',    totalChalPts + ' pts');
-
-    const myRankCard = document.getElementById('lbMyRankCard');
-    if(_lbTab === 'individual'){
-      const me = allMerged.find(a => a.id === currentUser);
-      if(me){
-        _setText('lbMyRankNum', '#' + me.rank);
-        _setText('lbMyPtsNum',  me.totalScore + ' pts');
-        if(myRankCard) myRankCard.style.display = 'flex';
-      }
-    } else {
-      if(myRankCard) myRankCard.style.display = 'none';
-    }
-
-    if(!data.length){
-      list.innerHTML = `<div class="lb-empty"><div class="lb-empty-icon">🏆</div>
-        <div class="lb-empty-title">No athletes yet</div>
-        <div class="lb-empty-sub">Complete challenges to earn points!</div></div>`;
-      return;
-    }
-
-    list.innerHTML = data.map(athlete => {
-      const isMe      = athlete.id === currentUser;
-      const rank      = athlete.rank || 1;
-      const medal     = rank===1?'🥇':rank===2?'🥈':rank===3?'🥉':'#'+rank;
-      const rankClass = rank===1?'r1':rank===2?'r2':rank===3?'r3':'rn';
-      const rowCls    = [rank<=3?'top-'+rank:'', isMe?'is-me':''].filter(Boolean).join(' ');
-      const breakdown = athlete.isTeam
-        ? `${athlete.members} athletes · ${athlete.challengesCompleted} challenges`
-        : `Base: ${athlete.baseScore} pts${athlete.challengePts>0?' + '+athlete.challengePts+' challenge pts':''}`;
-      const badges = athlete.isTeam
-        ? `<span class="lb-badge">⭐ Avg ${athlete.avgScore} pts</span>
-           <span class="lb-badge lb-streak-badge">🔥 Top streak ${athlete.topStreak}d</span>`
-        : `${athlete.challengesCompleted>0?`<span class="lb-badge lb-challenge-badge">🏆 ${athlete.challengesCompleted} challenge${athlete.challengesCompleted>1?'s':''}</span>`:''}
-           ${athlete.streak>0?`<span class="lb-badge lb-streak-badge">🔥 ${athlete.streak}d streak</span>`:''}
-           ${isMe?`<span class="lb-badge" style="background:rgba(124,58,237,.25);color:#c4b5fd">You</span>`:''}`;
-      const historyHTML = athlete.history && athlete.history.length
-        ? athlete.history.slice(0,8).map(h=>{
-            const ds = new Date(h.date).toLocaleDateString('en-US',{month:'short',day:'numeric'});
-            return `<div class="lb-history-item">
-              <span class="lb-hi-reason">🏅 ${h.reason}</span>
-              <span class="lb-hi-date">${ds}</span>
-              <span class="lb-hi-pts">+${h.points} pts</span></div>`;
-          }).join('')
-        : `<div style="font-size:.76rem;color:#6b7280;padding:4px 0">No challenge history yet</div>`;
-      const histSection = !athlete.isTeam
-        ? `<div class="lb-history" id="hist_${athlete.id}">
-             <div style="font-size:.7rem;color:#9ca3af;margin-bottom:6px;text-transform:uppercase;letter-spacing:.07em">Challenge History</div>
-             ${historyHTML}</div>` : '';
-
-      return `<div>
-        <div class="lb-row ${rowCls}" onclick="${!athlete.isTeam?`toggleHistory('${athlete.id}')`:''}" >
-          <div class="lb-rank ${rankClass}">${medal}</div>
-          <div class="lb-avatar">${athlete.avatar||athlete.name.charAt(0)}</div>
-          <div class="lb-name-col">
-            <div class="lb-name">${athlete.name}${athlete.pos?` <span style="color:#6b7280;font-size:.75rem;font-weight:400">${athlete.pos}</span>`:''}</div>
-            <div class="lb-meta-row">${badges}</div>
-          </div>
-          <div class="lb-pts-col">
-            <div class="lb-pts-total">${athlete.totalScore.toLocaleString()}</div>
-            <div class="lb-pts-breakdown">${breakdown}</div>
-          </div>
-        </div>${histSection}</div>`;
-    }).join('');
-  };
-
-  window.toggleHistory = function(id){
-    const el = document.getElementById('hist_'+id);
-    if(el) el.classList.toggle('open');
-  };
-
-  function _setText(id, val){
-    const el = document.getElementById(id);
-    if(el) el.textContent = val;
-  }
-
-  document.addEventListener('DOMContentLoaded', renderLeaderboard);
-
-})();
-
-
-/* ══════════════════════════════════════════════════════════════
-   3. CHALLENGE BUILDER ENGINE
-   ══════════════════════════════════════════════════════════════ */
-(function(){
-
-  const CB = {
-    type : 'Streak', emoji : '🔥',
-    emojis : ['🔥','💧','🏋️','💚','👥','⭐','🎯','⚡','🏆','💪','🥇','🎽','🧠','🚀','❤️'],
-    targetLabels : {
-      Streak:'Target (days)', Hydration:'Target (oz/day)',
-      Training:'Target (sessions)', Recovery:'Target (days)',
-      Group:'Target (members)', Custom:'Target value'
-    }
-  };
-
-  function buildEmojiGrid(){
-    const grid = document.getElementById('cbEmojiGrid');
-    if(!grid) return;
-    grid.innerHTML = CB.emojis.map((e,i)=>
-      `<button class="cb-emoji-btn${i===0?' selected':''}" onclick="selectEmoji(this,'${e}')">${e}</button>`
-    ).join('');
-  }
-
-  window.openChallengeBuilder = function(){
-    buildEmojiGrid(); updatePreview(); setMinDate();
-    document.getElementById('cbOverlay').classList.add('open');
-    document.getElementById('cbSheet').classList.add('open');
-    document.body.style.overflow = 'hidden';
-  };
-  window.closeChallengeBuilder = function(){
-    document.getElementById('cbOverlay').classList.remove('open');
-    document.getElementById('cbSheet').classList.remove('open');
-    document.body.style.overflow = '';
-  };
-
-  function setMinDate(){
-    const d = document.getElementById('cbEndDate');
-    if(d) d.min = new Date().toISOString().split('T')[0];
-  }
-
-  window.selectType = function(btn){
-    document.querySelectorAll('.cb-type-pill').forEach(p=>p.classList.remove('active'));
-    btn.classList.add('active');
-    CB.type = btn.dataset.type;
-    const lbl = document.getElementById('cbTargetLabel');
-    if(lbl) lbl.textContent = CB.targetLabels[CB.type] || 'Target';
-    updatePreview();
-  };
-
-  window.selectEmoji = function(btn, emoji){
-    document.querySelectorAll('.cb-emoji-btn').forEach(b=>b.classList.remove('selected'));
-    btn.classList.add('selected');
-    CB.emoji = emoji;
-    updatePreview();
-  };
-
-  window.updatePreview = function(){
-    const title  = (document.getElementById('cbTitle')||{}).value   || '';
-    const desc   = (document.getElementById('cbDesc')||{}).value    || '';
-    const target = (document.getElementById('cbTarget')||{}).value  || '';
-    const endRaw = (document.getElementById('cbEndDate')||{}).value || '';
-    const pts    = (document.getElementById('cbPoints')||{}).value  || '100';
-    _s('prevEmoji',  CB.emoji);
-    _s('prevTitle',  title  || 'Your challenge title…');
-    _s('prevDesc',   desc   || 'Description will appear here.');
-    _s('prevType',   CB.type);
-    _s('prevTarget', target ? 'Goal: '+target : 'Goal: —');
-    _s('prevPts',    pts + ' pts');
-    _s('cbPtsBadge', pts);
-    if(endRaw){
-      const d = new Date(endRaw+'T00:00:00');
-      _s('prevDate','Ends: '+d.toLocaleDateString('en-US',{month:'short',day:'numeric'}));
-    } else { _s('prevDate','Ends: —'); }
-    const submitBtn = document.getElementById('cbSubmitBtn');
-    if(submitBtn) submitBtn.disabled = !title.trim();
-  };
-
-  window.saveChallenge = function(){
-    const title = (document.getElementById('cbTitle')||{}).value.trim();
-    if(!title) return;
-    const challenge = {
-      id: 'ch_'+Date.now(), emoji: CB.emoji, type: CB.type, title,
-      desc    : (document.getElementById('cbDesc')||{}).value.trim(),
-      target  : (document.getElementById('cbTarget')||{}).value.trim(),
-      endDate : (document.getElementById('cbEndDate')||{}).value,
-      points  : parseInt((document.getElementById('cbPoints')||{}).value)||100,
-      createdAt: new Date().toISOString(),
-      createdBy: (window.AOS_Auth && AOS_Auth.getUserId()) || 'coach_0',
-      joinedBy: [], completedBy: []
-    };
-    const existing = JSON.parse(localStorage.getItem('aos_team_challenges')||'[]');
-    existing.unshift(challenge);
-    localStorage.setItem('aos_team_challenges', JSON.stringify(existing));
-    if(typeof renderTeamChallenges === 'function') renderTeamChallenges();
-    if(typeof renderLeaderboard    === 'function') renderLeaderboard();
-    _resetForm();
-    closeChallengeBuilder();
-    showCBToast('✅ Challenge launched! Team can join now.');
-  };
-
-  window.renderTeamChallenges = function(){
-    const container  = document.getElementById('teamChallengesContainer');
-    if(!container) return;
-    const challenges = JSON.parse(localStorage.getItem('aos_team_challenges')||'[]');
-    const currentUser= (window.AOS_Auth && AOS_Auth.getUserId()) || 'player_0';
-    if(!challenges.length){
-      container.innerHTML = `<div style="text-align:center;padding:40px 20px;color:#6b7280">
-        <div style="font-size:2rem;margin-bottom:10px">🏁</div>
-        <div style="font-weight:600;color:#9ca3af;margin-bottom:6px">No active challenges yet</div>
-        <div style="font-size:.8rem">Coaches can launch challenges using the Challenge Builder</div></div>`;
-      return;
-    }
-    container.innerHTML = challenges.map(ch => {
-      const joined    = (ch.joinedBy||[]).includes(currentUser);
-      const completed = (ch.completedBy||[]).includes(currentUser);
-      const endLabel  = ch.endDate
-        ? new Date(ch.endDate+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'})
-        : 'No end date';
-      const btn = completed
-        ? `<button class="tc-join-btn joined" disabled>✅ Completed (+${ch.points} pts)</button>`
-        : joined
-        ? `<button class="tc-join-btn joined" disabled>✅ Joined</button>
-           <button class="tc-join-btn join" style="margin-top:6px" onclick="completeChallenge('${ch.id}')">✔ Mark Complete</button>`
-        : `<button class="tc-join-btn join" onclick="joinChallenge('${ch.id}')">Join Challenge</button>`;
-      return `<div class="team-challenge-card" id="card_${ch.id}">
-        <div class="tc-header">
-          <span class="tc-emoji">${ch.emoji}</span>
-          <div class="tc-meta"><div class="tc-title">${ch.title}</div></div>
-          <span class="tc-type-badge">${ch.type}</span>
-        </div>
-        ${ch.desc?`<div class="tc-desc">${ch.desc}</div>`:''}
-        <div class="tc-tags">
-          ${ch.target?`<span class="tc-tag">🎯 Goal: ${ch.target}</span>`:''}
-          <span class="tc-tag">📅 Ends: ${endLabel}</span>
-          <span class="tc-tag">👥 ${(ch.joinedBy||[]).length} joined</span>
-          <span class="tc-pts">🏆 ${ch.points} pts</span>
-        </div>${btn}</div>`;
-    }).join('');
-  };
-
-  window.joinChallenge = function(challengeId){
-    const currentUser= (window.AOS_Auth && AOS_Auth.getUserId()) || 'player_0';
-    const challenges = JSON.parse(localStorage.getItem('aos_team_challenges')||'[]');
-    const idx = challenges.findIndex(c=>c.id===challengeId);
-    if(idx===-1) return;
-    if(!challenges[idx].joinedBy.includes(currentUser)){
-      challenges[idx].joinedBy.push(currentUser);
-      localStorage.setItem('aos_team_challenges', JSON.stringify(challenges));
-    }
-    renderTeamChallenges();
-    showCBToast('🔥 You joined the challenge! Good luck!');
-  };
-
-  window.completeChallenge = function(challengeId){
-    const currentUser= (window.AOS_Auth && AOS_Auth.getUserId()) || 'player_0';
-    const challenges = JSON.parse(localStorage.getItem('aos_team_challenges')||'[]');
-    const idx = challenges.findIndex(c=>c.id===challengeId);
-    if(idx===-1) return;
-    if(!challenges[idx].completedBy.includes(currentUser)){
-      challenges[idx].completedBy.push(currentUser);
-      const pts = challenges[idx].points || 100;
-      awardLeaderboardPoints(currentUser, pts, challenges[idx].title);
-      localStorage.setItem('aos_team_challenges', JSON.stringify(challenges));
-      showCBToast(`🏆 Challenge complete! +${pts} pts added to your score!`);
-    }
-    renderTeamChallenges();
-  };
-
-  window.awardLeaderboardPoints = function(userId, points, reason){
-    const lb = JSON.parse(localStorage.getItem('aos_leaderboard')||'{}');
-    if(!lb[userId]) lb[userId] = { points:0, history:[] };
-    lb[userId].points += points;
-    lb[userId].history.push({ points, reason, date: new Date().toISOString() });
-    localStorage.setItem('aos_leaderboard', JSON.stringify(lb));
-    if(typeof renderLeaderboard === 'function') renderLeaderboard();
-  };
-
-  function showCBToast(msg){
-    const t = document.getElementById('cbToast');
-    if(!t) return;
-    t.textContent = msg;
-    t.classList.add('show');
-    setTimeout(()=>t.classList.remove('show'), 3200);
-  }
-
-  function _resetForm(){
-    ['cbTitle','cbDesc','cbTarget','cbEndDate'].forEach(id=>{
-      const el = document.getElementById(id);
-      if(el) el.value = '';
-    });
-    const pts = document.getElementById('cbPoints');
-    if(pts) pts.value = '100';
-    CB.type = 'Streak'; CB.emoji = '🔥';
-    document.querySelectorAll('.cb-type-pill').forEach((p,i)=>p.classList.toggle('active',i===0));
-    buildEmojiGrid(); updatePreview();
-  }
-
-  function _s(id, val){
-    const el = document.getElementById(id);
-    if(el) el.textContent = val;
-  }
-
-  document.addEventListener('DOMContentLoaded', renderTeamChallenges);
-
-})();
-
-</script>
-
+<script>
 window.AOS_NOTIFY={
   _granted:false,
   init:async function(){
@@ -549,185 +40,6 @@ window.AOS_TASK_POINTS=0; /* running total of task points for leaderboard */
 </script>
 <!-- Netlify Identity: only needed on Netlify deployments -->
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;800;900&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
-<style id="AOS_PATCH_CSS">
-
-/* ╔══════════════════════════════╗
-   ║  CHALLENGE BUILDER STYLES   ║
-   ╚══════════════════════════════╝ */
-
-.cb-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1100;
-  opacity:0;pointer-events:none;transition:opacity .3s}
-.cb-overlay.open{opacity:1;pointer-events:all}
-.cb-sheet{position:fixed;left:0;right:0;bottom:0;background:#12122a;
-  border-radius:22px 22px 0 0;z-index:1101;padding:0 0 48px;
-  transform:translateY(100%);max-height:92vh;overflow-y:auto;
-  transition:transform .38s cubic-bezier(.32,1.25,.55,1)}
-.cb-sheet.open{transform:translateY(0)}
-.cb-handle{width:42px;height:5px;border-radius:3px;
-  background:rgba(255,255,255,.22);margin:14px auto 4px}
-.cb-header{display:flex;align-items:center;justify-content:space-between;
-  padding:10px 20px 14px}
-.cb-header h2{font-size:1.18rem;color:#fff;margin:0;font-weight:700}
-.cb-close-btn{background:rgba(255,255,255,.1);border:none;color:#fff;
-  width:34px;height:34px;border-radius:50%;font-size:1.1rem;cursor:pointer;
-  display:flex;align-items:center;justify-content:center}
-.cb-types{display:flex;gap:8px;padding:0 16px 16px;overflow-x:auto;scrollbar-width:none}
-.cb-types::-webkit-scrollbar{display:none}
-.cb-type-pill{flex-shrink:0;padding:7px 15px;border-radius:20px;
-  border:1.5px solid rgba(255,255,255,.18);color:#bbb;font-size:.78rem;
-  cursor:pointer;background:transparent;transition:all .2s;
-  white-space:nowrap;font-weight:600}
-.cb-type-pill.active{background:#7c3aed;border-color:#7c3aed;color:#fff;
-  box-shadow:0 0 14px rgba(124,58,237,.5)}
-.cb-section-label{font-size:.7rem;color:#9ca3af;letter-spacing:.07em;
-  text-transform:uppercase;padding:0 16px 8px;display:block}
-.cb-emoji-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;padding:0 16px 16px}
-.cb-emoji-btn{font-size:1.5rem;background:rgba(255,255,255,.07);
-  border:1.5px solid transparent;border-radius:10px;padding:8px;
-  cursor:pointer;transition:all .15s;text-align:center}
-.cb-emoji-btn.selected{border-color:#7c3aed;background:rgba(124,58,237,.28);
-  transform:scale(1.12)}
-.cb-form{padding:0 16px;display:flex;flex-direction:column;gap:14px}
-.cb-field-label{font-size:.74rem;color:#9ca3af;margin-bottom:4px;display:block}
-.cb-input,.cb-textarea,.cb-select{width:100%;background:rgba(255,255,255,.08);
-  border:1.5px solid rgba(255,255,255,.14);border-radius:10px;color:#fff;
-  padding:11px 13px;font-size:.9rem;outline:none;box-sizing:border-box;
-  transition:border-color .2s;font-family:inherit}
-.cb-input:focus,.cb-textarea:focus,.cb-select:focus{border-color:#7c3aed}
-.cb-textarea{min-height:72px;resize:vertical}
-.cb-select option{background:#12122a}
-.cb-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.cb-points-row{display:flex;align-items:center;gap:10px;padding:0 16px;margin-bottom:4px}
-.cb-points-badge{display:inline-flex;align-items:center;gap:6px;
-  background:rgba(250,204,21,.12);border:1px solid rgba(250,204,21,.3);
-  border-radius:20px;padding:6px 15px;font-size:.82rem;color:#fbbf24;font-weight:700}
-.cb-points-note{font-size:.74rem;color:#6b7280}
-.cb-preview{margin:14px 16px 0;background:rgba(124,58,237,.1);
-  border:1.5px solid rgba(124,58,237,.28);border-radius:14px;padding:14px}
-.cb-preview-label{font-size:.68rem;color:#9ca3af;margin-bottom:10px;
-  letter-spacing:.07em;text-transform:uppercase}
-.cb-preview-card{display:flex;align-items:flex-start;gap:12px}
-.cb-preview-emoji{font-size:2.2rem;line-height:1}
-.cb-preview-info{flex:1;min-width:0}
-.cb-preview-title{font-size:1rem;color:#fff;font-weight:700;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.cb-preview-desc{font-size:.78rem;color:#9ca3af;margin-top:3px}
-.cb-preview-meta{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
-.cb-preview-tag{font-size:.71rem;padding:3px 10px;border-radius:10px;
-  background:rgba(255,255,255,.1);color:#d1d5db}
-.cb-preview-pts{font-size:.71rem;padding:3px 10px;border-radius:10px;
-  background:rgba(250,204,21,.15);color:#fbbf24}
-.cb-submit{margin:18px 16px 0;background:linear-gradient(135deg,#7c3aed,#6d28d9);
-  color:#fff;border:none;border-radius:12px;padding:15px;font-size:1rem;
-  font-weight:700;cursor:pointer;width:calc(100% - 32px);
-  transition:opacity .2s;display:block}
-.cb-submit:hover{opacity:.88}
-.cb-submit:disabled{opacity:.38;cursor:not-allowed}
-.cb-toast{position:fixed;bottom:110px;left:50%;transform:translateX(-50%);
-  background:#10b981;color:#fff;border-radius:10px;padding:11px 24px;
-  font-size:.9rem;font-weight:700;z-index:1300;opacity:0;
-  pointer-events:none;transition:opacity .3s;white-space:nowrap}
-.cb-toast.show{opacity:1}
-.team-challenge-card{background:rgba(255,255,255,.06);border-radius:14px;
-  padding:14px;margin-bottom:12px;border:1.5px solid rgba(255,255,255,.1)}
-.tc-header{display:flex;align-items:center;gap:10px;margin-bottom:8px}
-.tc-emoji{font-size:1.7rem}
-.tc-meta{flex:1;min-width:0}
-.tc-title{font-size:.96rem;color:#fff;font-weight:700}
-.tc-type-badge{font-size:.68rem;padding:2px 9px;border-radius:8px;
-  background:rgba(124,58,237,.3);color:#c4b5fd;margin-left:auto;
-  white-space:nowrap;flex-shrink:0}
-.tc-desc{font-size:.8rem;color:#9ca3af;margin-bottom:10px}
-.tc-tags{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
-.tc-tag{font-size:.71rem;padding:3px 10px;border-radius:10px;
-  background:rgba(255,255,255,.08);color:#d1d5db}
-.tc-pts{font-size:.71rem;padding:3px 10px;border-radius:10px;
-  background:rgba(250,204,21,.15);color:#fbbf24;font-weight:700}
-.tc-join-btn{width:100%;padding:10px;border-radius:10px;border:none;
-  font-size:.85rem;font-weight:700;cursor:pointer;transition:all .2s}
-.tc-join-btn.join{background:rgba(124,58,237,.3);color:#c4b5fd;
-  border:1px solid rgba(124,58,237,.4)}
-.tc-join-btn.join:hover{background:#7c3aed;color:#fff}
-.tc-join-btn.joined{background:rgba(16,185,129,.2);color:#6ee7b7;
-  border:1px solid rgba(16,185,129,.3);cursor:default}
-
-/* ╔══════════════════════════════╗
-   ║  LEADERBOARD STYLES         ║
-   ╚══════════════════════════════╝ */
-
-.lb-wrap{padding:0 16px 24px}
-.lb-tab-row{display:flex;gap:8px;margin-bottom:16px}
-.lb-tab{flex:1;padding:9px;border-radius:10px;
-  border:1.5px solid rgba(255,255,255,.15);background:transparent;
-  color:#9ca3af;font-size:.84rem;font-weight:700;cursor:pointer;
-  transition:all .2s;text-align:center}
-.lb-tab.active{background:#7c3aed;border-color:#7c3aed;color:#fff;
-  box-shadow:0 0 14px rgba(124,58,237,.4)}
-.lb-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px}
-.lb-stat{background:rgba(255,255,255,.06);border-radius:12px;padding:12px;text-align:center}
-.lb-stat-val{font-size:1.3rem;font-weight:800;color:#fff}
-.lb-stat-lbl{font-size:.68rem;color:#9ca3af;margin-top:2px}
-.lb-list{display:flex;flex-direction:column;gap:10px}
-.lb-row{display:flex;align-items:center;gap:12px;background:rgba(255,255,255,.06);
-  border-radius:14px;padding:12px 14px;border:1.5px solid rgba(255,255,255,.08);
-  transition:all .2s;cursor:pointer}
-.lb-row:hover{border-color:rgba(124,58,237,.4);background:rgba(124,58,237,.08)}
-.lb-row.top-1{border-color:rgba(250,204,21,.4);background:rgba(250,204,21,.07)}
-.lb-row.top-2{border-color:rgba(156,163,175,.35);background:rgba(156,163,175,.06)}
-.lb-row.top-3{border-color:rgba(180,83,9,.35);background:rgba(180,83,9,.06)}
-.lb-row.is-me{border-color:rgba(124,58,237,.55);background:rgba(124,58,237,.13)}
-.lb-rank{font-size:1.1rem;font-weight:900;min-width:28px;text-align:center}
-.lb-rank.r1{color:#facc15}
-.lb-rank.r2{color:#d1d5db}
-.lb-rank.r3{color:#b45309}
-.lb-rank.rn{color:#6b7280;font-size:.9rem}
-.lb-avatar{width:38px;height:38px;border-radius:50%;
-  background:linear-gradient(135deg,#7c3aed,#2563eb);
-  display:flex;align-items:center;justify-content:center;
-  font-size:.9rem;font-weight:800;color:#fff;flex-shrink:0}
-.lb-name-col{flex:1;min-width:0}
-.lb-name{font-size:.92rem;color:#fff;font-weight:700;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.lb-meta-row{display:flex;gap:6px;margin-top:3px;flex-wrap:wrap}
-.lb-badge{font-size:.64rem;padding:2px 8px;border-radius:8px;
-  background:rgba(255,255,255,.08);color:#9ca3af}
-.lb-challenge-badge{background:rgba(124,58,237,.2);color:#c4b5fd}
-.lb-streak-badge{background:rgba(249,115,22,.15);color:#fb923c}
-.lb-pts-col{text-align:right;flex-shrink:0}
-.lb-pts-total{font-size:1.1rem;font-weight:900;color:#facc15}
-.lb-pts-breakdown{font-size:.68rem;color:#6b7280;margin-top:2px;white-space:nowrap}
-.lb-history{display:none;padding:10px 14px 2px;
-  border-top:1px solid rgba(255,255,255,.08);margin-top:6px}
-.lb-history.open{display:block}
-.lb-history-item{display:flex;justify-content:space-between;align-items:center;
-  padding:5px 0;border-bottom:1px solid rgba(255,255,255,.05)}
-.lb-history-item:last-child{border-bottom:none}
-.lb-hi-reason{font-size:.76rem;color:#9ca3af}
-.lb-hi-pts{font-size:.76rem;color:#4ade80;font-weight:700}
-.lb-hi-date{font-size:.68rem;color:#4b5563}
-.lb-empty{text-align:center;padding:48px 20px;color:#6b7280}
-.lb-empty-icon{font-size:2.4rem;margin-bottom:10px}
-.lb-empty-title{color:#9ca3af;font-weight:600;margin-bottom:6px}
-.lb-empty-sub{font-size:.8rem}
-.lb-my-rank-card{background:rgba(124,58,237,.12);
-  border:1.5px solid rgba(124,58,237,.3);border-radius:14px;padding:14px;
-  margin-bottom:16px;display:flex;align-items:center;
-  justify-content:space-between;gap:12px}
-.lb-my-rank-left{display:flex;align-items:center;gap:10px}
-.lb-my-rank-label{font-size:.72rem;color:#a78bfa;font-weight:700;
-  letter-spacing:.05em;text-transform:uppercase}
-.lb-my-rank-num{font-size:1.6rem;font-weight:900;color:#fff}
-.lb-my-pts-label{font-size:.72rem;color:#a78bfa;font-weight:700;
-  letter-spacing:.05em;text-transform:uppercase;text-align:right}
-.lb-my-pts-num{font-size:1.6rem;font-weight:900;color:#facc15;text-align:right}
-.lb-legend{display:flex;align-items:center;gap:8px;margin-bottom:12px;
-  padding:10px 12px;background:rgba(250,204,21,.07);border-radius:10px;
-  border:1px solid rgba(250,204,21,.2)}
-.lb-legend-dot{width:10px;height:10px;border-radius:50%;background:#facc15;flex-shrink:0}
-.lb-legend-text{font-size:.76rem;color:#fbbf24}
-
-</style>
-
 <style>
 :root{--navy:#111111;--navy-light:#0A1A2F;--gold:#00E0FF;--gold-dark:#00B8D4;--green:#2ecc71;--white:#F5FAFF;--white-dim:#8899aa;--danger:#e74c3c;--warning:#f39c12;--card-bg:#0A1A2F;--border:rgba(0,224,255,0.12);--radius:12px;--shadow:0 4px 20px rgba(0,0,0,0.3)}
 *{box-sizing:border-box;margin:0;padding:0}
@@ -954,6 +266,182 @@ select option{background:var(--navy-light)}
 .demo-btn{background:rgba(0,224,255,0.08);border:1px solid rgba(0,224,255,0.2);border-radius:6px;color:var(--gold);font-size:11px;font-weight:600;padding:4px 10px;cursor:pointer}
 .demo-btn:hover{background:rgba(0,224,255,0.15)}
 
+
+/* === AOS PATCH CSS === */
+/* ╔══════════════════════════════╗
+   ║  CHALLENGE BUILDER STYLES   ║
+   ╚══════════════════════════════╝ */
+
+.cb-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1100;
+  opacity:0;pointer-events:none;transition:opacity .3s}
+.cb-overlay.open{opacity:1;pointer-events:all}
+.cb-sheet{position:fixed;left:0;right:0;bottom:0;background:#12122a;
+  border-radius:22px 22px 0 0;z-index:1101;padding:0 0 48px;
+  transform:translateY(100%);max-height:92vh;overflow-y:auto;
+  transition:transform .38s cubic-bezier(.32,1.25,.55,1)}
+.cb-sheet.open{transform:translateY(0)}
+.cb-handle{width:42px;height:5px;border-radius:3px;
+  background:rgba(255,255,255,.22);margin:14px auto 4px}
+.cb-header{display:flex;align-items:center;justify-content:space-between;
+  padding:10px 20px 14px}
+.cb-header h2{font-size:1.18rem;color:#fff;margin:0;font-weight:700}
+.cb-close-btn{background:rgba(255,255,255,.1);border:none;color:#fff;
+  width:34px;height:34px;border-radius:50%;font-size:1.1rem;cursor:pointer;
+  display:flex;align-items:center;justify-content:center}
+.cb-types{display:flex;gap:8px;padding:0 16px 16px;overflow-x:auto;scrollbar-width:none}
+.cb-types::-webkit-scrollbar{display:none}
+.cb-type-pill{flex-shrink:0;padding:7px 15px;border-radius:20px;
+  border:1.5px solid rgba(255,255,255,.18);color:#bbb;font-size:.78rem;
+  cursor:pointer;background:transparent;transition:all .2s;
+  white-space:nowrap;font-weight:600}
+.cb-type-pill.active{background:#7c3aed;border-color:#7c3aed;color:#fff;
+  box-shadow:0 0 14px rgba(124,58,237,.5)}
+.cb-section-label{font-size:.7rem;color:#9ca3af;letter-spacing:.07em;
+  text-transform:uppercase;padding:0 16px 8px;display:block}
+.cb-emoji-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;padding:0 16px 16px}
+.cb-emoji-btn{font-size:1.5rem;background:rgba(255,255,255,.07);
+  border:1.5px solid transparent;border-radius:10px;padding:8px;
+  cursor:pointer;transition:all .15s;text-align:center}
+.cb-emoji-btn.selected{border-color:#7c3aed;background:rgba(124,58,237,.28);
+  transform:scale(1.12)}
+.cb-form{padding:0 16px;display:flex;flex-direction:column;gap:14px}
+.cb-field-label{font-size:.74rem;color:#9ca3af;margin-bottom:4px;display:block}
+.cb-input,.cb-textarea,.cb-select{width:100%;background:rgba(255,255,255,.08);
+  border:1.5px solid rgba(255,255,255,.14);border-radius:10px;color:#fff;
+  padding:11px 13px;font-size:.9rem;outline:none;box-sizing:border-box;
+  transition:border-color .2s;font-family:inherit}
+.cb-input:focus,.cb-textarea:focus,.cb-select:focus{border-color:#7c3aed}
+.cb-textarea{min-height:72px;resize:vertical}
+.cb-select option{background:#12122a}
+.cb-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.cb-points-row{display:flex;align-items:center;gap:10px;padding:0 16px;margin-bottom:4px}
+.cb-points-badge{display:inline-flex;align-items:center;gap:6px;
+  background:rgba(250,204,21,.12);border:1px solid rgba(250,204,21,.3);
+  border-radius:20px;padding:6px 15px;font-size:.82rem;color:#fbbf24;font-weight:700}
+.cb-points-note{font-size:.74rem;color:#6b7280}
+.cb-preview{margin:14px 16px 0;background:rgba(124,58,237,.1);
+  border:1.5px solid rgba(124,58,237,.28);border-radius:14px;padding:14px}
+.cb-preview-label{font-size:.68rem;color:#9ca3af;margin-bottom:10px;
+  letter-spacing:.07em;text-transform:uppercase}
+.cb-preview-card{display:flex;align-items:flex-start;gap:12px}
+.cb-preview-emoji{font-size:2.2rem;line-height:1}
+.cb-preview-info{flex:1;min-width:0}
+.cb-preview-title{font-size:1rem;color:#fff;font-weight:700;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cb-preview-desc{font-size:.78rem;color:#9ca3af;margin-top:3px}
+.cb-preview-meta{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.cb-preview-tag{font-size:.71rem;padding:3px 10px;border-radius:10px;
+  background:rgba(255,255,255,.1);color:#d1d5db}
+.cb-preview-pts{font-size:.71rem;padding:3px 10px;border-radius:10px;
+  background:rgba(250,204,21,.15);color:#fbbf24}
+.cb-submit{margin:18px 16px 0;background:linear-gradient(135deg,#7c3aed,#6d28d9);
+  color:#fff;border:none;border-radius:12px;padding:15px;font-size:1rem;
+  font-weight:700;cursor:pointer;width:calc(100% - 32px);
+  transition:opacity .2s;display:block}
+.cb-submit:hover{opacity:.88}
+.cb-submit:disabled{opacity:.38;cursor:not-allowed}
+.cb-toast{position:fixed;bottom:110px;left:50%;transform:translateX(-50%);
+  background:#10b981;color:#fff;border-radius:10px;padding:11px 24px;
+  font-size:.9rem;font-weight:700;z-index:1300;opacity:0;
+  pointer-events:none;transition:opacity .3s;white-space:nowrap}
+.cb-toast.show{opacity:1}
+.team-challenge-card{background:rgba(255,255,255,.06);border-radius:14px;
+  padding:14px;margin-bottom:12px;border:1.5px solid rgba(255,255,255,.1)}
+.tc-header{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.tc-emoji{font-size:1.7rem}
+.tc-meta{flex:1;min-width:0}
+.tc-title{font-size:.96rem;color:#fff;font-weight:700}
+.tc-type-badge{font-size:.68rem;padding:2px 9px;border-radius:8px;
+  background:rgba(124,58,237,.3);color:#c4b5fd;margin-left:auto;
+  white-space:nowrap;flex-shrink:0}
+.tc-desc{font-size:.8rem;color:#9ca3af;margin-bottom:10px}
+.tc-tags{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.tc-tag{font-size:.71rem;padding:3px 10px;border-radius:10px;
+  background:rgba(255,255,255,.08);color:#d1d5db}
+.tc-pts{font-size:.71rem;padding:3px 10px;border-radius:10px;
+  background:rgba(250,204,21,.15);color:#fbbf24;font-weight:700}
+.tc-join-btn{width:100%;padding:10px;border-radius:10px;border:none;
+  font-size:.85rem;font-weight:700;cursor:pointer;transition:all .2s}
+.tc-join-btn.join{background:rgba(124,58,237,.3);color:#c4b5fd;
+  border:1px solid rgba(124,58,237,.4)}
+.tc-join-btn.join:hover{background:#7c3aed;color:#fff}
+.tc-join-btn.joined{background:rgba(16,185,129,.2);color:#6ee7b7;
+  border:1px solid rgba(16,185,129,.3);cursor:default}
+
+/* ╔══════════════════════════════╗
+   ║  LEADERBOARD STYLES         ║
+   ╚══════════════════════════════╝ */
+
+.lb-wrap{padding:0 16px 24px}
+.lb-tab-row{display:flex;gap:8px;margin-bottom:16px}
+.lb-tab{flex:1;padding:9px;border-radius:10px;
+  border:1.5px solid rgba(255,255,255,.15);background:transparent;
+  color:#9ca3af;font-size:.84rem;font-weight:700;cursor:pointer;
+  transition:all .2s;text-align:center}
+.lb-tab.active{background:#7c3aed;border-color:#7c3aed;color:#fff;
+  box-shadow:0 0 14px rgba(124,58,237,.4)}
+.lb-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px}
+.lb-stat{background:rgba(255,255,255,.06);border-radius:12px;padding:12px;text-align:center}
+.lb-stat-val{font-size:1.3rem;font-weight:800;color:#fff}
+.lb-stat-lbl{font-size:.68rem;color:#9ca3af;margin-top:2px}
+.lb-list{display:flex;flex-direction:column;gap:10px}
+.lb-row{display:flex;align-items:center;gap:12px;background:rgba(255,255,255,.06);
+  border-radius:14px;padding:12px 14px;border:1.5px solid rgba(255,255,255,.08);
+  transition:all .2s;cursor:pointer}
+.lb-row:hover{border-color:rgba(124,58,237,.4);background:rgba(124,58,237,.08)}
+.lb-row.top-1{border-color:rgba(250,204,21,.4);background:rgba(250,204,21,.07)}
+.lb-row.top-2{border-color:rgba(156,163,175,.35);background:rgba(156,163,175,.06)}
+.lb-row.top-3{border-color:rgba(180,83,9,.35);background:rgba(180,83,9,.06)}
+.lb-row.is-me{border-color:rgba(124,58,237,.55);background:rgba(124,58,237,.13)}
+.lb-rank{font-size:1.1rem;font-weight:900;min-width:28px;text-align:center}
+.lb-rank.r1{color:#facc15}
+.lb-rank.r2{color:#d1d5db}
+.lb-rank.r3{color:#b45309}
+.lb-rank.rn{color:#6b7280;font-size:.9rem}
+.lb-avatar{width:38px;height:38px;border-radius:50%;
+  background:linear-gradient(135deg,#7c3aed,#2563eb);
+  display:flex;align-items:center;justify-content:center;
+  font-size:.9rem;font-weight:800;color:#fff;flex-shrink:0}
+.lb-name-col{flex:1;min-width:0}
+.lb-name{font-size:.92rem;color:#fff;font-weight:700;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lb-meta-row{display:flex;gap:6px;margin-top:3px;flex-wrap:wrap}
+.lb-badge{font-size:.64rem;padding:2px 8px;border-radius:8px;
+  background:rgba(255,255,255,.08);color:#9ca3af}
+.lb-challenge-badge{background:rgba(124,58,237,.2);color:#c4b5fd}
+.lb-streak-badge{background:rgba(249,115,22,.15);color:#fb923c}
+.lb-pts-col{text-align:right;flex-shrink:0}
+.lb-pts-total{font-size:1.1rem;font-weight:900;color:#facc15}
+.lb-pts-breakdown{font-size:.68rem;color:#6b7280;margin-top:2px;white-space:nowrap}
+.lb-history{display:none;padding:10px 14px 2px;
+  border-top:1px solid rgba(255,255,255,.08);margin-top:6px}
+.lb-history.open{display:block}
+.lb-history-item{display:flex;justify-content:space-between;align-items:center;
+  padding:5px 0;border-bottom:1px solid rgba(255,255,255,.05)}
+.lb-history-item:last-child{border-bottom:none}
+.lb-hi-reason{font-size:.76rem;color:#9ca3af}
+.lb-hi-pts{font-size:.76rem;color:#4ade80;font-weight:700}
+.lb-hi-date{font-size:.68rem;color:#4b5563}
+.lb-empty{text-align:center;padding:48px 20px;color:#6b7280}
+.lb-empty-icon{font-size:2.4rem;margin-bottom:10px}
+.lb-empty-title{color:#9ca3af;font-weight:600;margin-bottom:6px}
+.lb-empty-sub{font-size:.8rem}
+.lb-my-rank-card{background:rgba(124,58,237,.12);
+  border:1.5px solid rgba(124,58,237,.3);border-radius:14px;padding:14px;
+  margin-bottom:16px;display:flex;align-items:center;
+  justify-content:space-between;gap:12px}
+.lb-my-rank-left{display:flex;align-items:center;gap:10px}
+.lb-my-rank-label{font-size:.72rem;color:#a78bfa;font-weight:700;
+  letter-spacing:.05em;text-transform:uppercase}
+.lb-my-rank-num{font-size:1.6rem;font-weight:900;color:#fff}
+.lb-my-pts-label{font-size:.72rem;color:#a78bfa;font-weight:700;
+  letter-spacing:.05em;text-transform:uppercase;text-align:right}
+.lb-my-pts-num{font-size:1.6rem;font-weight:900;color:#facc15;text-align:right}
+.lb-legend{display:flex;align-items:center;gap:8px;margin-bottom:12px;
+  padding:10px 12px;background:rgba(250,204,21,.07);border-radius:10px;
+  border:1px solid rgba(250,204,21,.2)}
+.lb-legend-dot{width:10px;height:10px;border-radius:50%;background:#facc15;flex-shrink:0}
+.lb-legend-text{font-size:.76rem;color:#fbbf24}
 </style>
 
 <meta name="theme-color" content="#111111">
@@ -1098,27 +586,7 @@ var AppSDK = {
       <div class="auth-switch">
         Already have an account? <button class="auth-link" id="go-signin-btn">Sign In</button>
       </div>
-    </div>
-      <div class="auth-title">Welcome Back</div>
-      <div class="auth-subtitle">Sign in or create your AOS account</div>
-      <button class="btn btn-primary" style="width:100%;margin-top:8px;font-size:15px" id="ni-signin-btn-b">&#128274; Sign In</button>
-      <button class="btn" style="width:100%;margin-top:8px;font-size:15px;background:rgba(0,224,255,0.1);border:1px solid var(--gold);color:var(--gold)" id="ni-signup-btn-b">&#9997;&#65039; Create Account</button>
-
-      <div class="auth-demo">
-        <div class="auth-demo-title">&#9654; Quick Demo Login</div>
-        <div class="demo-btns">
-          <button class="demo-btn" data-demo="player">&#9918; Player</button>
-          <button class="demo-btn" data-demo="coach">&#128104;&#8205;&#127979; Coach</button>
-          <button class="demo-btn" data-demo="trainer">&#127947;&#65039; Trainer</button>
-          <button class="demo-btn" data-demo="org">&#127962; Org</button>
-          <button class="demo-btn" data-demo="parent">&#128104;&#8205;&#128105;&#8205;&#128103; Parent</button>
-        </div>
-      </div>
-    </div>
-
-  </div>
-
-  <!-- ── POST-LOGIN ROLE SETUP OVERLAY (new users only) ───────── -->
+<!-- ── POST-LOGIN ROLE SETUP OVERLAY (new users only) ───────── -->
   <div id="ni-role-setup" style="display:none;position:fixed;top:0;right:0;bottom:0;left:0;z-index:10001;background:rgba(11,11,17,0.93);align-items:center;justify-content:center;padding:24px">
     <div style="background:var(--card-bg);border:1px solid var(--border);border-radius:16px;padding:24px;width:100%;max-width:380px">
       <div class="auth-title">One Last Step</div>
@@ -1171,14 +639,18 @@ var AppSDK = {
 <div data-id="29" id="sec-reports" class="section"></div>
 <div data-id="30" id="sec-nutrition" class="section"></div>
 <div data-id="31" id="sec-tasks" class="section"></div>
-  <div id="sec-challenges" class="section"></div>
+  <div id="sec-challenges" class="section">
+  <div style="padding:12px 16px 4px;display:flex;justify-content:flex-end">
+    <button class="btn btn-primary" style="font-size:13px;padding:8px 16px" onclick="if(typeof openChallengeBuilder==='function')openChallengeBuilder()">&#43; Build Challenge</button>
+  </div>
+  <div id="teamChallengesContainer"></div>
+</div>
 <div data-id="32" id="sec-coach" class="section"></div>
 <div data-id="33" id="sec-org" class="section"></div>
 <div data-id="34" id="sec-admin" class="section"></div>
 <div data-id="35" id="sec-profile" class="section"></div>
 <div data-id="36" id="sec-trainer" class="section"></div>
-<div class="section" id="sec-leaderboard">
-  <div class="lb-wrap" id="leaderboardRoot">
+<div class="lb-wrap" id="leaderboardRoot">
   <div class="lb-tab-row">
     <button class="lb-tab active" id="lbTabIndividual" onclick="switchLbTab('individual')">👤 Individual</button>
     <button class="lb-tab"        id="lbTabTeam"       onclick="switchLbTab('team')">👥 Team</button>
@@ -1205,10 +677,6 @@ var AppSDK = {
     <div class="lb-legend-text">🏆 Challenge points merge with base scores and update live</div>
   </div>
   <div class="lb-list" id="lbList"></div>
-  <div id="teamChallengesContainer"></div>
-
-</div>
-
 </div>
 <div class="section" id="sec-referral"></div>
 <div class="section" id="sec-subscription"></div>
@@ -3029,6 +2497,7 @@ function renderHome(){
   el.querySelectorAll('.home-nav-btn').forEach(function(btn){
     btn.addEventListener('click',function(){navigateTo(this.getAttribute('data-hnav'));});
   });
+  if(typeof renderLeaderboard==='function') setTimeout(renderLeaderboard,50);
 }
 
 function escH(s){if(!s)return '';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
@@ -3234,7 +2703,7 @@ var teamTab='info';
 var teamTab='challenges';
 
 // ── CHALLENGE BUILDER ────────────────────────────────────────────────────────
-function openChallengeBuilder(existingChs){
+function _legacyOpenChallengeBuilder(existingChs){
   var existing=existingChs||[];
   // Remove any existing modal
   var old=document.getElementById('ch-builder-modal');if(old)old.remove();
@@ -3853,21 +3322,7 @@ function renderTeam(){
           pc2=pc2||[];
 
           if(tab==='challenges'){
-            tb.innerHTML='<div style="font-size:11px;color:#8899aa;margin-bottom:12px">&#127942; Compete with your teammates. Tap any challenge to join.</div>'+
-              chs.map(function(c){
-                var joined=(c.participants||[]).indexOf(me)>=0;
-                var pct=c.progress&&c.target?Math.round(c.progress/c.target*100):0;
-                return '<div class="card" style="margin-bottom:10px">'+
-                  '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'+
-                    '<span style="font-size:28px">'+c.emoji+'</span>'+
-                    '<div style="flex:1"><div style="font-weight:800;color:#F5FAFF">'+escH(c.title)+'</div>'+
-                    '<div style="font-size:11px;color:#8899aa">'+escH(c.desc)+'</div></div>'+
-                    '<span style="font-size:9px;background:rgba(46,204,113,0.12);color:#2ecc71;border-radius:6px;padding:3px 8px;white-space:nowrap">Ends '+c.end+'</span>'+
-                  '</div>'+
-                  (c.progress!==undefined?'<div style="height:6px;background:rgba(255,255,255,0.08);border-radius:3px;margin-bottom:8px"><div style="height:100%;width:'+pct+'%;background:#00E0FF;border-radius:3px"></div></div><div style="font-size:10px;color:#8899aa;margin-bottom:8px">'+c.progress+' / '+c.target+' sessions ('+pct+'%)</div>':'')+
-                  '<button class="btn'+(joined?' btn-primary':'')+' btn-full" style="font-size:12px" onclick="'+(joined?'showToast(&quot;Already joined! &#9989;&quot;)':'aosTmJoin(&quot;'+escH(c.id||c.title)+'&quot;)')+'">'+(joined?'<span style="color:#74b9ff;font-weight:800">&#10003; Joined</span>':'Join Challenge')+'</button>'+
-                '</div>';
-              }).join('');
+            if(typeof renderTeamChallenges==='function') renderTeamChallenges();
           }
           else if(tab==='feed'){
             tb.innerHTML='<div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">'+
@@ -6427,7 +5882,6 @@ var AOS_AUTH = {
   demoLogin: function(roleKey){
     var demo = this.DEMO_ACCOUNTS[roleKey];
     if(!demo) return;
-    AOS_DemoLogin(rolekey);
     this.enterApp({
       userId: this.genId(roleKey),
       name:   demo.name,
@@ -6588,7 +6042,6 @@ var AOS_AUTH = {
           if(errEl){errEl.textContent='Incorrect password. Try again.';errEl.classList.add('show');} return;
         }
       }
-      AOS_EmailLogin(acct.email, acct.name, acct.role || 'player');
       AOS_AUTH.enterApp({userId:acct.userId,name:acct.name||email.split('@')[0],email:email,role:acct.role||'player',orgCode:acct.orgCode||'ORG-0001',dob:acct.dob||''});
     });
   },
@@ -6813,7 +6266,6 @@ var AOS_AUTH = {
     if(typeof netlifyIdentity !== 'undefined'){
       netlifyIdentity.on('login', function(user){
         netlifyIdentity.close();
-        AOS_EmailLogin(user.email, user.user_metadata.full_name, 'player');
         self.handleNIUser(user);
       });
       netlifyIdentity.on('logout', function(){
@@ -6857,12 +6309,11 @@ setTimeout(function(){
 },4000);
 
 /* ── Expose logout globally ───────────────────────────────────────── */
-function logout(){ 
-  AOS_Auth.logout();
-  AOS_AUTH.logout();
- }
+function logout(){ AOS_AUTH.logout(); }
 
 </script>
+
+
 
 
 
@@ -6938,7 +6389,514 @@ function logout(){
 </div>
 
 <div class="cb-toast" id="cbToast">✅ Challenge launched! Team can join now.</div>
-<button onclick="openChallengeBuilder()">🏁 Create Challenge</button>
-<div id="teamChallengesContainer"></div>
+
+<script id="AOS_PATCH_JS">
+/* ══════════════════════════════════════════════════════════════
+   1. AOS AUTH MANAGER  (loads first — all other modules depend on this)
+   ══════════════════════════════════════════════════════════════ */
+(function(){
+
+  window.AOS_Auth = {
+    login: function(profile){
+      if(!profile || !profile.id){ console.warn('AOS_Auth.login: profile.id required'); return; }
+      profile.role      = (profile.role || 'player').toLowerCase();
+      profile.avatar    = profile.avatar || _initials(profile.name || profile.id);
+      profile.baseScore = profile.baseScore || 0;
+      profile.streak    = profile.streak    || 0;
+      localStorage.setItem('aos_current_user',    profile.id);
+      localStorage.setItem('aos_current_role',    profile.role);
+      localStorage.setItem('aos_current_profile', JSON.stringify(profile));
+      AOS_Auth._registerAthlete(profile);
+      AOS_Auth._refreshAll();
+      console.log('[AOS_Auth] Logged in:', profile.id, '(' + profile.role + ')');
+    },
+    logout: function(){
+      ['aos_current_user','aos_current_role','aos_current_profile']
+        .forEach(k => localStorage.removeItem(k));
+      AOS_Auth._refreshAll();
+    },
+    getUserId:  function(){ return localStorage.getItem('aos_current_user') || null; },
+    getRole:    function(){ return localStorage.getItem('aos_current_role') || 'player'; },
+    getProfile: function(){
+      try{ return JSON.parse(localStorage.getItem('aos_current_profile') || 'null'); }
+      catch(e){ return null; }
+    },
+    getRegistry: function(){
+      try{ return JSON.parse(localStorage.getItem('aos_athlete_registry') || '[]'); }
+      catch(e){ return []; }
+    },
+    _registerAthlete: function(profile){
+      const reg = AOS_Auth.getRegistry();
+      const idx = reg.findIndex(a => a.id === profile.id);
+      if(idx >= 0){
+        reg[idx] = { ...reg[idx], ...profile,
+          baseScore: Math.max(reg[idx].baseScore || 0, profile.baseScore || 0) };
+      } else {
+        reg.push(profile);
+      }
+      localStorage.setItem('aos_athlete_registry', JSON.stringify(reg));
+    },
+    _refreshAll: function(){
+      if(typeof renderLeaderboard    === 'function') renderLeaderboard();
+      if(typeof renderTeamChallenges === 'function') renderTeamChallenges();
+    }
+  };
+
+  /* Demo profiles — update names/scores to match your real data */
+  const DEMO_PROFILES = {
+    player : { id:'player_0',  name:'Demo Player',   role:'player',  pos:'P',  avatar:'DP', baseScore:200, streak:3 },
+    coach  : { id:'coach_0',   name:'Coach Martinez', role:'coach',  pos:null, avatar:'CM', baseScore:0,   streak:0 },
+    trainer: { id:'trainer_0', name:'Demo Trainer',   role:'trainer',pos:null, avatar:'DT', baseScore:0,   streak:0 },
+    org    : { id:'org_0',     name:'Demo Org',       role:'org',    pos:null, avatar:'DO', baseScore:0,   streak:0 },
+    parent : { id:'parent_0',  name:'Demo Parent',    role:'parent', pos:null, avatar:'DP', baseScore:0,   streak:0 }
+  };
+
+  window.AOS_DemoLogin = function(role){
+    const profile = DEMO_PROFILES[(role||'').toLowerCase()];
+    if(!profile){ console.warn('AOS_DemoLogin: unknown role', role); return; }
+    AOS_Auth.login(profile);
+  };
+
+  window.AOS_EmailLogin = function(email, name, role){
+    const safeEmail = email.toLowerCase().replace(/[^a-z0-9]/g,'_');
+    const id        = (role || 'player') + '_' + safeEmail;
+    const reg       = AOS_Auth.getRegistry();
+    const existing  = reg.find(a => a.email === email.toLowerCase());
+    const profile   = existing || {
+      id, name: name || email.split('@')[0], email: email.toLowerCase(),
+      role: role || 'player', pos: null,
+      avatar: _initials(name || email), baseScore: 0, streak: 0
+    };
+    AOS_Auth.login(profile);
+    return profile;
+  };
+
+  /* Restore session on every page load */
+  document.addEventListener('DOMContentLoaded', function(){
+    if(localStorage.getItem('aos_current_user')){
+      AOS_Auth._refreshAll();
+    }
+  });
+
+  function _initials(name){
+    if(!name) return '??';
+    return name.trim().split(/\s+/).map(w=>w[0]||'').join('').toUpperCase().slice(0,2);
+  }
+
+})();
+
+
+/* ══════════════════════════════════════════════════════════════
+   2. DYNAMIC ROSTER + LEADERBOARD MERGE ENGINE
+   ══════════════════════════════════════════════════════════════ */
+(function(){
+
+  /* ── Seed roster — update these with your real athletes ── */
+  const SEED_ROSTER = [
+    { id:'player_1',  name:'Avery Johnson',  pos:'P',  baseScore:420, streak:12, avatar:'AJ' },
+    { id:'player_2',  name:'Jordan Cruz',    pos:'C',  baseScore:390, streak:11, avatar:'JC' },
+    { id:'player_3',  name:'Casey Morales',  pos:'2B', baseScore:370, streak:10, avatar:'CM' },
+    { id:'player_4',  name:'Drew Martinez',  pos:'CF', baseScore:360, streak:13, avatar:'DM' },
+    { id:'player_5',  name:'Riley Thompson', pos:'SS', baseScore:340, streak:9,  avatar:'RT' },
+    { id:'player_6',  name:'Morgan Lee',     pos:'1B', baseScore:320, streak:8,  avatar:'ML' },
+    { id:'player_7',  name:'Taylor Brooks',  pos:'LF', baseScore:310, streak:7,  avatar:'TB' },
+    { id:'player_8',  name:'Jamie Wilson',   pos:'3B', baseScore:295, streak:6,  avatar:'JW' },
+    { id:'player_9',  name:'Alex Rivera',    pos:'RF', baseScore:280, streak:9,  avatar:'AR' },
+    { id:'player_10', name:'Sam Davis',      pos:'DH', baseScore:260, streak:5,  avatar:'SD' },
+  ];
+
+  window.getDynamicRoster = function(){
+    const registry  = (window.AOS_Auth && AOS_Auth.getRegistry()) || [];
+    const rosterMap = {};
+    SEED_ROSTER.forEach(a => { rosterMap[a.id] = { ...a }; });
+    registry.forEach(reg => {
+      if(reg.role && reg.role !== 'player') return;
+      if(rosterMap[reg.id]){
+        rosterMap[reg.id] = {
+          ...rosterMap[reg.id],
+          name     : reg.name      || rosterMap[reg.id].name,
+          avatar   : reg.avatar    || rosterMap[reg.id].avatar,
+          pos      : reg.pos       || rosterMap[reg.id].pos,
+          streak   : Math.max(reg.streak    || 0, rosterMap[reg.id].streak    || 0),
+          baseScore: Math.max(reg.baseScore || 0, rosterMap[reg.id].baseScore || 0)
+        };
+      } else {
+        rosterMap[reg.id] = {
+          id: reg.id, name: reg.name || 'Athlete',
+          pos: reg.pos || null, avatar: reg.avatar || '??',
+          baseScore: reg.baseScore || 0, streak: reg.streak || 0
+        };
+      }
+    });
+    return Object.values(rosterMap);
+  };
+
+  window.getMergedLeaderboard = function(){
+    const roster         = getDynamicRoster();
+    const challengePts   = JSON.parse(localStorage.getItem('aos_leaderboard')      || '{}');
+    const teamChallenges = JSON.parse(localStorage.getItem('aos_team_challenges')  || '[]');
+    const merged = roster.map(athlete => {
+      const cp  = challengePts[athlete.id] || { points:0, history:[] };
+      const cPts = cp.points || 0;
+      return {
+        ...athlete,
+        challengePts       : cPts,
+        totalScore         : (athlete.baseScore || 0) + cPts,
+        history            : cp.history || [],
+        challengesCompleted: teamChallenges.filter(ch => ch.completedBy && (ch.completedBy||[]).includes(athlete.id)).length,
+        challengesJoined   : teamChallenges.filter(ch => ch.joinedBy    && (ch.joinedBy||[]).includes(athlete.id)).length
+      };
+    });
+    merged.sort((a,b) => b.totalScore - a.totalScore);
+    let rank = 1;
+    merged.forEach((a,i) => {
+      a.rank = (i > 0 && merged[i].totalScore === merged[i-1].totalScore) ? merged[i-1].rank : rank;
+      rank++;
+    });
+    return merged;
+  };
+
+  /* Score sync utility */
+  window.AOS_Auth_SyncScore = function(playerId, metrics){
+    if(!playerId || !metrics) return;
+    const score = Math.round(
+      (metrics.readinessScore || 0) * 20 +
+      (metrics.trainingStreak || 0) * 10 +
+      (metrics.sessionsLogged || 0) *  5 +
+      (metrics.goalsCompleted || 0) * 25
+    );
+    const reg = (window.AOS_Auth && AOS_Auth.getRegistry()) || [];
+    const idx = reg.findIndex(a => a.id === playerId);
+    if(idx >= 0){
+      reg[idx].baseScore = Math.max(reg[idx].baseScore || 0, score);
+      reg[idx].streak    = metrics.trainingStreak || reg[idx].streak || 0;
+      localStorage.setItem('aos_athlete_registry', JSON.stringify(reg));
+    }
+    if(typeof renderLeaderboard === 'function') renderLeaderboard();
+  };
+
+  /* Team aggregate for Team tab */
+  function getTeamLeaderboard(){
+    const merged   = getMergedLeaderboard();
+    const totalPts = merged.reduce((s,a)=>s+a.totalScore,0);
+    const totalCh  = merged.reduce((s,a)=>s+a.challengesCompleted,0);
+    return [{
+      id:'team_aos', name:'AOS Softball', avatar:'🥎', isTeam:true, rank:1,
+      totalScore : totalPts,
+      avgScore   : Math.round(totalPts / (merged.length||1)),
+      challengesCompleted: totalCh,
+      topStreak  : Math.max(...merged.map(a=>a.streak), 0),
+      members    : merged.length
+    }];
+  }
+
+  let _lbTab = 'individual';
+
+  window.switchLbTab = function(tab){
+    _lbTab = tab;
+    document.getElementById('lbTabIndividual').classList.toggle('active', tab==='individual');
+    document.getElementById('lbTabTeam').classList.toggle('active', tab==='team');
+    renderLeaderboard();
+  };
+
+  window.renderLeaderboard = function(){
+    const list = document.getElementById('lbList');
+    if(!list) return;
+    const currentUser    = (window.AOS_Auth && AOS_Auth.getUserId()) || 'player_0';
+    const allMerged      = getMergedLeaderboard();
+    const challenges     = JSON.parse(localStorage.getItem('aos_team_challenges')||'[]');
+    const totalChalPts   = allMerged.reduce((s,a)=>s+a.challengePts,0);
+    const data           = _lbTab === 'team' ? getTeamLeaderboard() : allMerged;
+
+    _setText('lbStatPlayers',    allMerged.length);
+    _setText('lbStatChallenges', challenges.length);
+    _setText('lbStatPtsPool',    totalChalPts + ' pts');
+
+    const myRankCard = document.getElementById('lbMyRankCard');
+    if(_lbTab === 'individual'){
+      const me = allMerged.find(a => a.id === currentUser);
+      if(me){
+        _setText('lbMyRankNum', '#' + me.rank);
+        _setText('lbMyPtsNum',  me.totalScore + ' pts');
+        if(myRankCard) myRankCard.style.display = 'flex';
+      }
+    } else {
+      if(myRankCard) myRankCard.style.display = 'none';
+    }
+
+    if(!data.length){
+      list.innerHTML = `<div class="lb-empty"><div class="lb-empty-icon">🏆</div>
+        <div class="lb-empty-title">No athletes yet</div>
+        <div class="lb-empty-sub">Complete challenges to earn points!</div></div>`;
+      return;
+    }
+
+    list.innerHTML = data.map(athlete => {
+      const isMe      = athlete.id === currentUser;
+      const rank      = athlete.rank || 1;
+      const medal     = rank===1?'🥇':rank===2?'🥈':rank===3?'🥉':'#'+rank;
+      const rankClass = rank===1?'r1':rank===2?'r2':rank===3?'r3':'rn';
+      const rowCls    = [rank<=3?'top-'+rank:'', isMe?'is-me':''].filter(Boolean).join(' ');
+      const breakdown = athlete.isTeam
+        ? `${athlete.members} athletes · ${athlete.challengesCompleted} challenges`
+        : `Base: ${athlete.baseScore} pts${athlete.challengePts>0?' + '+athlete.challengePts+' challenge pts':''}`;
+      const badges = athlete.isTeam
+        ? `<span class="lb-badge">⭐ Avg ${athlete.avgScore} pts</span>
+           <span class="lb-badge lb-streak-badge">🔥 Top streak ${athlete.topStreak}d</span>`
+        : `${athlete.challengesCompleted>0?`<span class="lb-badge lb-challenge-badge">🏆 ${athlete.challengesCompleted} challenge${athlete.challengesCompleted>1?'s':''}</span>`:''}
+           ${athlete.streak>0?`<span class="lb-badge lb-streak-badge">🔥 ${athlete.streak}d streak</span>`:''}
+           ${isMe?`<span class="lb-badge" style="background:rgba(124,58,237,.25);color:#c4b5fd">You</span>`:''}`;
+      const historyHTML = athlete.history && athlete.history.length
+        ? athlete.history.slice(0,8).map(h=>{
+            const ds = new Date(h.date).toLocaleDateString('en-US',{month:'short',day:'numeric'});
+            return `<div class="lb-history-item">
+              <span class="lb-hi-reason">🏅 ${h.reason}</span>
+              <span class="lb-hi-date">${ds}</span>
+              <span class="lb-hi-pts">+${h.points} pts</span></div>`;
+          }).join('')
+        : `<div style="font-size:.76rem;color:#6b7280;padding:4px 0">No challenge history yet</div>`;
+      const histSection = !athlete.isTeam
+        ? `<div class="lb-history" id="hist_${athlete.id}">
+             <div style="font-size:.7rem;color:#9ca3af;margin-bottom:6px;text-transform:uppercase;letter-spacing:.07em">Challenge History</div>
+             ${historyHTML}</div>` : '';
+
+      return `<div>
+        <div class="lb-row ${rowCls}" onclick="${!athlete.isTeam?`toggleHistory('${athlete.id}')`:''}" >
+          <div class="lb-rank ${rankClass}">${medal}</div>
+          <div class="lb-avatar">${athlete.avatar||athlete.name.charAt(0)}</div>
+          <div class="lb-name-col">
+            <div class="lb-name">${athlete.name}${athlete.pos?` <span style="color:#6b7280;font-size:.75rem;font-weight:400">${athlete.pos}</span>`:''}</div>
+            <div class="lb-meta-row">${badges}</div>
+          </div>
+          <div class="lb-pts-col">
+            <div class="lb-pts-total">${athlete.totalScore.toLocaleString()}</div>
+            <div class="lb-pts-breakdown">${breakdown}</div>
+          </div>
+        </div>${histSection}</div>`;
+    }).join('');
+  };
+
+  window.toggleHistory = function(id){
+    const el = document.getElementById('hist_'+id);
+    if(el) el.classList.toggle('open');
+  };
+
+  function _setText(id, val){
+    const el = document.getElementById(id);
+    if(el) el.textContent = val;
+  }
+
+  document.addEventListener('DOMContentLoaded', renderLeaderboard);
+
+})();
+
+
+/* ══════════════════════════════════════════════════════════════
+   3. CHALLENGE BUILDER ENGINE
+   ══════════════════════════════════════════════════════════════ */
+(function(){
+
+  const CB = {
+    type : 'Streak', emoji : '🔥',
+    emojis : ['🔥','💧','🏋️','💚','👥','⭐','🎯','⚡','🏆','💪','🥇','🎽','🧠','🚀','❤️'],
+    targetLabels : {
+      Streak:'Target (days)', Hydration:'Target (oz/day)',
+      Training:'Target (sessions)', Recovery:'Target (days)',
+      Group:'Target (members)', Custom:'Target value'
+    }
+  };
+
+  function buildEmojiGrid(){
+    const grid = document.getElementById('cbEmojiGrid');
+    if(!grid) return;
+    grid.innerHTML = CB.emojis.map((e,i)=>
+      `<button class="cb-emoji-btn${i===0?' selected':''}" onclick="selectEmoji(this,'${e}')">${e}</button>`
+    ).join('');
+  }
+
+  window.openChallengeBuilder = function(){
+    buildEmojiGrid(); updatePreview(); setMinDate();
+    document.getElementById('cbOverlay').classList.add('open');
+    document.getElementById('cbSheet').classList.add('open');
+    document.body.style.overflow = 'hidden';
+  };
+  window.closeChallengeBuilder = function(){
+    document.getElementById('cbOverlay').classList.remove('open');
+    document.getElementById('cbSheet').classList.remove('open');
+    document.body.style.overflow = '';
+  };
+
+  function setMinDate(){
+    const d = document.getElementById('cbEndDate');
+    if(d) d.min = new Date().toISOString().split('T')[0];
+  }
+
+  window.selectType = function(btn){
+    document.querySelectorAll('.cb-type-pill').forEach(p=>p.classList.remove('active'));
+    btn.classList.add('active');
+    CB.type = btn.dataset.type;
+    const lbl = document.getElementById('cbTargetLabel');
+    if(lbl) lbl.textContent = CB.targetLabels[CB.type] || 'Target';
+    updatePreview();
+  };
+
+  window.selectEmoji = function(btn, emoji){
+    document.querySelectorAll('.cb-emoji-btn').forEach(b=>b.classList.remove('selected'));
+    btn.classList.add('selected');
+    CB.emoji = emoji;
+    updatePreview();
+  };
+
+  window.updatePreview = function(){
+    const title  = (document.getElementById('cbTitle')||{}).value   || '';
+    const desc   = (document.getElementById('cbDesc')||{}).value    || '';
+    const target = (document.getElementById('cbTarget')||{}).value  || '';
+    const endRaw = (document.getElementById('cbEndDate')||{}).value || '';
+    const pts    = (document.getElementById('cbPoints')||{}).value  || '100';
+    _s('prevEmoji',  CB.emoji);
+    _s('prevTitle',  title  || 'Your challenge title…');
+    _s('prevDesc',   desc   || 'Description will appear here.');
+    _s('prevType',   CB.type);
+    _s('prevTarget', target ? 'Goal: '+target : 'Goal: —');
+    _s('prevPts',    pts + ' pts');
+    _s('cbPtsBadge', pts);
+    if(endRaw){
+      const d = new Date(endRaw+'T00:00:00');
+      _s('prevDate','Ends: '+d.toLocaleDateString('en-US',{month:'short',day:'numeric'}));
+    } else { _s('prevDate','Ends: —'); }
+    const submitBtn = document.getElementById('cbSubmitBtn');
+    if(submitBtn) submitBtn.disabled = !title.trim();
+  };
+
+  window.saveChallenge = function(){
+    const title = (document.getElementById('cbTitle')||{}).value.trim();
+    if(!title) return;
+    const challenge = {
+      id: 'ch_'+Date.now(), emoji: CB.emoji, type: CB.type, title,
+      desc    : (document.getElementById('cbDesc')||{}).value.trim(),
+      target  : (document.getElementById('cbTarget')||{}).value.trim(),
+      endDate : (document.getElementById('cbEndDate')||{}).value,
+      points  : parseInt((document.getElementById('cbPoints')||{}).value)||100,
+      createdAt: new Date().toISOString(),
+      createdBy: (window.AOS_Auth && AOS_Auth.getUserId()) || 'coach_0',
+      joinedBy: [], completedBy: []
+    };
+    const existing = JSON.parse(localStorage.getItem('aos_team_challenges')||'[]');
+    existing.unshift(challenge);
+    localStorage.setItem('aos_team_challenges', JSON.stringify(existing));
+    if(typeof renderTeamChallenges === 'function') renderTeamChallenges();
+    if(typeof renderLeaderboard    === 'function') renderLeaderboard();
+    _resetForm();
+    closeChallengeBuilder();
+    showCBToast('✅ Challenge launched! Team can join now.');
+  };
+
+  window.renderTeamChallenges = function(){
+    const container  = document.getElementById('teamChallengesContainer');
+    if(!container) return;
+    const challenges = JSON.parse(localStorage.getItem('aos_team_challenges')||'[]');
+    const currentUser= (window.AOS_Auth && AOS_Auth.getUserId()) || 'player_0';
+    if(!challenges.length){
+      container.innerHTML = `<div style="text-align:center;padding:40px 20px;color:#6b7280">
+        <div style="font-size:2rem;margin-bottom:10px">🏁</div>
+        <div style="font-weight:600;color:#9ca3af;margin-bottom:6px">No active challenges yet</div>
+        <div style="font-size:.8rem">Coaches can launch challenges using the Challenge Builder</div></div>`;
+      return;
+    }
+    container.innerHTML = challenges.map(ch => {
+      const joined    = (ch.joinedBy||[]).includes(currentUser);
+      const completed = (ch.completedBy||[]).includes(currentUser);
+      const endLabel  = ch.endDate
+        ? new Date(ch.endDate+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'})
+        : 'No end date';
+      const btn = completed
+        ? `<button class="tc-join-btn joined" disabled>✅ Completed (+${ch.points} pts)</button>`
+        : joined
+        ? `<button class="tc-join-btn joined" disabled>✅ Joined</button>
+           <button class="tc-join-btn join" style="margin-top:6px" onclick="completeChallenge('${ch.id}')">✔ Mark Complete</button>`
+        : `<button class="tc-join-btn join" onclick="joinChallenge('${ch.id}')">Join Challenge</button>`;
+      return `<div class="team-challenge-card" id="card_${ch.id}">
+        <div class="tc-header">
+          <span class="tc-emoji">${ch.emoji}</span>
+          <div class="tc-meta"><div class="tc-title">${ch.title}</div></div>
+          <span class="tc-type-badge">${ch.type}</span>
+        </div>
+        ${ch.desc?`<div class="tc-desc">${ch.desc}</div>`:''}
+        <div class="tc-tags">
+          ${ch.target?`<span class="tc-tag">🎯 Goal: ${ch.target}</span>`:''}
+          <span class="tc-tag">📅 Ends: ${endLabel}</span>
+          <span class="tc-tag">👥 ${(ch.joinedBy||[]).length} joined</span>
+          <span class="tc-pts">🏆 ${ch.points} pts</span>
+        </div>${btn}</div>`;
+    }).join('');
+  };
+
+  window.joinChallenge = function(challengeId){
+    const currentUser= (window.AOS_Auth && AOS_Auth.getUserId()) || 'player_0';
+    const challenges = JSON.parse(localStorage.getItem('aos_team_challenges')||'[]');
+    const idx = challenges.findIndex(c=>c.id===challengeId);
+    if(idx===-1) return;
+    if(!challenges[idx].joinedBy.includes(currentUser)){
+      challenges[idx].joinedBy.push(currentUser);
+      localStorage.setItem('aos_team_challenges', JSON.stringify(challenges));
+    }
+    renderTeamChallenges();
+    showCBToast('🔥 You joined the challenge! Good luck!');
+  };
+
+  window.completeChallenge = function(challengeId){
+    const currentUser= (window.AOS_Auth && AOS_Auth.getUserId()) || 'player_0';
+    const challenges = JSON.parse(localStorage.getItem('aos_team_challenges')||'[]');
+    const idx = challenges.findIndex(c=>c.id===challengeId);
+    if(idx===-1) return;
+    if(!challenges[idx].completedBy.includes(currentUser)){
+      challenges[idx].completedBy.push(currentUser);
+      const pts = challenges[idx].points || 100;
+      awardLeaderboardPoints(currentUser, pts, challenges[idx].title);
+      localStorage.setItem('aos_team_challenges', JSON.stringify(challenges));
+      showCBToast(`🏆 Challenge complete! +${pts} pts added to your score!`);
+    }
+    renderTeamChallenges();
+  };
+
+  window.awardLeaderboardPoints = function(userId, points, reason){
+    const lb = JSON.parse(localStorage.getItem('aos_leaderboard')||'{}');
+    if(!lb[userId]) lb[userId] = { points:0, history:[] };
+    lb[userId].points += points;
+    lb[userId].history.push({ points, reason, date: new Date().toISOString() });
+    localStorage.setItem('aos_leaderboard', JSON.stringify(lb));
+    if(typeof renderLeaderboard === 'function') renderLeaderboard();
+  };
+
+  function showCBToast(msg){
+    const t = document.getElementById('cbToast');
+    if(!t) return;
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(()=>t.classList.remove('show'), 3200);
+  }
+
+  function _resetForm(){
+    ['cbTitle','cbDesc','cbTarget','cbEndDate'].forEach(id=>{
+      const el = document.getElementById(id);
+      if(el) el.value = '';
+    });
+    const pts = document.getElementById('cbPoints');
+    if(pts) pts.value = '100';
+    CB.type = 'Streak'; CB.emoji = '🔥';
+    document.querySelectorAll('.cb-type-pill').forEach((p,i)=>p.classList.toggle('active',i===0));
+    buildEmojiGrid(); updatePreview();
+  }
+
+  function _s(id, val){
+    const el = document.getElementById(id);
+    if(el) el.textContent = val;
+  }
+
+  document.addEventListener('DOMContentLoaded', renderTeamChallenges);
+
+})();
+</script>
+
 </body>
 </html>
