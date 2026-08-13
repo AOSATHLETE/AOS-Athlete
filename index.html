@@ -157,8 +157,8 @@
         challengePts       : cPts,
         totalScore         : (athlete.baseScore || 0) + cPts,
         history            : cp.history || [],
-        challengesCompleted: teamChallenges.filter(ch => ch.completedBy && ch.completedBy.includes(athlete.id)).length,
-        challengesJoined   : teamChallenges.filter(ch => ch.joinedBy    && ch.joinedBy.includes(athlete.id)).length
+        challengesCompleted: teamChallenges.filter(ch => ch.completedBy && (ch.completedBy||[]).includes(athlete.id)).length,
+        challengesJoined   : teamChallenges.filter(ch => ch.joinedBy    && (ch.joinedBy||[]).includes(athlete.id)).length
       };
     });
     merged.sort((a,b) => b.totalScore - a.totalScore);
@@ -418,8 +418,8 @@
       return;
     }
     container.innerHTML = challenges.map(ch => {
-      const joined    = ch.joinedBy.includes(currentUser);
-      const completed = ch.completedBy.includes(currentUser);
+      const joined    = (ch.joinedBy||[]).includes(currentUser);
+      const completed = (ch.completedBy||[]).includes(currentUser);
       const endLabel  = ch.endDate
         ? new Date(ch.endDate+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'})
         : 'No end date';
