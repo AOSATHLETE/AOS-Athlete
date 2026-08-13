@@ -439,7 +439,7 @@
         <div class="tc-tags">
           ${ch.target?`<span class="tc-tag">🎯 Goal: ${ch.target}</span>`:''}
           <span class="tc-tag">📅 Ends: ${endLabel}</span>
-          <span class="tc-tag">👥 ${ch.joinedBy.length} joined</span>
+          <span class="tc-tag">👥 ${(ch.joinedBy||[]).length} joined</span>
           <span class="tc-pts">🏆 ${ch.points} pts</span>
         </div>${btn}</div>`;
     }).join('');
@@ -6859,7 +6859,7 @@ setTimeout(function(){
 /* ── Expose logout globally ───────────────────────────────────────── */
 function logout(){ 
   AOS_Auth.logout();
-  AOS_AUTH.logout(); 
+  AOS_AUTH.logout();
  }
 
 </script>
