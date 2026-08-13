@@ -51,6 +51,12 @@
       localStorage.setItem('aos_athlete_registry', JSON.stringify(reg));
     },
     _refreshAll: function(){
+      /* Hide auth screen */
+      var _a = document.getElementById('auth');
+      if(_a){ _a.classList.add('hidden'); _a.style.display='none'; }
+      /* Reload all app data + re-render home */
+      if(typeof initApp === 'function') initApp();
+      /* Refresh live sections */
       if(typeof renderLeaderboard    === 'function') renderLeaderboard();
       if(typeof renderTeamChallenges === 'function') renderTeamChallenges();
     }
@@ -1150,13 +1156,18 @@ var AppSDK = {
 <div data-id="29" id="sec-reports" class="section"></div>
 <div data-id="30" id="sec-nutrition" class="section"></div>
 <div data-id="31" id="sec-tasks" class="section"></div>
-  <div id="sec-challenges" class="section"></div>
+  <div id="sec-challenges" class="section">
+  <div id="teamChallengesContainer"></div>
+  <div style="padding:16px 0 8px;text-align:right">
+    <button class="btn btn-primary" onclick="if(window.openChallengeBuilder)openChallengeBuilder();" style="font-size:13px">&#43; Build Challenge</button>
+  </div>
+</div>
 <div data-id="32" id="sec-coach" class="section"></div>
 <div data-id="33" id="sec-org" class="section"></div>
 <div data-id="34" id="sec-admin" class="section"></div>
 <div data-id="35" id="sec-profile" class="section"></div>
 <div data-id="36" id="sec-trainer" class="section"></div>
-<div class="lb-wrap" id="leaderboardRoot">
+<div class="lb-wrap" id="leaderboardRoot" data-section="leaderboard">
   <div class="lb-tab-row">
     <button class="lb-tab active" id="lbTabIndividual" onclick="switchLbTab('individual')">👤 Individual</button>
     <button class="lb-tab"        id="lbTabTeam"       onclick="switchLbTab('team')">👥 Team</button>
@@ -2980,6 +2991,7 @@ function renderHome(){
   el.querySelectorAll('.home-nav-btn').forEach(function(btn){
     btn.addEventListener('click',function(){navigateTo(this.getAttribute('data-hnav'));});
   });
+  if(typeof renderLeaderboard==='function') renderLeaderboard();
 }
 
 function escH(s){if(!s)return '';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
@@ -3612,21 +3624,8 @@ function renderTeam(){
           pc2=pc2||[];
 
           if(tab==='challenges'){
-            tb.innerHTML='<div style="font-size:11px;color:#8899aa;margin-bottom:12px">&#127942; Compete with your teammates. Tap any challenge to join.</div>'+
-              chs.map(function(c){
-                var joined=(c.participants||[]).indexOf(me)>=0;
-                var pct=c.progress&&c.target?Math.round(c.progress/c.target*100):0;
-                return '<div class="card" style="margin-bottom:10px">'+
-                  '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'+
-                    '<span style="font-size:28px">'+c.emoji+'</span>'+
-                    '<div style="flex:1"><div style="font-weight:800;color:#F5FAFF">'+escH(c.title)+'</div>'+
-                    '<div style="font-size:11px;color:#8899aa">'+escH(c.desc)+'</div></div>'+
-                    '<span style="font-size:9px;background:rgba(46,204,113,0.12);color:#2ecc71;border-radius:6px;padding:3px 8px;white-space:nowrap">Ends '+c.end+'</span>'+
-                  '</div>'+
-                  (c.progress!==undefined?'<div style="height:6px;background:rgba(255,255,255,0.08);border-radius:3px;margin-bottom:8px"><div style="height:100%;width:'+pct+'%;background:#00E0FF;border-radius:3px"></div></div><div style="font-size:10px;color:#8899aa;margin-bottom:8px">'+c.progress+' / '+c.target+' sessions ('+pct+'%)</div>':'')+
-                  '<button class="btn'+(joined?' btn-primary':'')+' btn-full" style="font-size:12px" onclick="'+(joined?'showToast(&quot;Already joined! &#9989;&quot;)':'aosTmJoin(&quot;'+escH(c.id||c.title)+'&quot;)')+'">'+(joined?'<span style="color:#74b9ff;font-weight:800">&#10003; Joined</span>':'Join Challenge')+'</button>'+
-                '</div>';
-              }).join('');
+            if(typeof renderTeamChallenges==='function') renderTeamChallenges();
+          }).join('');
           }
           else if(tab==='feed'){
             tb.innerHTML='<div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">'+
