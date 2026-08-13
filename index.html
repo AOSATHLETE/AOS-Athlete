@@ -2207,7 +2207,7 @@ async function initApp(){
 /* ========== HOME ========== */
 var lbTab='overall';
 function renderLeaderboard(){
-  var el=document.getElementById('leaderboardRoot');if(!el)return;
+  var el=safeGet('sec-leaderboard');if(!el)return;
   var myName=((profile.firstName||'')+' '+(profile.lastName||'')).trim();
   var td=getTodayKey();
   // Build demo + real player list
@@ -6543,8 +6543,8 @@ function logout(){ AOS_AUTH.logout(); }
         challengePts       : cPts,
         totalScore         : (athlete.baseScore || 0) + cPts,
         history            : cp.history || [],
-        challengesCompleted: teamChallenges.filter(ch => ch.completedBy && ch.completedBy.includes(athlete.id)).length,
-        challengesJoined   : teamChallenges.filter(ch => ch.joinedBy    && ch.joinedBy.includes(athlete.id)).length
+        challengesCompleted: teamChallenges.filter(ch => ch.completedBy && (ch.completedBy||[]).includes(athlete.id)).length,
+        challengesJoined   : teamChallenges.filter(ch => ch.joinedBy    && (ch.joinedBy||[]).includes(athlete.id)).length
       };
     });
     merged.sort((a,b) => b.totalScore - a.totalScore);
@@ -6804,8 +6804,8 @@ function logout(){ AOS_AUTH.logout(); }
       return;
     }
     container.innerHTML = challenges.map(ch => {
-      const joined    = ch.joinedBy.includes(currentUser);
-      const completed = ch.completedBy.includes(currentUser);
+      const joined    = (ch.joinedBy||[]).includes(currentUser);
+      const completed = (ch.completedBy||[]).includes(currentUser);
       const endLabel  = ch.endDate
         ? new Date(ch.endDate+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'})
         : 'No end date';
@@ -6825,7 +6825,7 @@ function logout(){ AOS_AUTH.logout(); }
         <div class="tc-tags">
           ${ch.target?`<span class="tc-tag">🎯 Goal: ${ch.target}</span>`:''}
           <span class="tc-tag">📅 Ends: ${endLabel}</span>
-          <span class="tc-tag">👥 ${ch.joinedBy.length} joined</span>
+          <span class="tc-tag">👥 ${(ch.joinedBy||[]).length} joined</span>
           <span class="tc-pts">🏆 ${ch.points} pts</span>
         </div>${btn}</div>`;
     }).join('');
