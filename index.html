@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <script>window.AppSDK={getItem:function(k){try{var v=localStorage.getItem(k);return Promise.resolve(v!==null?JSON.parse(v):null);}catch(e){return Promise.resolve(null);}},setItem:function(k,v){try{if(v===null||v===undefined){localStorage.removeItem(k);}else{localStorage.setItem(k,JSON.stringify(v));}}catch(e){}return Promise.resolve();},ai:{chat:function(o){return Promise.resolve({content:'AI Coach is available in AOS via Copilot. All tracking features work fully here!'});}}};</script>
+<script>
 window.AOS_NOTIFY={
   _granted:false,
   init:async function(){
@@ -585,7 +586,7 @@ var AppSDK = {
       <div class="auth-switch">
         Already have an account? <button class="auth-link" id="go-signin-btn">Sign In</button>
       </div>
-  <!-- ── POST-LOGIN ROLE SETUP OVERLAY (new users only) ───────── -->
+<!-- ── POST-LOGIN ROLE SETUP OVERLAY (new users only) ───────── -->
   <div id="ni-role-setup" style="display:none;position:fixed;top:0;right:0;bottom:0;left:0;z-index:10001;background:rgba(11,11,17,0.93);align-items:center;justify-content:center;padding:24px">
     <div style="background:var(--card-bg);border:1px solid var(--border);border-radius:16px;padding:24px;width:100%;max-width:380px">
       <div class="auth-title">One Last Step</div>
@@ -2496,7 +2497,7 @@ function renderHome(){
   el.querySelectorAll('.home-nav-btn').forEach(function(btn){
     btn.addEventListener('click',function(){navigateTo(this.getAttribute('data-hnav'));});
   });
-  if(typeof renderLeaderboard==='function') setTimeout(renderLeaderboard, 50);
+  if(typeof renderLeaderboard==='function') setTimeout(renderLeaderboard,50);
 }
 
 function escH(s){if(!s)return '';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
