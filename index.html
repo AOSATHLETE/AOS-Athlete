@@ -2207,7 +2207,7 @@ async function initApp(){
 /* ========== HOME ========== */
 var lbTab='overall';
 function renderLeaderboard(){
-  var el=safeGet('sec-leaderboard');if(!el)return;
+  var el=document.getElementById('leaderboardRoot');if(!el)return;
   var myName=((profile.firstName||'')+' '+(profile.lastName||'')).trim();
   var td=getTodayKey();
   // Build demo + real player list
