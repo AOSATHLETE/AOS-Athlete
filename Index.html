@@ -636,8 +636,8 @@ function _writeRequests(uid,val){
    ══════════════════════════════════════════════════════════════════ */
 var AOS_STAFF_ROLES=['coach','trainer','org'];
 function aosLoadGraph(){
-  return Promise.all(['aos_local_accounts','aos_player_links','aos_parent_links','aos_staff_links'].map(function(k){ return window.AppSDK.getItem(k); }))
-    .then(function(r){ return {accs:r[0]||{}, pl:r[1]||{}, parl:r[2]||{}, sl:r[3]||{}}; });
+  return Promise.all(['aos_local_accounts','aos_player_links','aos_parent_links','aos_staff_links','aos_teams'].map(function(k){ return window.AppSDK.getItem(k); }))
+    .then(function(r){ return {accs:r[0]||{}, pl:r[1]||{}, parl:r[2]||{}, sl:r[3]||{}, teams:r[4]||{}}; });
 }
 function _aosUniq(a){ var s={},o=[]; (a||[]).forEach(function(x){ if(x&&!s[x]){ s[x]=1; o.push(x); } }); return o; }
 function aosRoleOf(g,id){
@@ -679,6 +679,10 @@ function aosHubsOf(g,me,role){
    team(s). An org's post goes to the whole org. */
 function aosTeamRecipients(g,me,role){
   var r=[me];
+  /* Staff with a team picked post to that team only. */
+  if((role==='coach'||role==='trainer') && window._staffTeam){
+    return aosTeamMembers(g,me,window._staffTeam);
+  }
   aosHubsOf(g,me,role).forEach(function(h){ r=r.concat(aosRoleOf(g,h)==='org'?aosOrgAll(g,h):aosTeam(g,h)); });
   if(role==='player') r=r.concat(aosParentsOf(g,me));
   if(role==='parent') r=r.concat(aosChildrenOf(g,me));
@@ -688,7 +692,11 @@ function aosTeamRecipients(g,me,role){
 function aosAudienceOptions(g,me,role){
   var opts=[];
   if(role==='coach'||role==='trainer'){
-    opts.push({type:'team',id:me,label:'My team (athletes + parents)',recipients:aosTeam(g,me)});
+    var _teams=aosTeamsOf(g,me);
+    _teams.forEach(function(t){
+      opts.push({type:'squad',id:t.teamId,label:t.name+' (athletes + parents)',recipients:aosTeamMembers(g,me,t.teamId)});
+    });
+    opts.push({type:'team',id:me,label:_teams.length?'Everyone I coach (all teams)':'My team (athletes + parents)',recipients:aosTeam(g,me)});
     opts.push({type:'athletes',id:me,label:'My athletes',recipients:_aosUniq([me].concat(aosAthletesOf(g,me)))});
     aosOrgsOf(g,me).forEach(function(o){
       opts.push({type:'orgstaff',id:o,label:'Staff at '+aosNameOf(g,o),recipients:_aosUniq([me,o].concat(aosOrgStaff(g,o)))});
@@ -816,6 +824,151 @@ function _writeMsgKey(key,uid,arr){
 }
 /* ── End messaging ── */
 /* ══════════════════════════════════════════════════════════════════
+   TEAMS — a coach or trainer can run more than one squad (JV and
+   Varsity, or two age groups). Each team is its own document; which
+   team an athlete is on lives on the link between them and that
+   coach, so the same athlete can be on Varsity with one coach and a
+   club squad with another.
+
+   Everything that was "all my athletes" now respects the team picker:
+   roster, feed, assigned training, notes and tasks.
+   ══════════════════════════════════════════════════════════════════ */
+var _TEAMS_KEY='aos_teams', _teamSeen={};
+function _readTeams(){
+  return fbDb.collection('teams').get().then(function(snap){
+    var map={}, seen={};
+    snap.forEach(function(d){ map[d.id]=d.data(); seen[d.id]=JSON.stringify(d.data()); });
+    _teamSeen=seen;
+    return map;
+  });
+}
+function _writeTeams(uid,val){
+  val=val||{}; var ops=[];
+  Object.keys(val).forEach(function(tid){
+    var cur=JSON.stringify(val[tid]);
+    if(_teamSeen[tid]===cur) return;
+    var doc=Object.assign({},val[tid],{teamId:tid,ownerId:val[tid].ownerId||uid});
+    ops.push(fbDb.collection('teams').doc(tid).set(doc)
+      .then(function(){ _teamSeen[tid]=cur; })
+      .catch(function(e){ console.warn('AOS team write failed',tid,e); }));
+  });
+  Object.keys(_teamSeen).forEach(function(tid){
+    if(val[tid]) return;
+    ops.push(fbDb.collection('teams').doc(tid).delete()
+      .then(function(){ delete _teamSeen[tid]; }).catch(function(){}));
+  });
+  return Promise.all(ops).then(function(){});
+}
+/* Teams this coach/trainer/org owns. */
+function aosTeamsOf(g,ownerId){
+  var t=g.teams||{};
+  return Object.keys(t).filter(function(id){ return t[id]&&t[id].ownerId===ownerId; })
+    .map(function(id){ return t[id]; })
+    .sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); });
+}
+/* Athletes linked to this coach, optionally only those on one team. */
+function aosAthletesOnTeam(g,staffId,teamId){
+  return Object.keys(g.pl).filter(function(pid){
+    var l=g.pl[pid]&&g.pl[pid][staffId];
+    if(!l||l.linkerRole==='parent') return false;
+    return !teamId || l.teamId===teamId;
+  });
+}
+function aosTeamMembers(g,staffId,teamId){
+  var ath=aosAthletesOnTeam(g,staffId,teamId), par=[];
+  ath.forEach(function(p){ par=par.concat(aosParentsOf(g,p)); });
+  return _aosUniq([staffId].concat(ath,par));
+}
+window.aosCreateTeam=function(name,cb){
+  var u=window.AOS_USER||{};
+  name=(name||'').trim(); if(!name) return;
+  AppSDK.getItem('aos_teams').then(function(t){
+    t=t||{};
+    var tid='tm_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+    t[tid]={teamId:tid,name:name,ownerId:u.userId,ownerName:u.name||'',ownerRole:u.role||'coach',createdAt:Date.now()};
+    return AppSDK.setItem('aos_teams',t).then(function(){ return tid; });
+  }).then(function(tid){ showToast('Team "'+name+'" created.'); if(cb)cb(tid); });
+};
+window.aosRenameTeam=function(teamId){
+  AppSDK.getItem('aos_teams').then(function(t){
+    t=t||{}; if(!t[teamId]) return;
+    var name=prompt('Team name:',t[teamId].name||''); if(!name) return;
+    t[teamId].name=name.trim();
+    return AppSDK.setItem('aos_teams',t).then(function(){ showToast('Team renamed.'); _aosRerenderStaff(); });
+  });
+};
+window.aosDeleteTeam=function(teamId){
+  if(!confirm('Delete this team? Athletes stay linked to you, just unassigned.'))return;
+  var u=window.AOS_USER||{};
+  AppSDK.getItem('aos_teams').then(function(t){
+    t=t||{}; delete t[teamId];
+    return AppSDK.setItem('aos_teams',t);
+  }).then(function(){
+    return AppSDK.getItem('aos_player_links').then(function(l){
+      l=l||{}; var changed=false;
+      Object.keys(l).forEach(function(pid){
+        var rec=l[pid][u.userId];
+        if(rec&&rec.teamId===teamId){ delete rec.teamId; changed=true; }
+      });
+      return changed?AppSDK.setItem('aos_player_links',l):null;
+    });
+  }).then(function(){ if(window._staffTeam===teamId) window._staffTeam=''; showToast('Team deleted.'); _aosRerenderStaff(); });
+};
+/* Put an athlete on one of my teams (or none). */
+window.aosSetPlayerTeam=function(playerId,teamId){
+  var u=window.AOS_USER||{};
+  AppSDK.getItem('aos_player_links').then(function(l){
+    l=l||{};
+    if(!l[playerId]||!l[playerId][u.userId]) return;
+    if(teamId) l[playerId][u.userId].teamId=teamId; else delete l[playerId][u.userId].teamId;
+    return AppSDK.setItem('aos_player_links',l);
+  }).then(function(){ showToast(teamId?'Moved.':'Removed from team.'); _aosRerenderStaff(); });
+};
+window.aosPickTeam=function(teamId){ window._staffTeam=teamId||''; _aosRerenderStaff(); };
+window.aosNewTeamPrompt=function(){
+  var name=prompt('New team name (e.g. Varsity, JV, 14U):','');
+  if(name) aosCreateTeam(name,function(tid){ window._staffTeam=tid; _aosRerenderStaff(); });
+};
+function _aosRerenderStaff(){
+  var r=(window.AOS_USER||{}).role;
+  if(r==='coach'&&typeof renderCoach==='function') renderCoach();
+  if(r==='trainer'&&typeof renderTrainer==='function') renderTrainer();
+  if(typeof renderTeamHubForStaff==='function'&&r!=='player'&&document.getElementById('sec-team')&&document.getElementById('sec-team').classList.contains('active')) renderTeamHubForStaff();
+}
+/* The team picker shown above a staff roster. */
+function aosTeamPickerHTML(teams,accent){
+  var cur=window._staffTeam||'';
+  var h='<div class="tab-pills" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">';
+  h+='<button class="tab-pill'+(cur===''?' active':'')+'" onclick="aosPickTeam(\'\')">All athletes</button>';
+  teams.forEach(function(t){
+    h+='<button class="tab-pill'+(cur===t.teamId?' active':'')+'" onclick="aosPickTeam(\''+t.teamId+'\')">'+escH(t.name||'Team')+'</button>';
+  });
+  h+='<button class="tab-pill" onclick="aosNewTeamPrompt()" style="border-style:dashed">+ New team</button>';
+  if(cur) h+='<button class="tab-pill" onclick="aosRenameTeam(\''+cur+'\')">Rename</button>'+
+             '<button class="tab-pill" onclick="aosDeleteTeam(\''+cur+'\')" style="color:#e74c3c;border-color:rgba(231,76,60,.5)">Delete</button>';
+  h+='</div>';
+  return h;
+}
+/* The per-athlete team dropdown on a roster card. */
+function aosPlayerTeamSelectHTML(playerId,teams,currentTeamId){
+  if(!teams.length) return '';
+  var h='<select onchange="aosSetPlayerTeam(\''+playerId+'\',this.value)" title="Team" style="background:#0A1A2F;border:1px solid #334;color:#8899aa;font-size:11px;border-radius:6px;padding:6px">';
+  h+='<option value=""'+(!currentTeamId?' selected':'')+'>No team</option>';
+  teams.forEach(function(t){
+    h+='<option value="'+t.teamId+'"'+(currentTeamId===t.teamId?' selected':'')+'>'+escH(t.name||'Team')+'</option>';
+  });
+  return h+'</select>';
+}
+/* Filter a roster to the picked team. */
+function aosFilterRosterByTeam(players,links,staffId){
+  var cur=window._staffTeam||'';
+  if(!cur) return players;
+  return players.filter(function(p){
+    var rec=links[p.userId]&&links[p.userId][staffId];
+    return rec&&rec.teamId===cur;
+  });
+}
+/* ══════════════════════════════════════════════════════════════════
    SCOPED LISTS — challenges, polls, and the communications log were
    each one shared list that every screen showed in full, so a
    challenge created by a coach in another org appeared on every
@@ -907,6 +1060,7 @@ window.AppSDK = {
       if(_MSG_KEYS[key]) return uid ? _readMsgKey(key,uid) : [];
       if(_SCOPED_LISTS[key] && uid) return _readScopedList(key,uid);
       if(_LINK_KEYS[key] && uid) return _readLinks(key,uid);
+      if(key===_TEAMS_KEY && uid) return _readTeams();
       if(key===_REQ_KEY && uid) return _readRequests(uid);
       var ref = _isPersonalKey(key)
         ? (uid ? fbDb.collection('users').doc(uid).collection('appdata').doc(key) : null)
@@ -930,6 +1084,7 @@ window.AppSDK = {
       if(_MSG_KEYS[key]) return _writeMsgKey(key,uid,val);
       if(_SCOPED_LISTS[key] && uid) return _writeScopedList(key,uid,val);
       if(_LINK_KEYS[key] && uid) return _writeLinks(key,uid,val);
+      if(key===_TEAMS_KEY && uid) return _writeTeams(uid,val);
       if(key===_REQ_KEY && uid) return _writeRequests(uid,val);
       var ref = _isPersonalKey(key)
         ? (uid ? fbDb.collection('users').doc(uid).collection('appdata').doc(key) : null)
@@ -3551,6 +3706,50 @@ var teamTab='info';
 var teamTab='challenges';
 
 // ── CHALLENGE BUILDER ────────────────────────────────────────────────────────
+/* One challenge card used by every role. Athletes get Join / Leave;
+   whoever created it (and org staff) get Remove; everyone sees progress,
+   participant count, goal and time left. The athlete and staff screens
+   used to render different cards from the same data, which is why they
+   looked like different features. */
+function challengeCardHTML(ch,opts){
+  opts=opts||{};
+  var me=opts.me||'', role=opts.role||'player', accent=opts.accent||'#00E0FF';
+  var parts=Array.isArray(ch.participants)?ch.participants:[];
+  var joined=parts.indexOf(me)>=0;
+  var done=Array.isArray(ch.completed)?ch.completed:[];
+  var iDone=done.indexOf(me)>=0;
+  var target=ch.target||ch.goal||0;
+  var pct=target?Math.min(100,Math.round(((ch.progress||done.length||0)/target)*100)):0;
+  var daysLeft=null;
+  if(ch.endDate){ var d=Math.ceil((new Date(ch.endDate)-new Date())/86400000); daysLeft=Math.max(0,d); }
+  var canRemove=(ch.creatorId&&ch.creatorId===me)||role==='org';
+  var h='<div class="card" style="position:relative;margin-bottom:10px;border-color:'+(joined?'rgba(0,224,255,0.5)':'rgba(255,255,255,0.08)')+';background:'+(joined?'rgba(0,224,255,0.04)':'')+'">';
+  if(joined) h+='<div style="position:absolute;top:10px;right:10px;background:rgba(0,224,255,0.2);border:1px solid '+accent+';border-radius:12px;padding:2px 10px;font-size:10px;font-weight:700;color:'+accent+'">'+(iDone?'DONE':'JOINED')+'</div>';
+  h+='<div style="font-size:22px;margin-bottom:4px">'+(ch.emoji||'\uD83C\uDFC6')+'</div>';
+  h+='<div style="font-weight:700;color:#e8f4fd;font-size:15px;padding-right:'+(joined?'70px':'0')+'">'+escH(ch.title||'Challenge')+'</div>';
+  h+='<div style="color:#899aa8;font-size:12px;margin:4px 0">'+escH(ch.desc||ch.description||'')+'</div>';
+  if(ch.createdBy) h+='<div style="font-size:10px;color:'+accent+';margin-bottom:4px">Created by '+escH(ch.createdBy)+(ch.createdByRole?' ('+escH(ch.createdByRole)+')':'')+'</div>';
+  h+='<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:8px 0;font-size:12px;color:#7ecfff">';
+  h+='<span>\uD83D\uDC65 '+parts.length+' joined</span>';
+  h+='<span>\u2705 '+done.length+' done</span>';
+  if(daysLeft!==null) h+='<span>\u23F0 '+daysLeft+'d left</span>';
+  if(ch.type) h+='<span>\uD83C\uDFAF '+escH(ch.type)+'</span>';
+  if(target) h+='<span>\uD83C\uDF1F Goal: '+target+(ch.unit?' '+escH(ch.unit):'')+'</span>';
+  if(ch.points) h+='<span>\uD83D\uDCA0 '+ch.points+' pts</span>';
+  h+='</div>';
+  h+='<div style="background:#1a3a5c;border-radius:6px;height:8px;overflow:hidden;margin-bottom:10px">'+
+     '<div style="width:'+pct+'%;height:100%;background:'+(joined?accent:'#3a5a7c')+';border-radius:6px"></div></div>';
+  h+='<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
+  if(role==='player'){
+    h+= joined
+      ? '<button onclick="leaveChallenge(\''+ch.id+'\')" style="background:rgba(0,224,255,0.15);color:'+accent+';border:1px solid '+accent+';border-radius:10px;padding:8px 20px;font-weight:700;font-size:13px;flex:1">\u2713 Joined \u2014 tap to leave</button>'
+      : '<button onclick="joinChallenge(\''+ch.id+'\')" style="background:'+accent+';color:#0A1A2F;border:none;border-radius:10px;padding:8px 20px;font-weight:700;font-size:13px;flex:1">Join \uD83D\uDCAA</button>';
+  }
+  if(canRemove) h+='<button onclick="deleteChallenge(\''+ch.id+'\')" title="Remove challenge" style="background:rgba(231,76,60,0.15);color:#e74c3c;border:1px solid rgba(231,76,60,0.5);border-radius:10px;padding:8px 14px;font-weight:700;font-size:12px">Remove</button>';
+  h+='</div></div>';
+  return h;
+}
+
 function openChallengeBuilder(existingChs){
   var existing=existingChs||[];
   // Remove any existing modal
@@ -4392,13 +4591,13 @@ function checkChallengeCompletions(){
       c.completed=c.completed||[];
       (c.participants||[]).forEach(function(pname){
         if(c.completed.indexOf(pname)>=0)return;
-        var acc=accByName[pname];
+        var acc=accs[pname]||accByName[pname]||Object.values(accs).find(function(a){return a&&a.userId===pname;});
         if(!acc)return;
         var val=c.type==='streak'?(acc.streak||0):c.type==='training'?(acc.totalSessions||0):c.type==='recovery'?(acc.recoveryDays||0):(acc.hydrationToday||0);
         if(val>=(c.target||0)){
           c.completed.push(pname);
           changed=true;
-          newlyCompleted.push({name:pname,pts:c.points||0,title:c.title});
+          newlyCompleted.push({name:(acc&&acc.name)||pname,pts:c.points||0,title:c.title});
         }
       });
     });
@@ -4550,7 +4749,7 @@ function renderTeamHubForStaff(){
       html+='<div style="font-weight:800;color:'+roleColor+';margin-bottom:4px;font-size:13px">🏋️ ASSIGN TRAINING TO YOUR TEAM</div>';
       html+='<div style="font-size:11px;color:#8899aa;margin-bottom:12px">Creates this session on every currently linked athlete\'s Training tab for today. They\'ll see it tagged with your name and can mark it done like any other session.</div>';
       var actOptionsAssign=['Batting Practice','Fielding Drills','Pitching','Catching','Baserunning','Conditioning','Weight Training','Agility','Film Study','Other'];
-      html+='<div class="form-group"><label>Assign to</label><select id="tth-assign-to"><option value="">All my athletes</option>'+players.map(function(p){return '<option value="'+escH(p.userId)+'">'+escH(p.name||'Athlete')+'</option>';}).join('')+'</select></div>';
+      html+='<div class="form-group"><label>Assign to</label><select id="tth-assign-to"><option value="">'+(window._staffTeam?'Everyone on the picked team':'All my athletes')+'</option>'+players.map(function(p){return '<option value="'+escH(p.userId)+'">'+escH(p.name||'Athlete')+'</option>';}).join('')+'</select></div>';
       html+='<div class="form-group"><label>Primary Activity</label><select id="tth-assign-act">'+actOptionsAssign.map(function(a){return '<option>'+a+'</option>';}).join('')+'</select></div>';
       html+='<div class="form-group"><label>Specific Focus</label><input id="tth-assign-focus" placeholder="e.g. Two-strike approach, first-step quickness..."></div>';
       html+='<div style="display:flex;gap:8px;margin-bottom:10px">';
@@ -4716,14 +4915,7 @@ function renderTeamHubForStaff(){
         html+='<div class="card" style="text-align:center;padding:24px;color:#8899aa;font-size:13px">No active challenges yet.</div>';
       } else {
         challenges.forEach(function(c){
-          var joinedCount=(c.participants||[]).length;
-          html+='<div class="card" style="margin-bottom:10px">'+
-            '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px"><span style="font-size:24px">'+(c.emoji||'🏆')+'</span>'+
-            '<div style="flex:1"><div style="font-weight:800;color:#F5FAFF">'+escH(c.title||'')+'</div><div style="font-size:11px;color:#8899aa">'+escH(c.desc||'')+'</div>'+
-            (c.createdByRole==='coach'||c.createdByRole==='trainer'?'<div style="font-size:10px;color:'+roleColor+';margin-top:2px">Created by '+escH(c.createdBy||'you')+' ('+c.createdByRole+')</div>':'')+
-            '</div></div>'+
-            '<div style="font-size:11px;color:'+roleColor+'">'+joinedCount+' athlete'+(joinedCount===1?'':'s')+' participating</div>'+
-          '</div>';
+          html+=challengeCardHTML(c,{me:u.userId,role:u.role||'coach',accent:roleColor});
         });
       }
     }
@@ -4843,6 +5035,8 @@ window.assignTrainingToTeam=function(){
       aosOrgAthletes(g,u.userId).forEach(function(pid){ if(!have[pid]&&accs[pid]){ players.push(accs[pid]); have[pid]=1; } });
     }
     if(onlyId) players=players.filter(function(p){return p.userId===onlyId;});
+    /* With a team picked on the dashboard, "everyone" means that team. */
+    else if(window._staffTeam) players=aosFilterRosterByTeam(players,links,u.userId);
     if(!players.length){showToast('No athletes linked yet.');return;}
     return AppSDK.getItem('aos_assigned_training').then(function(all){
       all=all||{};
@@ -6441,39 +6635,9 @@ function renderChallenges(){
       html+='\uD83C\uDFAF No challenges yet.<br><span style="font-size:12px">Create one to fire up your team!</span></div>';
     } else {
       html+='<div style="display:flex;flex-direction:column;gap:10px">';
+      var _u=window.AOS_USER||{};
       chs.forEach(function(ch){
-        var participants=Array.isArray(ch.participants)?ch.participants:[];
-        var hasJoined=participants.indexOf(myId)>-1;
-        var progress=ch.progress||0;
-        var target=ch.goal||100;
-        var pct=Math.min(100,Math.round(progress/target*100));
-        var daysLeft=null;
-        if(ch.endDate){var end=new Date(ch.endDate);var now=new Date();daysLeft=Math.max(0,Math.ceil((end-now)/86400000));}
-        html+='<div class="card" style="position:relative;border-color:'+(hasJoined?'rgba(0,224,255,0.5)':'rgba(255,255,255,0.08)')+';background:'+(hasJoined?'rgba(0,224,255,0.04)':'')+'\">';
-        if(hasJoined){html+='<div style="position:absolute;top:10px;right:10px;background:rgba(0,224,255,0.2);border:1px solid var(--cyan);border-radius:12px;padding:2px 10px;font-size:10px;font-weight:700;color:var(--cyan)">\u2713 JOINED</div>';}
-        html+='<div style="font-size:22px;margin-bottom:4px">'+(ch.emoji||'\uD83C\uDFC6')+'</div>';
-        html+='<div style="font-weight:700;color:#e8f4fd;font-size:15px;padding-right:'+(hasJoined?'70px':'0')+'">'+escH(ch.title||'Challenge')+'</div>';
-        html+='<div style="color:#899aa8;font-size:12px;margin:4px 0">'+escH(ch.desc||ch.description||'')+'</div>';
-        html+='<div style="display:flex;gap:12px;align-items:center;margin:8px 0;font-size:12px;color:#7ecfff">';
-        html+='<span>\uD83D\uDC65 '+participants.length+' joined</span>';
-        if(daysLeft!==null) html+='<span>\u23F0 '+daysLeft+'d left</span>';
-        if(ch.type) html+='<span>\uD83C\uDFAF '+escH(ch.type)+'</span>';
-        if(ch.goal) html+='<span>\uD83C\uDF1F Goal: '+ch.goal+(ch.unit?' '+ch.unit:'')+'</span>';
-        html+='</div>';
-        html+='<div style="background:#1a3a5c;border-radius:6px;height:8px;overflow:hidden;margin-bottom:10px">';
-        html+='<div style="width:'+pct+'%;height:100%;background:'+(hasJoined?'var(--cyan)':'#3a5a7c')+';border-radius:6px;transition:width 0.3s"></div>';
-        html+='</div>';
-        html+='<div style="display:flex;gap:8px;align-items:center">';
-        if(hasJoined){
-          html+='<button style="background:rgba(0,224,255,0.15);color:var(--cyan);border:1px solid var(--cyan);border-radius:10px;padding:8px 20px;font-weight:700;font-size:13px;cursor:pointer;flex:1" onclick="joinChallenge(\''+ch.id+'\')">\u2713 Joined</button>';
-        } else {
-          html+='<button style="background:#00E0FF;color:#0A1A2F;border:none;border-radius:10px;padding:8px 20px;font-weight:700;font-size:13px;cursor:pointer;flex:1" onclick="joinChallenge(\''+ch.id+'\')">Join \uD83D\uDCAA</button>';
-        }
-        if(ch.createdBy===((profile&&profile.firstName)||'') || (window.AOS_USER&&(window.AOS_USER.role==='coach'||window.AOS_USER.role==='org'))){
-          html+='<button onclick="deleteChallenge(\''+ch.id+'\')" style="background:rgba(231,76,60,0.15);color:#e74c3c;border:1px solid rgba(231,76,60,0.3);border-radius:10px;padding:8px 14px;font-size:12px;cursor:pointer">\uD83D\uDDD1\uFE0F</button>';
-        }
-        html+='</div>';
-        html+='</div>';
+        html+=challengeCardHTML(ch,{me:myId,role:_u.role||'player'});
       });
       html+='</div>';
     }
@@ -6483,22 +6647,38 @@ function renderChallenges(){
 ;
 
 window.joinChallenge=function(id){
-  AppSDK.getItem('aos_team_challenges').then(function(ch){
-    ch=ch||{};
-    var u=window.AOS_USER||{};
-    if(!ch[id])return;
-    ch[id].participants=ch[id].participants||{};
-    ch[id].participants[u.userId||'guest']={name:u.name||'Athlete',joinedAt:Date.now()};
-    return AppSDK.setItem('aos_team_challenges',ch);
-  }).then(function(){showToast('You\'re in! 💪');renderChallenges();});
+  var u=window.AOS_USER||{};
+  AppSDK.getItem('aos_team_challenges').then(function(chs){
+    chs=Array.isArray(chs)?chs:[];
+    var c=chs.find(function(x){return x&&x.id===id;});
+    if(!c)return;
+    c.participants=Array.isArray(c.participants)?c.participants:[];
+    if(c.participants.indexOf(u.userId)<0) c.participants.push(u.userId);
+    return AppSDK.setItem('aos_team_challenges',chs);
+  }).then(function(){showToast("You're in! \uD83D\uDCAA");if(typeof renderChallenges==='function')renderChallenges();});
+};
+
+window.leaveChallenge=function(id){
+  var u=window.AOS_USER||{};
+  AppSDK.getItem('aos_team_challenges').then(function(chs){
+    chs=Array.isArray(chs)?chs:[];
+    var c=chs.find(function(x){return x&&x.id===id;});
+    if(!c)return;
+    c.participants=(c.participants||[]).filter(function(p){return p!==u.userId;});
+    return AppSDK.setItem('aos_team_challenges',chs);
+  }).then(function(){showToast('Left the challenge.');if(typeof renderChallenges==='function')renderChallenges();});
 };
 
 window.deleteChallenge=function(id){
-  AppSDK.getItem('aos_team_challenges').then(function(ch){
-    ch=ch||{};
-    delete ch[id];
-    return AppSDK.setItem('aos_team_challenges',ch);
-  }).then(function(){showToast('Challenge removed.');renderChallenges();});
+  if(!confirm('Remove this challenge for everyone?'))return;
+  AppSDK.getItem('aos_team_challenges').then(function(chs){
+    chs=Array.isArray(chs)?chs:[];
+    return AppSDK.setItem('aos_team_challenges',chs.filter(function(c){return c&&c.id!==id;}));
+  }).then(function(){
+    showToast('Challenge removed.');
+    if(typeof renderChallenges==='function')renderChallenges();
+    if(typeof renderTeamHubForStaff==='function'&&(window.AOS_USER||{}).role!=='player')renderTeamHubForStaff();
+  });
 };
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -6548,7 +6728,8 @@ function renderCoach(){
     AppSDK.getItem('aos_weekly_plan'),
     AppSDK.getItem('aos_season_events'),
     AppSDK.getItem('aos_dev_focus'),
-    AppSDK.getItem('aos_dev_skills')
+    AppSDK.getItem('aos_dev_skills'),
+    AppSDK.getItem('aos_teams')
   ]).then(function(res){
     var roster=res[0]||{}, accs=res[1]||{}, tasks=res[2]||[], devPlans=res[3]||{}, targets=res[4]||{}, myProf=res[5]||{}, links=res[6]||{};
     var allWeeklyPlans=res[7]||{}, allSeasonEvents=res[8]||[];
@@ -6557,7 +6738,12 @@ function renderCoach(){
     window._coachSeasonEvents=allSeasonEvents;
     window._coachDevFocus=allDevFocus[u.userId]||{};
     window._coachDevSkills=allDevSkills;
-    var players=getMyLinkedPlayers(accs, links, u);
+    var _allTeams=res[11]||{}, _myTeamsById={};
+    var _myTeams=Object.keys(_allTeams).filter(function(t){return _allTeams[t]&&_allTeams[t].ownerId===u.userId;})
+      .map(function(t){_myTeamsById[t]=_allTeams[t];return _allTeams[t];})
+      .sort(function(a,b){return (a.name||'').localeCompare(b.name||'');});
+    if(window._staffTeam && !_myTeamsById[window._staffTeam]) window._staffTeam='';
+    var players=aosFilterRosterByTeam(getMyLinkedPlayers(accs, links, u), links, u.userId);
     var avgR=0;
     if(players.length){var sum=players.reduce(function(s,p){return s+(p.readiness||0);},0);avgR=Math.round(sum/players.length*10)/10;}
     var tgt=targets[u.userId]||{minR:6,streakGoal:5,hydroGoal:80};
@@ -6772,7 +6958,8 @@ function renderCoach(){
 
     /* Roster with Readiness — real linked players only, sortable, with check-in status + unlink */
     html+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
-    html+='<div style="font-weight:800;color:#e8f4fd;font-size:14px">ROSTER</div>';
+    html+=aosTeamPickerHTML(_myTeams);
+    html+='<div style="font-weight:800;color:#e8f4fd;font-size:14px">ROSTER'+(window._staffTeam&&_myTeamsById[window._staffTeam]?' \u2014 '+escH(_myTeamsById[window._staffTeam].name||''):'')+'</div>';
     html+='<select onchange="window._coachSort=this.value;renderCoach();" style="background:#0A1A2F;border:1px solid #334;color:#8899aa;font-size:11px;border-radius:8px;padding:4px 8px">';
     html+='<option value="attention"'+(sortMode==='attention'?' selected':'')+'>Sort: Needs Attention</option>';
     html+='<option value="name"'+(sortMode==='name'?' selected':'')+'>Sort: Name</option>';
@@ -6791,6 +6978,7 @@ function renderCoach(){
       html+='<div style="flex:1"><div style="font-weight:700;color:#e8f4fd;font-size:14px">'+escH(r.name||r.userId||'Player')+'</div>';
       html+='<div style="font-size:11px;color:'+(s.unavailable?'#8b5cf6':s.checkedIn?'#00ff88':'#8899aa')+'">'+(s.unavailable?'🏥 Out'+(r.availabilityReason?': '+escH(r.availabilityReason):''):s.checkedIn?'✓ Checked in today':'No check-in yet')+'</div></div>';
       html+='<div style="text-align:right"><div style="font-size:20px;font-weight:900;color:'+rColor+'">'+(r.readiness||'—')+'</div><div style="font-size:10px;color:#8899aa">readiness</div></div>';
+      html+=aosPlayerTeamSelectHTML(r.userId,_myTeams,((links[r.userId]||{})[u.userId]||{}).teamId||'');
       html+='<button onclick="coachUnlinkPlayer(\''+escH(r.userId||'')+'\',\''+escH((r.name||'Player').replace(/'/g,"\\'"))+'\')" title="Remove from roster" style="background:none;border:1px solid rgba(231,76,60,.5);color:#e74c3c;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;padding:8px 10px;white-space:nowrap;touch-action:manipulation">Remove</button>';
       html+='</div>';
     });
@@ -7722,7 +7910,8 @@ function renderTrainer(){
     AppSDK.getItem('aos_weekly_plan'),
     AppSDK.getItem('aos_season_events'),
     AppSDK.getItem('aos_dev_focus'),
-    AppSDK.getItem('aos_dev_skills')
+    AppSDK.getItem('aos_dev_skills'),
+    AppSDK.getItem('aos_teams')
   ]).then(function(res){
     var accs=res[0]||{}, tasks=res[1]||[], devPlans=res[2]||{}, targets=res[3]||{}, links=res[4]||{};
     var allWeeklyPlans=res[5]||{}, allSeasonEvents=res[6]||[], allDevFocus=res[7]||{}, allDevSkills=res[8]||{};
@@ -7730,7 +7919,12 @@ function renderTrainer(){
     window._trainerSeasonEvents=allSeasonEvents;
     window._trainerDevFocus=allDevFocus[u.userId]||{};
     window._trainerDevSkills=allDevSkills;
-    var players=getMyLinkedPlayers(accs, links, u);
+    var _allTeams=res[9]||{}, _myTeamsById={};
+    var _myTeams=Object.keys(_allTeams).filter(function(t){return _allTeams[t]&&_allTeams[t].ownerId===u.userId;})
+      .map(function(t){_myTeamsById[t]=_allTeams[t];return _allTeams[t];})
+      .sort(function(a,b){return (a.name||'').localeCompare(b.name||'');});
+    if(window._staffTeam && !_myTeamsById[window._staffTeam]) window._staffTeam='';
+    var players=aosFilterRosterByTeam(getMyLinkedPlayers(accs, links, u), links, u.userId);
     var myTasks=tasks.filter(function(t){return t.toPlayerId===u.userId&&!t.dismissed;});
     var avgR=0;
     if(players.length){var sum=players.reduce(function(s,p){return s+(p.readiness||0);},0);avgR=Math.round(sum/players.length*10)/10;}
@@ -7956,7 +8150,8 @@ function renderTrainer(){
 
     /* Roster — sortable, with check-in status + unlink */
     html+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">';
-    html+='<div style="font-weight:800;color:#e8f4fd;font-size:14px">ROSTER</div>';
+    html+=aosTeamPickerHTML(_myTeams);
+    html+='<div style="font-weight:800;color:#e8f4fd;font-size:14px">ROSTER'+(window._staffTeam&&_myTeamsById[window._staffTeam]?' \u2014 '+escH(_myTeamsById[window._staffTeam].name||''):'')+'</div>';
     html+='<select onchange="window._trainerSort=this.value;renderTrainer();" style="background:#0A1A2F;border:1px solid #334;color:#8899aa;font-size:11px;border-radius:8px;padding:4px 8px">';
     html+='<option value="attention"'+(sortMode==='attention'?' selected':'')+'>Sort: Needs Attention</option>';
     html+='<option value="name"'+(sortMode==='name'?' selected':'')+'>Sort: Name</option>';
@@ -7975,6 +8170,7 @@ function renderTrainer(){
       html+='<div style="flex:1"><div style="font-weight:700;color:#e8f4fd;font-size:14px">'+escH(r.name||r.userId||'Player')+'</div>';
       html+='<div style="font-size:11px;color:'+(s.unavailable?'#8b5cf6':s.checkedIn?'#00ff88':'#8899aa')+'">'+(s.unavailable?'🏥 Out'+(r.availabilityReason?': '+escH(r.availabilityReason):''):s.checkedIn?'✓ Checked in today':'No check-in yet')+'</div></div>';
       html+='<div style="text-align:right"><div style="font-size:20px;font-weight:900;color:'+rColor+'">'+(r.readiness||'—')+'</div><div style="font-size:10px;color:#8899aa">readiness</div></div>';
+      html+=aosPlayerTeamSelectHTML(r.userId,_myTeams,((links[r.userId]||{})[u.userId]||{}).teamId||'');
       html+='<button onclick="trainerUnlinkPlayer(\''+escH(r.userId||'')+'\',\''+escH((r.name||'Player').replace(/'/g,"\\'"))+'\')" title="Remove from roster" style="background:none;border:1px solid rgba(231,76,60,.5);color:#e74c3c;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;padding:8px 10px;white-space:nowrap;touch-action:manipulation">Remove</button>';
       html+='</div>';
     });
