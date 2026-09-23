@@ -636,8 +636,8 @@ function _writeRequests(uid,val){
    ══════════════════════════════════════════════════════════════════ */
 var AOS_STAFF_ROLES=['coach','trainer','org'];
 function aosLoadGraph(){
-  return Promise.all(['aos_local_accounts','aos_player_links','aos_parent_links','aos_staff_links','aos_teams'].map(function(k){ return window.AppSDK.getItem(k); }))
-    .then(function(r){ return {accs:r[0]||{}, pl:r[1]||{}, parl:r[2]||{}, sl:r[3]||{}, teams:r[4]||{}}; });
+  return Promise.all(['aos_local_accounts','aos_player_links','aos_parent_links','aos_staff_links','aos_teams','aos_team_members'].map(function(k){ return window.AppSDK.getItem(k); }))
+    .then(function(r){ return {accs:r[0]||{}, pl:r[1]||{}, parl:r[2]||{}, sl:r[3]||{}, teams:r[4]||{}, tm:r[5]||{}}; });
 }
 function _aosUniq(a){ var s={},o=[]; (a||[]).forEach(function(x){ if(x&&!s[x]){ s[x]=1; o.push(x); } }); return o; }
 function aosRoleOf(g,id){
@@ -692,7 +692,7 @@ function aosTeamRecipients(g,me,role){
 function aosAudienceOptions(g,me,role){
   var opts=[];
   if(role==='coach'||role==='trainer'){
-    var _teams=aosTeamsOf(g,me);
+    var _teams=aosTeamsFor(g,me);
     _teams.forEach(function(t){
       opts.push({type:'squad',id:t.teamId,label:t.name+' (athletes + parents)',recipients:aosTeamMembers(g,me,t.teamId)});
     });
@@ -706,8 +706,12 @@ function aosAudienceOptions(g,me,role){
     opts.push({type:'org',id:me,label:'Everyone in the org',recipients:aosOrgAll(g,me)});
     opts.push({type:'orgstaff',id:me,label:'All staff',recipients:_aosUniq([me].concat(aosOrgStaff(g,me)))});
     opts.push({type:'orgathletes',id:me,label:'All athletes',recipients:_aosUniq([me].concat(aosOrgAthletes(g,me)))});
+    /* The org's own teams — these span whichever coaches are assigned. */
+    aosTeamsFor(g,me).forEach(function(t){
+      opts.push({type:'squad',id:t.teamId,label:t.name+' (athletes + parents)',recipients:aosTeamMembers(g,me,t.teamId)});
+    });
     aosOrgStaff(g,me).forEach(function(s){
-      opts.push({type:'team',id:s,label:'Team of '+aosNameOf(g,s),recipients:_aosUniq([me].concat(aosTeam(g,s)))});
+      opts.push({type:'team',id:s,label:'Everyone with '+aosNameOf(g,s),recipients:_aosUniq([me].concat(aosTeam(g,s)))});
     });
   }
   var people={};
@@ -859,25 +863,80 @@ function _writeTeams(uid,val){
   });
   return Promise.all(ops).then(function(){});
 }
-/* Teams this coach/trainer/org owns. */
-function aosTeamsOf(g,ownerId){
-  var t=g.teams||{};
-  return Object.keys(t).filter(function(id){ return t[id]&&t[id].ownerId===ownerId; })
-    .map(function(id){ return t[id]; })
-    .sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); });
-}
-/* Athletes linked to this coach, optionally only those on one team. */
-function aosAthletesOnTeam(g,staffId,teamId){
-  return Object.keys(g.pl).filter(function(pid){
-    var l=g.pl[pid]&&g.pl[pid][staffId];
-    if(!l||l.linkerRole==='parent') return false;
-    return !teamId || l.teamId===teamId;
+/* ══════════════════════════════════════════════════════════════════
+   TEAMS, v2 — a team belongs to an organization (or to an independent
+   coach who has no org). Coaches and trainers are ASSIGNED to a team;
+   athletes are MEMBERS of it. Both are separate records, so an org can
+   remove a coach and the team, its athletes and its history all stay.
+
+     teams/{teamId}            name, ownerId (org or solo coach), staff[]
+     teamMembers/{teamId__athleteId}   who is on it
+
+   Athletes can belong to an org directly, and a coach or trainer can
+   work for more than one org, so nothing here assumes one club.
+   ══════════════════════════════════════════════════════════════════ */
+var _TM_KEY='aos_team_members', _tmSeen={};
+function _readTeamMembers(){
+  return fbDb.collection('teamMembers').get().then(function(snap){
+    var map={}, seen={};
+    snap.forEach(function(d){
+      var v=d.data(); if(!v.teamId||!v.athleteId) return;
+      map[v.teamId]=map[v.teamId]||{};
+      map[v.teamId][v.athleteId]=v;
+      seen[d.id]=JSON.stringify(v);
+    });
+    _tmSeen=seen;
+    return map;
   });
 }
-function aosTeamMembers(g,staffId,teamId){
-  var ath=aosAthletesOnTeam(g,staffId,teamId), par=[];
+function _writeTeamMembers(uid,val){
+  val=val||{}; var now={}, ops=[];
+  Object.keys(val).forEach(function(tid){
+    Object.keys(val[tid]||{}).forEach(function(aid){ now[tid+'__'+aid]=val[tid][aid]; });
+  });
+  Object.keys(now).forEach(function(docId){
+    var cur=JSON.stringify(now[docId]);
+    if(_tmSeen[docId]===cur) return;
+    ops.push(fbDb.collection('teamMembers').doc(docId).set(now[docId])
+      .then(function(){ _tmSeen[docId]=cur; })
+      .catch(function(e){ console.warn('AOS team member write failed',docId,e); }));
+  });
+  Object.keys(_tmSeen).forEach(function(docId){
+    if(now[docId]) return;
+    ops.push(fbDb.collection('teamMembers').doc(docId).delete()
+      .then(function(){ delete _tmSeen[docId]; })
+      .catch(function(e){ console.warn('AOS team member delete failed',docId,e); }));
+  });
+  return Promise.all(ops).then(function(){});
+}
+/* Teams this person can work with: ones they own, ones they're assigned
+   to, and (for an org) every team it owns. */
+function aosTeamsFor(g,uid){
+  var t=g.teams||{};
+  return Object.keys(t).map(function(id){return t[id];})
+    .filter(function(x){ return x && (x.ownerId===uid || (x.staff||[]).indexOf(uid)>=0); })
+    .sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); });
+}
+function aosTeamAthletes(g,teamId){
+  var m=(g.tm||{})[teamId]||{};
+  var ids=Object.keys(m);
+  /* Teams made before membership moved off the coach link. */
+  Object.keys(g.pl||{}).forEach(function(pid){
+    var l=g.pl[pid]||{};
+    Object.keys(l).forEach(function(k){ if(l[k]&&l[k].teamId===teamId&&ids.indexOf(pid)<0) ids.push(pid); });
+  });
+  return ids;
+}
+function aosTeamStaff(g,teamId){
+  var t=(g.teams||{})[teamId]; if(!t) return [];
+  return _aosUniq([t.ownerId].concat(t.staff||[]));
+}
+/* Everyone a post to this team should reach. */
+function aosTeamMembers(g,ownerIdOrStaffId,teamId){
+  if(!teamId) return aosTeam(g,ownerIdOrStaffId);
+  var ath=aosTeamAthletes(g,teamId), par=[];
   ath.forEach(function(p){ par=par.concat(aosParentsOf(g,p)); });
-  return _aosUniq([staffId].concat(ath,par));
+  return _aosUniq(aosTeamStaff(g,teamId).concat(ath,par));
 }
 window.aosCreateTeam=function(name,cb){
   var u=window.AOS_USER||{};
@@ -885,10 +944,44 @@ window.aosCreateTeam=function(name,cb){
   AppSDK.getItem('aos_teams').then(function(t){
     t=t||{};
     var tid='tm_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
-    t[tid]={teamId:tid,name:name,ownerId:u.userId,ownerName:u.name||'',ownerRole:u.role||'coach',createdAt:Date.now()};
+    t[tid]={teamId:tid,name:name,ownerId:u.userId,ownerName:u.name||'',ownerRole:u.role||'coach',staff:[],createdAt:Date.now()};
     return AppSDK.setItem('aos_teams',t).then(function(){ return tid; });
   }).then(function(tid){ showToast('Team "'+name+'" created.'); if(cb)cb(tid); });
 };
+/* Put an athlete on a team, or take them off it. */
+window.aosSetPlayerTeam=function(playerId,teamId){
+  var u=window.AOS_USER||{};
+  AppSDK.getItem('aos_team_members').then(function(m){
+    m=m||{};
+    Object.keys(m).forEach(function(tid){ if(m[tid]&&m[tid][playerId]) delete m[tid][playerId]; });
+    if(teamId){
+      m[teamId]=m[teamId]||{};
+      m[teamId][playerId]={teamId:teamId,athleteId:playerId,addedBy:u.userId,addedAt:Date.now()};
+    }
+    return AppSDK.setItem('aos_team_members',m);
+  }).then(function(){
+    /* clear the old link-based marker so it can't override */
+    return AppSDK.getItem('aos_player_links').then(function(l){
+      l=l||{}; var changed=false;
+      Object.keys(l).forEach(function(pid){
+        if(pid!==playerId) return;
+        Object.keys(l[pid]||{}).forEach(function(k){ if(l[pid][k]&&l[pid][k].teamId){ delete l[pid][k].teamId; changed=true; } });
+      });
+      return changed?AppSDK.setItem('aos_player_links',l):null;
+    }).catch(function(){});   /* an org isn't party to that link; harmless */
+  }).then(function(){ showToast(teamId?'Moved.':'Removed from team.'); _aosRerenderStaff(); });
+};
+/* Assign or unassign a coach or trainer to one of my org's teams. */
+window.aosSetTeamStaff=function(teamId,staffId,on){
+  AppSDK.getItem('aos_teams').then(function(t){
+    t=t||{}; if(!t[teamId]) return;
+    var list=(t[teamId].staff||[]).filter(function(x){return x!==staffId;});
+    if(on) list.push(staffId);
+    t[teamId].staff=list;
+    return AppSDK.setItem('aos_teams',t);
+  }).then(function(){ showToast(on?'Coach added to team.':'Coach removed from team.'); _aosRerenderStaff(); });
+};
+
 window.aosRenameTeam=function(teamId){
   AppSDK.getItem('aos_teams').then(function(t){
     t=t||{}; if(!t[teamId]) return;
@@ -914,16 +1007,6 @@ window.aosDeleteTeam=function(teamId){
     });
   }).then(function(){ if(window._staffTeam===teamId) window._staffTeam=''; showToast('Team deleted.'); _aosRerenderStaff(); });
 };
-/* Put an athlete on one of my teams (or none). */
-window.aosSetPlayerTeam=function(playerId,teamId){
-  var u=window.AOS_USER||{};
-  AppSDK.getItem('aos_player_links').then(function(l){
-    l=l||{};
-    if(!l[playerId]||!l[playerId][u.userId]) return;
-    if(teamId) l[playerId][u.userId].teamId=teamId; else delete l[playerId][u.userId].teamId;
-    return AppSDK.setItem('aos_player_links',l);
-  }).then(function(){ showToast(teamId?'Moved.':'Removed from team.'); _aosRerenderStaff(); });
-};
 window.aosPickTeam=function(teamId){ window._staffTeam=teamId||''; _aosRerenderStaff(); };
 window.aosNewTeamPrompt=function(){
   var name=prompt('New team name (e.g. Varsity, JV, 14U):','');
@@ -937,15 +1020,19 @@ function _aosRerenderStaff(){
 }
 /* The team picker shown above a staff roster. */
 function aosTeamPickerHTML(teams,accent){
-  var cur=window._staffTeam||'';
+  var cur=window._staffTeam||'', me=(window.AOS_USER||{}).userId;
   var h='<div class="tab-pills" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">';
   h+='<button class="tab-pill'+(cur===''?' active':'')+'" onclick="aosPickTeam(\'\')">All athletes</button>';
   teams.forEach(function(t){
-    h+='<button class="tab-pill'+(cur===t.teamId?' active':'')+'" onclick="aosPickTeam(\''+t.teamId+'\')">'+escH(t.name||'Team')+'</button>';
+    var mine=t.ownerId===me;
+    h+='<button class="tab-pill'+(cur===t.teamId?' active':'')+'" onclick="aosPickTeam(\''+t.teamId+'\')" title="'+
+       escH(mine?'Your team':'Assigned by '+(t.ownerName||'your org'))+'">'+escH(t.name||'Team')+(mine?'':' \u00B7 '+escH(t.ownerName||'org'))+'</button>';
   });
   h+='<button class="tab-pill" onclick="aosNewTeamPrompt()" style="border-style:dashed">+ New team</button>';
-  if(cur) h+='<button class="tab-pill" onclick="aosRenameTeam(\''+cur+'\')">Rename</button>'+
-             '<button class="tab-pill" onclick="aosDeleteTeam(\''+cur+'\')" style="color:#e74c3c;border-color:rgba(231,76,60,.5)">Delete</button>';
+  var curT=teams.find(function(t){return t.teamId===cur;});
+  if(curT && curT.ownerId===me)
+    h+='<button class="tab-pill" onclick="aosRenameTeam(\''+cur+'\')">Rename</button>'+
+       '<button class="tab-pill" onclick="aosDeleteTeam(\''+cur+'\')" style="color:#e74c3c;border-color:rgba(231,76,60,.5)">Delete</button>';
   h+='</div>';
   return h;
 }
@@ -960,12 +1047,14 @@ function aosPlayerTeamSelectHTML(playerId,teams,currentTeamId){
   return h+'</select>';
 }
 /* Filter a roster to the picked team. */
-function aosFilterRosterByTeam(players,links,staffId){
+function aosFilterRosterByTeam(players,links,staffId,members){
   var cur=window._staffTeam||'';
   if(!cur) return players;
+  var m=(members||window._teamMembersCache||{})[cur]||{};
   return players.filter(function(p){
-    var rec=links[p.userId]&&links[p.userId][staffId];
-    return rec&&rec.teamId===cur;
+    if(m[p.userId]) return true;
+    var rec=links[p.userId]&&links[p.userId][staffId];   // pre-v2 teams
+    return !!(rec&&rec.teamId===cur);
   });
 }
 /* ══════════════════════════════════════════════════════════════════
@@ -1061,6 +1150,7 @@ window.AppSDK = {
       if(_SCOPED_LISTS[key] && uid) return _readScopedList(key,uid);
       if(_LINK_KEYS[key] && uid) return _readLinks(key,uid);
       if(key===_TEAMS_KEY && uid) return _readTeams();
+      if(key===_TM_KEY && uid) return _readTeamMembers();
       if(key===_REQ_KEY && uid) return _readRequests(uid);
       var ref = _isPersonalKey(key)
         ? (uid ? fbDb.collection('users').doc(uid).collection('appdata').doc(key) : null)
@@ -1085,6 +1175,7 @@ window.AppSDK = {
       if(_SCOPED_LISTS[key] && uid) return _writeScopedList(key,uid,val);
       if(_LINK_KEYS[key] && uid) return _writeLinks(key,uid,val);
       if(key===_TEAMS_KEY && uid) return _writeTeams(uid,val);
+      if(key===_TM_KEY && uid) return _writeTeamMembers(uid,val);
       if(key===_REQ_KEY && uid) return _writeRequests(uid,val);
       var ref = _isPersonalKey(key)
         ? (uid ? fbDb.collection('users').doc(uid).collection('appdata').doc(key) : null)
@@ -1510,7 +1601,7 @@ let recurringSessions=[];
    Owner (app builder/admin) keeps the full "More" menu, exactly as
    before. Every other logged-in user gets "Chat" in that same nav
    slot instead. Match is case-insensitive on login email. */
-var OWNER_EMAIL = 'ekuvaas@gmail.com'; // App owner: gets the full More menu (Global Admin lane)
+var OWNER_EMAIL = 'ekuvaas@icloud.com'; // App owner: gets the full More menu (Global Admin lane)
 function isOwner(){
   var u = window.AOS_USER;
   return !!(u && u.email && u.email.toLowerCase() === OWNER_EMAIL.toLowerCase());
@@ -2687,7 +2778,7 @@ function renderChatHub(){
   body.innerHTML='<div style="font-size:12px;color:var(--white-dim)">Loading&hellip;</div>';
   aosMyMessages(myId).then(function(all){
     var items=all.filter(function(m){
-      if(m.kind!=='note'&&m.kind!=='task') return false;
+      if(m.kind!=='note'&&m.kind!=='task'&&m.kind!=='request') return false;
       return tab==='sent' ? m.fromId===myId : m.fromId!==myId;
     }).sort(function(a,b){ return (b.ts||0)-(a.ts||0); });
     if(!items.length){
@@ -2695,15 +2786,25 @@ function renderChatHub(){
       return;
     }
     body.innerHTML=items.map(function(m){
-      var isTask=m.kind==='task';
+      var isTask=m.kind==='task', isReq=m.kind==='request';
       var done=!!(m.doneBy&&m.doneBy[myId]);
       var head='<div style="display:flex;justify-content:space-between;margin-bottom:4px">'+
         '<span style="font-weight:700;font-size:12px;color:'+(tab==='sent'?'#00E0FF':(roleColor[m.fromRole]||'#8899aa'))+'">'+
-          (isTask?'&#128204; Task ':'&#9993;&#65039; Note ')+(tab==='sent'?'to '+escH((m.audience&&m.audience.label)||'your team'):'from '+(roleLabel[m.fromRole]||'')+escH(m.fromName||''))+'</span>'+
+          (isTask?'&#128204; Task ':isReq?'&#128230; Request ':'&#9993;&#65039; Note ')+(tab==='sent'?'to '+escH((m.audience&&m.audience.label)||'your team'):'from '+(roleLabel[m.fromRole]||'')+escH(m.fromName||''))+'</span>'+
         '<span style="font-size:10px;color:#8899aa">'+escH(when(m.ts))+'</span></div>';
       var txt='<div style="font-size:13px;color:#F5FAFF;'+(isTask&&done&&tab!=='sent'?'text-decoration:line-through;opacity:.7':'')+'">'+escH(m.text||m.title||'')+'</div>';
       var foot='';
-      if(isTask&&tab==='sent'){
+      if(isReq){
+        var L=m.legacy||{};
+        var meta=[L.category,L.cost?'$'+L.cost:'',L.dateNeeded?'needed '+L.dateNeeded:''].filter(Boolean).join(' \u00B7 ');
+        foot='<div style="font-size:11px;color:#8899aa;margin-top:6px">'+aosRequestBadge(m.status)+(meta?' '+escH(meta):'')+'</div>';
+        if(tab!=='sent'){
+          foot+='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">'+
+            ['Approved','Denied','Ordered','Received'].map(function(st){
+              return '<button class="btn btn-sm ch-rq" data-mid="'+m._mid+'" data-st="'+st+'" style="font-size:11px">'+st+'</button>';
+            }).join('')+'</div>';
+        }
+      } else if(isTask&&tab==='sent'){
         var total=_aosUniq(m.recipients).filter(function(x){return x!==myId;}).length;
         foot='<div style="font-size:11px;color:#8899aa;margin-top:6px">'+Object.keys(m.doneBy||{}).length+' of '+total+' done</div>';
       } else if(isTask){
@@ -2711,6 +2812,9 @@ function renderChatHub(){
       }
       return card(head+txt+foot, isTask&&!done&&tab!=='sent');
     }).join('');
+    body.querySelectorAll('.ch-rq').forEach(function(b){
+      b.onclick=function(){ aosSetRequestStatus(this.getAttribute('data-mid'),this.getAttribute('data-st'),renderChatHub); };
+    });
     body.querySelectorAll('.ch-done').forEach(function(b){
       b.onclick=function(){
         var on=this.getAttribute('data-on')==='1';
@@ -2930,11 +3034,12 @@ async function initApp(){
     metricsRadar=await AppSDK.getItem('sb_metrics_radar')||[];
     metricsRapsodo=await AppSDK.getItem('sb_metrics_rapsodo')||[];
     metricsGarmin=await AppSDK.getItem('sb_metrics_garmin')||[];
+    metricsCustom=await AppSDK.getItem('sb_metrics_custom')||{};
+    await aosLoadSportConfigs();
     recovery=await AppSDK.getItem('sb_recovery')||{};
     hydration=await AppSDK.getItem('sb_hydration')||{};
     checkHydrationDayReset();
     calEvents=await AppSDK.getItem('sb_calendar')||[];
-    requests=await AppSDK.getItem('sb_requests')||[];
     nutritionGoals=await AppSDK.getItem('sb_nutrition_goals')||{calories:2200,protein:130,carbs:280,fats:70,water:80};
     nutritionLog=await AppSDK.getItem('sb_nutrition_log')||{};
     tasks=await AppSDK.getItem('sb_tasks')||[];
@@ -3018,7 +3123,7 @@ async function initApp(){
     var _ob=document.createElement('div');_ob.id='aos-onboarding';
     _ob.style.cssText='position:fixed;top:0;right:0;bottom:0;left:0;background:#111111;z-index:99999;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;overflow-y:auto';
     var _si={Softball:'&#x1F94E;',Baseball:'&#x26BE;',Basketball:'&#x1F3C0;',Football:'&#x1F3C8;',Soccer:'&#x26BD;',Volleyball:'&#x1F3D0;','Track & Field':'&#x1F3C3;',Wrestling:'&#x1F93C;',Swimming:'&#x1F3CA;',Other:'&#x1F3C6;'};
-    var _sl=['Softball','Baseball','Basketball','Football','Soccer','Volleyball','Track & Field','Wrestling','Swimming','Other'];
+    var _sl=aosSportList();
     _ob.innerHTML='<div style="font-family:Barlow Condensed,sans-serif;font-size:36px;font-weight:900;color:var(--gold);letter-spacing:2px;margin-bottom:4px">WELCOME TO AOS</div>'
       +'<div style="font-size:13px;color:var(--white-dim);margin-bottom:24px;letter-spacing:2px">TRACK &middot; TRAIN &middot; TRANSFORM</div>'
       +'<div style="font-weight:700;font-size:14px;margin-bottom:12px;text-transform:uppercase;letter-spacing:.8px">Select Your Primary Sport</div>'
@@ -4748,7 +4853,10 @@ function renderTeamHubForStaff(){
       html+='<div class="card" style="margin-bottom:12px">';
       html+='<div style="font-weight:800;color:'+roleColor+';margin-bottom:4px;font-size:13px">🏋️ ASSIGN TRAINING TO YOUR TEAM</div>';
       html+='<div style="font-size:11px;color:#8899aa;margin-bottom:12px">Creates this session on every currently linked athlete\'s Training tab for today. They\'ll see it tagged with your name and can mark it done like any other session.</div>';
-      var actOptionsAssign=['Batting Practice','Fielding Drills','Pitching','Catching','Baserunning','Conditioning','Weight Training','Agility','Film Study','Other'];
+      /* Activities come from the sport config — the coach's own sport,
+         falling back to the sport their athletes actually play. */
+      var _asport=(typeof profile!=='undefined'&&profile&&profile.sport)||(players[0]&&players[0].sport)||'Other';
+      var actOptionsAssign=aosSportActivities(_asport);
       html+='<div class="form-group"><label>Assign to</label><select id="tth-assign-to"><option value="">'+(window._staffTeam?'Everyone on the picked team':'All my athletes')+'</option>'+players.map(function(p){return '<option value="'+escH(p.userId)+'">'+escH(p.name||'Athlete')+'</option>';}).join('')+'</select></div>';
       html+='<div class="form-group"><label>Primary Activity</label><select id="tth-assign-act">'+actOptionsAssign.map(function(a){return '<option>'+a+'</option>';}).join('')+'</select></div>';
       html+='<div class="form-group"><label>Specific Focus</label><input id="tth-assign-focus" placeholder="e.g. Two-strike approach, first-step quickness..."></div>';
@@ -5409,13 +5517,221 @@ function renderGoals(){
 
 /* ========== METRICS ========== */
 var metricsTab='physical';
+/* ══════════════════════════════════════════════════════════════════
+   SPORT CONFIGS — a sport is configuration, not code. Each entry
+   supplies the positions, the Metrics tabs, and the Assign Training
+   activity list for that sport. Adding a sport means adding an entry
+   here, or a document in the Firestore `sports` collection (which
+   overrides and extends these without a new build).
+
+   Softball and baseball point their stat groups at the existing
+   purpose-built screens via `legacy`; every other sport gets the
+   generic stat-group screen, which is driven entirely by `fields`.
+   ══════════════════════════════════════════════════════════════════ */
+var AOS_SPORT_DEFAULTS={
+  Softball:{physical:true,emoji:'&#x1F94E;',
+    positions:['Pitcher','Catcher','1B','2B','3B','SS','LF','CF','RF','Utility','DP/FLEX'],
+    activities:['Batting Practice','Fielding Drills','Pitching','Catching','Baserunning','Conditioning','Weight Training','Agility','Film Study','Other'],
+    groups:[{id:'batting',label:'Batting',legacy:'batting'},{id:'pitching',label:'Pitching',legacy:'pitching'},
+            {id:'fielding',label:'Fielding',legacy:'fielding'},{id:'blast',label:'Blast',legacy:'blast'},
+            {id:'radar',label:'Radar',legacy:'radar'},{id:'rapsodo',label:'Rapsodo',legacy:'rapsodo'},
+            {id:'garmin',label:'Garmin',legacy:'garmin'}]},
+  Baseball:{physical:true,emoji:'&#x26BE;',
+    positions:['Pitcher','Catcher','1B','2B','3B','SS','LF','CF','RF','DH'],
+    activities:['Batting Practice','Fielding Drills','Pitching','Catching','Baserunning','Conditioning','Weight Training','Agility','Film Study','Other'],
+    groups:[{id:'batting',label:'Batting',legacy:'batting'},{id:'pitching',label:'Pitching',legacy:'pitching'},
+            {id:'fielding',label:'Fielding',legacy:'fielding'},{id:'blast',label:'Blast',legacy:'blast'},
+            {id:'radar',label:'Radar',legacy:'radar'},{id:'rapsodo',label:'Rapsodo',legacy:'rapsodo'},
+            {id:'garmin',label:'Garmin',legacy:'garmin'}]},
+  Basketball:{emoji:'&#x1F3C0;',
+    positions:['Point Guard','Shooting Guard','Small Forward','Power Forward','Center'],
+    activities:['Shooting','Ball Handling','Defense Drills','Scrimmage','Conditioning','Weight Training','Agility','Film Study','Other'],
+    groups:[{id:'game',label:'Game',fields:[
+      {id:'min',label:'Minutes',agg:'sum'},{id:'pts',label:'Points',agg:'sum'},{id:'reb',label:'Rebounds',agg:'sum'},
+      {id:'ast',label:'Assists',agg:'sum'},{id:'stl',label:'Steals',agg:'sum'},{id:'blk',label:'Blocks',agg:'sum'},
+      {id:'to',label:'Turnovers',agg:'sum'}]},
+      {id:'shooting',label:'Shooting',fields:[
+      {id:'fgm',label:'FG Made',agg:'sum'},{id:'fga',label:'FG Att',agg:'sum'},
+      {id:'tpm',label:'3PT Made',agg:'sum'},{id:'tpa',label:'3PT Att',agg:'sum'},
+      {id:'ftm',label:'FT Made',agg:'sum'},{id:'fta',label:'FT Att',agg:'sum'}]}]},
+  Soccer:{emoji:'&#x26BD;',
+    positions:['Goalkeeper','Center Back','Full Back','Defensive Mid','Center Mid','Winger','Striker'],
+    activities:['Finishing','Passing Drills','Possession','Set Pieces','Small-Sided Games','Conditioning','Weight Training','Agility','Film Study','Other'],
+    groups:[{id:'match',label:'Match',fields:[
+      {id:'min',label:'Minutes',agg:'sum'},{id:'goals',label:'Goals',agg:'sum'},{id:'assists',label:'Assists',agg:'sum'},
+      {id:'shots',label:'Shots',agg:'sum'},{id:'sot',label:'Shots on Target',agg:'sum'},{id:'passpct',label:'Pass %',agg:'avg',dec:true}]},
+      {id:'keeper',label:'Goalkeeping',fields:[
+      {id:'saves',label:'Saves',agg:'sum'},{id:'ga',label:'Goals Against',agg:'sum'},{id:'cs',label:'Clean Sheet (1/0)',agg:'sum'}]}]},
+  Volleyball:{emoji:'&#x1F3D0;',
+    positions:['Setter','Outside Hitter','Opposite','Middle Blocker','Libero','Defensive Specialist'],
+    activities:['Serving','Passing','Hitting','Blocking','Setting','Scrimmage','Conditioning','Weight Training','Film Study','Other'],
+    groups:[{id:'match',label:'Match',fields:[
+      {id:'kills',label:'Kills',agg:'sum'},{id:'errors',label:'Attack Errors',agg:'sum'},{id:'assists',label:'Assists',agg:'sum'},
+      {id:'digs',label:'Digs',agg:'sum'},{id:'blocks',label:'Blocks',agg:'sum'},{id:'aces',label:'Aces',agg:'sum'}]}]},
+  Football:{emoji:'&#x1F3C8;',
+    positions:['QB','RB','WR','TE','OL','DL','LB','CB','S','K/P'],
+    activities:['Position Drills','7-on-7','Route Running','Lifting','Conditioning','Agility','Film Study','Other'],
+    groups:[{id:'offense',label:'Offense',fields:[
+      {id:'passyd',label:'Pass Yards',agg:'sum'},{id:'rushyd',label:'Rush Yards',agg:'sum'},{id:'recyd',label:'Rec Yards',agg:'sum'},
+      {id:'td',label:'Touchdowns',agg:'sum'},{id:'rec',label:'Receptions',agg:'sum'}]},
+      {id:'defense',label:'Defense',fields:[
+      {id:'tackles',label:'Tackles',agg:'sum'},{id:'sacks',label:'Sacks',agg:'sum',dec:true},
+      {id:'int',label:'Interceptions',agg:'sum'},{id:'pbu',label:'Pass Breakups',agg:'sum'}]}]},
+  'Track & Field':{emoji:'&#x1F3C3;',
+    positions:['Sprints','Middle Distance','Distance','Hurdles','Jumps','Throws','Multi-Event'],
+    activities:['Speed Work','Tempo Run','Long Run','Technique','Plyometrics','Weight Training','Mobility','Film Study','Other'],
+    groups:[{id:'races',label:'Races & Marks',fields:[
+      {id:'event',label:'Event (e.g. 100m)',text:true},{id:'mark',label:'Time / Distance',agg:'best',dec:true},
+      {id:'place',label:'Place',agg:'best'}]}]},
+  Wrestling:{emoji:'&#x1F93C;',
+    positions:['106','113','120','126','132','138','145','152','160','170','182','195','220','285'],
+    activities:['Live Wrestling','Drilling','Takedowns','Top/Bottom Work','Conditioning','Weight Training','Film Study','Other'],
+    groups:[{id:'matches',label:'Matches',fields:[
+      {id:'result',label:'Result (W/L)',text:true},{id:'points',label:'Points Scored',agg:'sum'},
+      {id:'pa',label:'Points Allowed',agg:'sum'},{id:'takedowns',label:'Takedowns',agg:'sum'}]}]},
+  Swimming:{emoji:'&#x1F3CA;',
+    positions:['Freestyle','Backstroke','Breaststroke','Butterfly','IM','Distance','Relay'],
+    activities:['Technique','Sprint Set','Distance Set','Starts & Turns','Dryland','Weight Training','Recovery Swim','Other'],
+    groups:[{id:'swims',label:'Swims',fields:[
+      {id:'event',label:'Event (e.g. 100 Free)',text:true},{id:'time',label:'Time (sec)',agg:'best',dec:true},
+      {id:'place',label:'Place',agg:'best'}]}]},
+  Other:{emoji:'&#x1F3C5;',
+    positions:['Athlete'],
+    activities:['Skill Work','Team Practice','Conditioning','Weight Training','Agility','Mobility','Film Study','Other'],
+    groups:[{id:'session',label:'Sessions',fields:[
+      {id:'what',label:'What you did',text:true},{id:'amount',label:'Amount / Score',agg:'sum',dec:true}]}]}
+};
+var AOS_SPORTS_EXTRA={};   // filled from Firestore `sports`, if present
+function aosSportConfigs(){
+  var out={};
+  Object.keys(AOS_SPORT_DEFAULTS).forEach(function(k){ out[k]=AOS_SPORT_DEFAULTS[k]; });
+  Object.keys(AOS_SPORTS_EXTRA||{}).forEach(function(k){
+    out[k]=Object.assign({},out[k]||{},AOS_SPORTS_EXTRA[k]||{});
+  });
+  return out;
+}
+function aosSportList(){
+  var c=aosSportConfigs(), keys=Object.keys(c).filter(function(k){return k!=='Other';});
+  keys.sort(); keys.push('Other');
+  return keys;
+}
+function aosSportConfig(sport){
+  var c=aosSportConfigs();
+  return c[sport]||c['Other'];
+}
+function aosSportPositions(sport){ return (aosSportConfig(sport).positions)||['Athlete']; }
+function aosSportActivities(sport){ return (aosSportConfig(sport).activities)||aosSportConfig('Other').activities; }
+function aosSportGroups(sport){ return (aosSportConfig(sport).groups)||[]; }
+function aosLoadSportConfigs(){
+  return fbDb.collection('sports').get().then(function(snap){
+    var extra={};
+    snap.forEach(function(d){ var v=d.data()||{}; extra[v.name||d.id]=v; });
+    AOS_SPORTS_EXTRA=extra;
+    return extra;
+  }).catch(function(){ return {}; });
+}
+
+/* Metrics tabs come from the athlete's sport config. Softball and
+   baseball keep their purpose-built screens; every other sport gets
+   this generic one, driven by the fields in the config. Entries are
+   stored long-format, one row per logged session, under the athlete's
+   own data. */
+var metricsCustom={};
+function aosMySport(){ return (profile&&profile.sport)||'Other'; }
+function aosMetricEntries(groupId){ return (metricsCustom[groupId]||[]); }
+function renderMetricsGroup(group){
+  var c=safeGet('metrics-content'); if(!c||!group) return;
+  var fields=group.fields||[];
+  var entries=aosMetricEntries(group.id).slice().sort(function(a,b){return (b.date||'').localeCompare(a.date||'');});
+  var html='';
+  var numeric=fields.filter(function(f){return !f.text;});
+  if(numeric.length&&entries.length){
+    html+='<div class="stat-grid">'+numeric.slice(0,4).map(function(f){
+      var vals=entries.map(function(e){return Number((e.values||{})[f.id]);}).filter(function(v){return !isNaN(v);});
+      var v=0;
+      if(vals.length){
+        if(f.agg==='avg') v=vals.reduce(function(a,b){return a+b;},0)/vals.length;
+        else if(f.agg==='best') v=Math.min.apply(null,vals);
+        else v=vals.reduce(function(a,b){return a+b;},0);
+      }
+      var shown=f.dec?(Math.round(v*100)/100):Math.round(v);
+      return '<div class="stat-card"><div class="stat-value">'+shown+'</div><div class="stat-label">'+escH(f.label)+
+             (f.agg==='avg'?' (avg)':f.agg==='best'?' (best)':'')+'</div></div>';
+    }).join('')+'</div>';
+  }
+  html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Log '+escH(group.label)+'</div>';
+  for(var i=0;i<fields.length;i+=2){
+    html+='<div class="form-row">';
+    [fields[i],fields[i+1]].forEach(function(f){
+      if(!f) return;
+      html+='<div class="form-group"><label>'+escH(f.label)+'</label><input id="mg-'+escH(f.id)+'" type="'+(f.text?'text':'number')+'"'+
+            (f.text?'':' step="'+(f.dec?'0.01':'1')+'" min="0" value="0"')+'></div>';
+    });
+    html+='</div>';
+  }
+  html+='<div class="form-group"><label>Date</label><input type="date" id="mg-date" value="'+todayStr()+'"></div>'+
+        '<button class="btn btn-primary btn-full btn-sm" id="mg-save">Log '+escH(group.label)+'</button></div>';
+  if(entries.length){
+    html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Recent</div>';
+    entries.slice(0,15).forEach(function(e){
+      var line=fields.map(function(f){
+        var v=(e.values||{})[f.id];
+        return (v===''||v===undefined)?'':escH(f.label)+': '+escH(String(v));
+      }).filter(Boolean).join(' \u00B7 ');
+      html+='<div style="display:flex;justify-content:space-between;gap:8px;align-items:center;border-bottom:1px solid rgba(255,255,255,0.06);padding:8px 0">'+
+        '<div><div style="font-size:12px;color:#e8f4fd">'+line+'</div>'+
+        '<div style="font-size:10px;color:var(--white-dim)">'+escH(e.date||'')+'</div></div>'+
+        '<button class="btn btn-sm btn-danger mg-del" data-id="'+escH(e.id)+'" title="Delete entry" aria-label="Delete entry">\u2715</button></div>';
+    });
+    html+='</div>';
+  } else {
+    html+='<div class="card" style="text-align:center;color:var(--white-dim);font-size:13px;padding:18px">Nothing logged yet.</div>';
+  }
+  c.innerHTML=html;
+  var save=safeGet('mg-save');
+  if(save) save.addEventListener('click',function(){
+    var vals={};
+    fields.forEach(function(f){
+      var el=safeGet('mg-'+f.id); if(!el) return;
+      vals[f.id]=f.text?el.value.trim():(parseFloat(el.value)||0);
+    });
+    metricsCustom[group.id]=metricsCustom[group.id]||[];
+    metricsCustom[group.id].push({id:uid(),date:safeVal('mg-date')||todayStr(),values:vals});
+    saveItem('sb_metrics_custom',metricsCustom);
+    showToast('Logged!');
+    renderMetricsGroup(group);
+  });
+  c.querySelectorAll('.mg-del').forEach(function(b){
+    b.addEventListener('click',function(){
+      var eid=this.getAttribute('data-id');
+      metricsCustom[group.id]=(metricsCustom[group.id]||[]).filter(function(x){return x.id!==eid;});
+      saveItem('sb_metrics_custom',metricsCustom);
+      showToast('Deleted'); renderMetricsGroup(group);
+    });
+  });
+}
+
 function renderMetrics(){
   var el=safeGet('sec-metrics');if(!el)return;
-  el.innerHTML='<div class="section-title">📊 Metrics</div>'+
-  '<div class="tab-pills"><button class="tab-pill m-tab'+(metricsTab==='batting'?' active':'')+'" data-mt="batting">Batting</button><button class="tab-pill m-tab'+(metricsTab==='pitching'?' active':'')+'" data-mt="pitching">Pitching</button><button class="tab-pill m-tab'+(metricsTab==='fielding'?' active':'')+'" data-mt="fielding">Fielding</button><button class="tab-pill m-tab'+(metricsTab==='physical'?' active':'')+'" data-mt="physical">Physical</button><button class="tab-pill m-tab'+(metricsTab==='blast'?' active':'')+'" data-mt="blast">Blast</button><button class="tab-pill m-tab'+(metricsTab==='radar'?' active':'')+'" data-mt="radar">Radar</button><button class="tab-pill m-tab'+(metricsTab==='rapsodo'?' active':'')+'" data-mt="rapsodo">Rapsodo</button><button class="tab-pill m-tab'+(metricsTab==='garmin'?' active':'')+'" data-mt="garmin">Garmin</button></div><div id="metrics-content"></div>';
-  el.querySelectorAll('.m-tab').forEach(function(b){b.addEventListener('click',function(){metricsTab=this.getAttribute('data-mt');renderMetrics()})});
-  var renders={batting:renderMetricsBatting,pitching:renderMetricsPitching,fielding:renderMetricsFielding,physical:renderMetricsPhysical,blast:renderMetricsBlast,radar:renderMetricsRadar,rapsodo:renderMetricsRapsodo,garmin:renderMetricsGarmin};
-  if(renders[metricsTab])renders[metricsTab]();
+  var sport=aosMySport();
+  var groups=aosSportGroups(sport).slice();
+  /* The Physical tab is the softball/baseball recruiting benchmark board
+     (exit velo, pop time, division tables), so it only shows for sports
+     whose config asks for it. */
+  if(aosSportConfig(sport).physical) groups.push({id:'physical',label:'Physical',legacy:'physical'});
+  if(!groups.length) groups=[{id:'session',label:'Sessions',fields:aosSportConfig('Other').groups[0].fields}];
+  if(!window._mtPicked || !groups.some(function(g){return g.id===metricsTab;})) metricsTab=groups[0].id;
+  el.innerHTML='<div class="section-title">\uD83D\uDCCA Metrics</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin:-6px 0 8px">'+escH(sport)+'</div>'+
+    '<div class="tab-pills">'+groups.map(function(g){
+      return '<button class="tab-pill m-tab'+(metricsTab===g.id?' active':'')+'" data-mt="'+escH(g.id)+'">'+escH(g.label)+'</button>';
+    }).join('')+'</div><div id="metrics-content"></div>';
+  el.querySelectorAll('.m-tab').forEach(function(b){b.addEventListener('click',function(){window._mtPicked=true;metricsTab=this.getAttribute('data-mt');renderMetrics();})});
+  var legacyRenders={batting:renderMetricsBatting,pitching:renderMetricsPitching,fielding:renderMetricsFielding,
+    physical:renderMetricsPhysical,blast:renderMetricsBlast,radar:renderMetricsRadar,rapsodo:renderMetricsRapsodo,garmin:renderMetricsGarmin};
+  var g=groups.find(function(x){return x.id===metricsTab;});
+  if(g&&g.legacy&&legacyRenders[g.legacy]) legacyRenders[g.legacy]();
+  else renderMetricsGroup(g);
 }
 
 function renderMetricsPhysical(){
@@ -6168,35 +6484,120 @@ function renderAnalyticsChat(){
 }
 
 /* ========== REQUESTS ========== */
+/* Requests — equipment, food, fees, travel — are sent to someone:
+   a parent, a coach, a trainer, the org, or the whole team. They use
+   the same one-document-per-item store as notes and tasks, so only the
+   people asked can see them. Recipients set the status; the athlete
+   watches it move. */
+function aosSetRequestStatus(mid,status,cb){
+  var u=window.AOS_USER||{};
+  var ref=fbDb.collection('messages').doc(mid);
+  ref.update({status:status,statusBy:u.name||'',statusAt:Date.now()})
+    .then(function(){ showToast('Marked '+status+'.'); if(cb)cb(); })
+    .catch(function(e){ showToast('Could not update.'); console.warn('AOS request status failed',e); });
+}
+function aosRequestBadge(st){
+  var c=st==='Approved'?'badge-green':st==='Received'?'badge-blue':st==='Denied'?'badge-red':st==='Ordered'?'badge-gray':'badge-gold';
+  return '<span class="badge '+c+'">'+escH(st||'Pending')+'</span>';
+}
+function aosRequestLines(m){
+  var L=m.legacy||{}, bits=[];
+  if(L.category) bits.push(escH(L.category));
+  if(L.priority) bits.push(escH(L.priority));
+  if(L.cost) bits.push('$'+escH(String(L.cost)));
+  if(L.dateNeeded) bits.push('needed '+escH(L.dateNeeded));
+  return bits.join(' \u00B7 ');
+}
 function renderRequests(){
   var el=safeGet('sec-requests');if(!el)return;
-  var total=requests.length,pending=requests.filter(function(r){return r.status==='Pending'}).length;
-  var approved=requests.filter(function(r){return r.status==='Approved'}).length;
-  var received=requests.filter(function(r){return r.status==='Received'}).length;
-  var estTotal=requests.reduce(function(s,r){return s+(parseFloat(r.cost)||0)},0);
-  var reqHTML=requests.map(function(r,i){
-    var sBadge=r.status==='Pending'?'badge-gold':r.status==='Approved'?'badge-green':r.status==='Received'?'badge-blue':r.status==='Denied'?'badge-red':'badge-gray';
-    return '<div class="card card-sm"><div style="display:flex;justify-content:space-between;align-items:center"><div style="font-weight:700;font-size:13px">'+escH(r.title)+'</div><span class="badge '+sBadge+'">'+escH(r.status)+'</span></div><div style="font-size:11px;color:var(--white-dim);margin-top:4px">'+escH(r.category)+' · '+escH(r.priority)+' · '+(r.cost?'$'+r.cost:'Free')+'</div>'+(r.description?'<div style="font-size:12px;margin-top:4px">'+escH(r.description)+'</div>':'')+'<div style="display:flex;gap:4px;margin-top:8px;flex-wrap:wrap"><select class="req-status" data-ri="'+i+'" style="flex:1;font-size:12px"><option'+(r.status==='Pending'?' selected':'')+'>Pending</option><option'+(r.status==='Approved'?' selected':'')+'>Approved</option><option'+(r.status==='Ordered'?' selected':'')+'>Ordered</option><option'+(r.status==='Received'?' selected':'')+'>Received</option><option'+(r.status==='Denied'?' selected':'')+'>Denied</option></select><button class="btn btn-sm btn-danger req-del" data-ri="'+i+'" title="Delete request" aria-label="Delete request">✕</button></div></div>';
-  }).join('');
-  el.innerHTML='<div class="section-title">📬 Equipment Requests</div>'+
-  '<div class="stat-grid"><div class="stat-card"><div class="stat-value">'+total+'</div><div class="stat-label">Total</div></div><div class="stat-card"><div class="stat-value" style="color:var(--warning)">'+pending+'</div><div class="stat-label">Pending</div></div><div class="stat-card"><div class="stat-value" style="color:var(--green)">'+approved+'</div><div class="stat-label">Approved</div></div><div class="stat-card"><div class="stat-value">$'+estTotal.toFixed(0)+'</div><div class="stat-label">💰 Est. Total</div></div></div>'+
-  '<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">New Request</div>'+
-  '<div class="form-group"><label>Title*</label><input id="rq-title" placeholder="Item or request name"></div>'+
-  '<div class="form-row"><div class="form-group"><label>Category</label><select id="rq-cat"><option>Equipment</option><option>Apparel</option><option>Training</option><option>Technology</option><option>Facilities</option><option>Travel</option><option>Other</option></select></div><div class="form-group"><label>Priority</label><select id="rq-pri"><option>High</option><option>Medium</option><option>Low</option></select></div></div>'+
-  '<div class="form-row"><div class="form-group"><label>Est. Cost ($)</label><input type="number" id="rq-cost" step="0.01"></div><div class="form-group"><label>Date Needed</label><input type="date" id="rq-date"></div></div>'+
-  '<div class="form-group"><label>Description</label><textarea id="rq-desc" rows="2"></textarea></div>'+
-  '<button class="btn btn-primary btn-full" id="rq-save">+ Submit Request</button></div>'+reqHTML;
-  var rqSave=safeGet('rq-save');if(rqSave)rqSave.addEventListener('click',function(){
-    var title=safeVal('rq-title').trim();if(!title){showToast('Enter request title');return}
-    requests.push({id:uid(),title:title,category:safeVal('rq-cat'),priority:safeVal('rq-pri'),cost:safeVal('rq-cost'),dateNeeded:safeVal('rq-date'),description:safeVal('rq-desc'),status:'Pending'});
-    saveItem('sb_requests',requests);showToast('Request submitted!');logAdmin('Request: '+title);renderRequests();
+  var u=window.AOS_USER||{}, me=u.userId||'';
+  el.innerHTML='<div class="section-title">\uD83D\uDCE6 Requests</div><div id="rq-body" style="font-size:12px;color:var(--white-dim)">Loading&hellip;</div>';
+  Promise.all([aosMyMessages(me),aosLoadGraph()]).then(function(r){
+    var all=r[0].filter(function(m){return m.kind==='request';}), g=r[1];
+    var mine=all.filter(function(m){return m.fromId===me;}).sort(function(a,b){return (b.ts||0)-(a.ts||0);});
+    var incoming=all.filter(function(m){return m.fromId!==me;}).sort(function(a,b){return (b.ts||0)-(a.ts||0);});
+    var opts=aosAudienceOptions(g,me,u.role||'player');
+    window._rqOpts=opts;
+    var pending=mine.filter(function(m){return (m.status||'Pending')==='Pending';}).length;
+    var approved=mine.filter(function(m){return m.status==='Approved';}).length;
+    var received=mine.filter(function(m){return m.status==='Received';}).length;
+    var est=mine.reduce(function(s,m){return s+(parseFloat((m.legacy||{}).cost)||0);},0);
+    var html='';
+    html+='<div class="stat-grid">'+
+      '<div class="stat-card"><div class="stat-value">'+mine.length+'</div><div class="stat-label">Sent</div></div>'+
+      '<div class="stat-card"><div class="stat-value" style="color:var(--warning)">'+pending+'</div><div class="stat-label">Pending</div></div>'+
+      '<div class="stat-card"><div class="stat-value" style="color:var(--green)">'+(approved+received)+'</div><div class="stat-label">Approved</div></div>'+
+      '<div class="stat-card"><div class="stat-value">$'+(Math.round(est*100)/100)+'</div><div class="stat-label">Est. cost</div></div></div>';
+    if(incoming.length){
+      html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Asked of you</div>';
+      incoming.forEach(function(m){
+        var L=m.legacy||{};
+        html+='<div style="border-bottom:1px solid rgba(255,255,255,0.07);padding:10px 0">'+
+          '<div style="display:flex;justify-content:space-between;gap:8px;align-items:center">'+
+            '<div style="font-weight:700;font-size:13px;color:#e8f4fd">'+escH(L.title||m.text||'Request')+'</div>'+aosRequestBadge(m.status)+'</div>'+
+          '<div style="font-size:11px;color:var(--white-dim);margin-top:2px">from '+escH(m.fromName||'')+(aosRequestLines(m)?' \u00B7 '+aosRequestLines(m):'')+'</div>'+
+          (L.description?'<div style="font-size:12px;color:#c9d6e2;margin-top:4px">'+escH(L.description)+'</div>':'')+
+          '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">'+
+            ['Approved','Denied','Ordered','Received'].map(function(st){
+              return '<button class="btn btn-sm rq-set" data-mid="'+m._mid+'" data-st="'+st+'" style="font-size:11px">'+st+'</button>';
+            }).join('')+
+          '</div></div>';
+      });
+      html+='</div>';
+    }
+    if(!opts.length){
+      html+='<div class="card" style="text-align:center;color:var(--white-dim);font-size:13px;padding:14px">Connect with a parent, coach, trainer or org from <b>My Profile</b> to send a request.</div>';
+    } else {
+      html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">New Request</div>'+
+        '<div class="form-group"><label>Send to</label><select id="rq-to">'+opts.map(function(o,i){return '<option value="'+i+'">'+escH(o.label)+'</option>';}).join('')+'</select></div>'+
+        '<div class="form-group"><label>Title*</label><input id="rq-title" placeholder="e.g. New catcher\\u2019s mitt, team meal money"></div>'+
+        '<div class="form-row">'+
+          '<div class="form-group"><label>Category</label><select id="rq-cat"><option>Equipment</option><option>Food / Meals</option><option>Apparel</option><option>Travel</option><option>Fees</option><option>Training</option><option>Technology</option><option>Other</option></select></div>'+
+          '<div class="form-group"><label>Priority</label><select id="rq-pri"><option>Normal</option><option>High</option><option>Low</option></select></div>'+
+        '</div>'+
+        '<div class="form-row">'+
+          '<div class="form-group"><label>Est. Cost ($)</label><input type="number" id="rq-cost" step="0.01"></div>'+
+          '<div class="form-group"><label>Date Needed</label><input type="date" id="rq-date"></div>'+
+        '</div>'+
+        '<div class="form-group"><label>Details</label><textarea id="rq-desc" rows="2" placeholder="Why you need it, size, brand..."></textarea></div>'+
+        '<button class="btn btn-primary btn-full" id="rq-save">Send Request</button>'+
+        '<div id="rq-msg" style="margin-top:8px;font-size:12px;min-height:16px"></div></div>';
+    }
+    if(mine.length){
+      html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Your requests</div>';
+      mine.forEach(function(m){
+        var L=m.legacy||{};
+        html+='<div style="border-bottom:1px solid rgba(255,255,255,0.07);padding:10px 0">'+
+          '<div style="display:flex;justify-content:space-between;gap:8px;align-items:center">'+
+            '<div style="font-weight:700;font-size:13px;color:#e8f4fd">'+escH(L.title||m.text||'Request')+'</div>'+aosRequestBadge(m.status)+'</div>'+
+          '<div style="font-size:11px;color:var(--white-dim);margin-top:2px">to '+escH((m.audience&&m.audience.label)||'')+(aosRequestLines(m)?' \u00B7 '+aosRequestLines(m):'')+
+            (m.statusBy?' \u00B7 '+escH(m.status)+' by '+escH(m.statusBy):'')+'</div>'+
+        '</div>';
+      });
+      html+='</div>';
+    }
+    var body=safeGet('rq-body'); if(!body)return;
+    body.innerHTML=html;
+    var save=safeGet('rq-save');
+    if(save) save.addEventListener('click',function(){
+      var title=(safeVal('rq-title')||'').trim();
+      var msg=safeGet('rq-msg');
+      if(!title){ msg.style.color='#e74c3c'; msg.textContent='Give the request a title.'; return; }
+      var o=window._rqOpts[parseInt(safeVal('rq-to'),10)]; if(!o)return;
+      var fields={title:title,text:title,category:safeVal('rq-cat'),priority:safeVal('rq-pri'),
+        cost:safeVal('rq-cost'),dateNeeded:safeVal('rq-date'),description:safeVal('rq-desc'),ts:Date.now()};
+      aosCreateMessage('request',me,fields,o.recipients,{type:o.type,id:o.id,label:o.label}).then(function(mid){
+        return fbDb.collection('messages').doc(mid).update({status:'Pending'});
+      }).then(function(){
+        showToast('Request sent \uD83D\uDCE4'); renderRequests();
+      }).catch(function(e){ msg.style.color='#e74c3c'; msg.textContent='Could not send: '+((e&&e.message)||'error'); });
+    });
+    body.querySelectorAll('.rq-set').forEach(function(b){
+      b.addEventListener('click',function(){
+        aosSetRequestStatus(this.getAttribute('data-mid'),this.getAttribute('data-st'),renderRequests);
+      });
+    });
   });
-  el.querySelectorAll('.req-status').forEach(function(s){s.addEventListener('change',function(){
-    var i=parseInt(this.getAttribute('data-ri'));if(requests[i]){requests[i].status=this.value;saveItem('sb_requests',requests);showToast('Status updated');renderRequests()}
-  })});
-  el.querySelectorAll('.req-del').forEach(function(b){b.addEventListener('click',function(){
-    requests.splice(parseInt(this.getAttribute('data-ri')),1);saveItem('sb_requests',requests);showToast('Deleted');renderRequests();
-  })});
 }
 
 /* ========== REPORTS ========== */
@@ -6729,7 +7130,8 @@ function renderCoach(){
     AppSDK.getItem('aos_season_events'),
     AppSDK.getItem('aos_dev_focus'),
     AppSDK.getItem('aos_dev_skills'),
-    AppSDK.getItem('aos_teams')
+    AppSDK.getItem('aos_teams'),
+    AppSDK.getItem('aos_team_members')
   ]).then(function(res){
     var roster=res[0]||{}, accs=res[1]||{}, tasks=res[2]||[], devPlans=res[3]||{}, targets=res[4]||{}, myProf=res[5]||{}, links=res[6]||{};
     var allWeeklyPlans=res[7]||{}, allSeasonEvents=res[8]||[];
@@ -6738,12 +7140,12 @@ function renderCoach(){
     window._coachSeasonEvents=allSeasonEvents;
     window._coachDevFocus=allDevFocus[u.userId]||{};
     window._coachDevSkills=allDevSkills;
-    var _allTeams=res[11]||{}, _myTeamsById={};
-    var _myTeams=Object.keys(_allTeams).filter(function(t){return _allTeams[t]&&_allTeams[t].ownerId===u.userId;})
-      .map(function(t){_myTeamsById[t]=_allTeams[t];return _allTeams[t];})
-      .sort(function(a,b){return (a.name||'').localeCompare(b.name||'');});
+    var _allTeams=res[11]||{}, _teamMembers=res[12]||{}, _myTeamsById={};
+    window._teamMembersCache=_teamMembers;
+    var _myTeams=aosTeamsFor({teams:_allTeams},u.userId);
+    _myTeams.forEach(function(t){_myTeamsById[t.teamId]=t;});
     if(window._staffTeam && !_myTeamsById[window._staffTeam]) window._staffTeam='';
-    var players=aosFilterRosterByTeam(getMyLinkedPlayers(accs, links, u), links, u.userId);
+    var players=aosFilterRosterByTeam(getMyLinkedPlayers(accs, links, u), links, u.userId, _teamMembers);
     var avgR=0;
     if(players.length){var sum=players.reduce(function(s,p){return s+(p.readiness||0);},0);avgR=Math.round(sum/players.length*10)/10;}
     var tgt=targets[u.userId]||{minR:6,streakGoal:5,hydroGoal:80};
@@ -6978,7 +7380,9 @@ function renderCoach(){
       html+='<div style="flex:1"><div style="font-weight:700;color:#e8f4fd;font-size:14px">'+escH(r.name||r.userId||'Player')+'</div>';
       html+='<div style="font-size:11px;color:'+(s.unavailable?'#8b5cf6':s.checkedIn?'#00ff88':'#8899aa')+'">'+(s.unavailable?'🏥 Out'+(r.availabilityReason?': '+escH(r.availabilityReason):''):s.checkedIn?'✓ Checked in today':'No check-in yet')+'</div></div>';
       html+='<div style="text-align:right"><div style="font-size:20px;font-weight:900;color:'+rColor+'">'+(r.readiness||'—')+'</div><div style="font-size:10px;color:#8899aa">readiness</div></div>';
-      html+=aosPlayerTeamSelectHTML(r.userId,_myTeams,((links[r.userId]||{})[u.userId]||{}).teamId||'');
+      var _curTid=''; Object.keys(_teamMembers).forEach(function(tid){ if(_teamMembers[tid]&&_teamMembers[tid][r.userId]) _curTid=tid; });
+      if(!_curTid) _curTid=((links[r.userId]||{})[u.userId]||{}).teamId||'';
+      html+=aosPlayerTeamSelectHTML(r.userId,_myTeams,_curTid);
       html+='<button onclick="coachUnlinkPlayer(\''+escH(r.userId||'')+'\',\''+escH((r.name||'Player').replace(/'/g,"\\'"))+'\')" title="Remove from roster" style="background:none;border:1px solid rgba(231,76,60,.5);color:#e74c3c;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;padding:8px 10px;white-space:nowrap;touch-action:manipulation">Remove</button>';
       html+='</div>';
     });
@@ -7161,14 +7565,41 @@ function renderOrg(){
     AppSDK.getItem('aos_local_accounts'),
     AppSDK.getItem('aos_team_roster'),
     AppSDK.getItem('aos_assigned_tasks'),
-    AppSDK.getItem('aos_player_links')
+    AppSDK.getItem('aos_player_links'),
+    AppSDK.getItem('aos_staff_links'),
+    AppSDK.getItem('aos_teams'),
+    AppSDK.getItem('aos_team_members')
   ]).then(function(res){
-    var accs=res[0]||{}, roster=res[1]||{}, orgTasks=res[2]||[], links=res[3]||{};
+    var accs=res[0]||{}, roster=res[1]||{}, orgTasks=res[2]||[], links=res[3]||{}, staffLinks=res[4]||{};
+    var _allTeams=res[5]||{}, _teamMembers=res[6]||{};
+    window._teamMembersCache=_teamMembers;
     var all=Object.values(accs);
-    var players=getMyLinkedPlayers(accs, links, u);
-    var coaches=all.filter(function(a){return a.role==='coach'&&a.orgCode===u.orgCode;});
-    var trainers=all.filter(function(a){return a.role==='trainer'&&a.orgCode===u.orgCode;});
-    var parents=all.filter(function(a){return a.role==='parent'&&a.orgCode===u.orgCode;});
+    /* An org's athletes are its own linked athletes PLUS every athlete of
+       the coaches and trainers connected to it. Counting only direct links
+       left orgs staring at an empty dashboard, because athletes link to a
+       coach, and the coach links to the org. */
+    var _g={accs:accs,pl:links,parl:{},sl:staffLinks,teams:{}};
+    var _orgStaffIds=aosOrgStaff(_g,u.userId);
+    var _seen={}, players=[];
+    aosOrgAthletes(_g,u.userId).forEach(function(pid){
+      var a=accs[pid]||all.find(function(x){return x&&x.userId===pid;});
+      if(a&&!_seen[pid]){ _seen[pid]=1; players.push(a); }
+    });
+    getMyLinkedPlayers(accs, links, u).forEach(function(a){
+      if(a&&!_seen[a.userId]){ _seen[a.userId]=1; players.push(a); }
+    });
+    function _staffOfOrg(role){
+      return _orgStaffIds.map(function(sid){ return accs[sid]||all.find(function(x){return x&&x.userId===sid;}); })
+        .filter(function(a){ return a&&a.role===role; });
+    }
+    var coaches=_staffOfOrg('coach'), trainers=_staffOfOrg('trainer');
+    var parents=[]; var _pseen={};
+    players.forEach(function(pl){
+      aosParentsOf(_g,pl.userId).forEach(function(par){
+        var a=accs[par]||all.find(function(x){return x&&x.userId===par;});
+        if(a&&!_pseen[par]){ _pseen[par]=1; parents.push(a); }
+      });
+    });
     var avgR=0;
     if(players.length){var sum=players.reduce(function(s,p){return s+(p.readiness||0);},0);avgR=Math.round(sum/players.length*10)/10;}
 
@@ -7180,6 +7611,49 @@ function renderOrg(){
     var stats=[['Players',players.length,'#00E0FF'],['Coaches',coaches.length,'#FFD700'],['Trainers',trainers.length,'#00ff88'],['Parents',parents.length,'#ff88aa'],['Avg Readiness',players.length?avgR:'—','#fff']];
     html+='<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:16px">';
     stats.forEach(function(s){html+='<div style="background:#0d2233;border-radius:10px;padding:10px 6px;text-align:center"><div style="font-size:20px;font-weight:900;color:'+s[2]+'">'+s[1]+'</div><div style="font-size:10px;color:#8899aa">'+s[0]+'</div></div>';});
+    html+='</div>';
+
+    /* Teams — owned by the org, staffed by its coaches and trainers.
+       Removing a coach from a team leaves the team and its athletes. */
+    var _orgTeams=aosTeamsFor({teams:_allTeams},u.userId).filter(function(t){return t.ownerId===u.userId;});
+    var _orgStaffAccs=coaches.concat(trainers);
+    var _gT={accs:accs,pl:links,parl:{},sl:staffLinks,teams:_allTeams,tm:_teamMembers};
+    html+='<div style="background:#0d2233;border:1px solid #334;border-radius:14px;padding:14px;margin-bottom:14px">';
+    html+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'+
+      '<div style="font-weight:800;color:#00E0FF;font-size:13px">TEAMS</div>'+
+      '<button onclick="aosNewTeamPrompt()" style="background:rgba(0,224,255,0.12);border:1px solid rgba(0,224,255,0.4);color:#00E0FF;border-radius:16px;padding:6px 12px;font-size:11px;font-weight:700">+ New team</button></div>';
+    if(!_orgTeams.length){
+      html+='<div style="color:#8899aa;font-size:12px">No teams yet. Create one (14U, Varsity), then assign coaches and athletes to it.</div>';
+    } else {
+      _orgTeams.forEach(function(t){
+        var ath=aosTeamAthletes(_gT,t.teamId);
+        html+='<div style="border-bottom:1px solid rgba(255,255,255,0.07);padding:10px 0">'+
+          '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">'+
+            '<div style="font-weight:700;color:#e8f4fd;font-size:13px">'+escH(t.name||'Team')+'</div>'+
+            '<div style="display:flex;gap:6px">'+
+              '<button class="btn btn-sm" onclick="aosRenameTeam(\''+t.teamId+'\')" style="font-size:11px">Rename</button>'+
+              '<button class="btn btn-sm" onclick="aosDeleteTeam(\''+t.teamId+'\')" style="font-size:11px;color:#e74c3c;border:1px solid rgba(231,76,60,.5)">Delete</button>'+
+            '</div></div>'+
+          '<div style="font-size:11px;color:#8899aa;margin:4px 0">'+ath.length+' athlete'+(ath.length===1?'':'s')+' \u00B7 '+((t.staff||[]).length)+' staff</div>';
+        if(_orgStaffAccs.length){
+          html+='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">'+_orgStaffAccs.map(function(st){
+            var on=(t.staff||[]).indexOf(st.userId)>=0;
+            return '<button class="btn btn-sm" onclick="aosSetTeamStaff(\''+t.teamId+'\',\''+st.userId+'\','+(on?'false':'true')+')" style="font-size:11px;'+
+              (on?'background:rgba(0,224,255,0.15);color:#00E0FF;border:1px solid #00E0FF':'')+'">'+(on?'\u2713 ':'+ ')+escH(st.name||'Staff')+'</button>';
+          }).join('')+'</div>';
+        } else {
+          html+='<div style="font-size:11px;color:#8899aa">Connect coaches to your org to staff this team.</div>';
+        }
+        html+='</div>';
+      });
+      html+='<div style="font-weight:700;color:#e8f4fd;font-size:12px;margin:10px 0 6px">Assign athletes</div>';
+      players.forEach(function(pl){
+        var cur=''; Object.keys(_teamMembers).forEach(function(tid){ if(_teamMembers[tid]&&_teamMembers[tid][pl.userId]) cur=tid; });
+        html+='<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0">'+
+          '<span style="font-size:12px;color:#e8f4fd">'+escH(pl.name||'Athlete')+'</span>'+
+          aosPlayerTeamSelectHTML(pl.userId,_orgTeams,cur)+'</div>';
+      });
+    }
     html+='</div>';
 
     /* Link Player */
@@ -7264,7 +7738,7 @@ function renderAdmin(){
   });
   var clearBtn=safeGet('admin-clear');if(clearBtn)clearBtn.addEventListener('click',function(){
     if(!confirm('⚠️ This will permanently delete ALL data. Are you sure?'))return;
-    var keys=['sb_profile','sb_training','sb_team_info','sb_roster','sb_goals','sb_metrics_batting','sb_metrics_pitching','sb_metrics_fielding','sb_metrics_physical','sb_metrics_blast','sb_metrics_radar','sb_metrics_rapsodo','sb_metrics_garmin','sb_recovery','sb_hydration','sb_calendar','sb_requests','sb_nutrition_goals','sb_nutrition_log','sb_tasks','sb_tasks_date','sb_gameday','sb_admin_log'];
+    var keys=['sb_profile','sb_training','sb_team_info','sb_roster','sb_goals','sb_metrics_custom','sb_metrics_batting','sb_metrics_pitching','sb_metrics_fielding','sb_metrics_physical','sb_metrics_blast','sb_metrics_radar','sb_metrics_rapsodo','sb_metrics_garmin','sb_recovery','sb_hydration','sb_calendar','sb_requests','sb_nutrition_goals','sb_nutrition_log','sb_tasks','sb_tasks_date','sb_gameday','sb_admin_log'];
     keys.forEach(function(k){try{AppSDK.setItem(k,null)}catch(e){}});
     profile={};training={};teamInfo={};roster=[];goals=[];metricsBatting=[];metricsPitching=[];metricsFielding=[];metricsPhysical={};metricsBlast=[];metricsRadar=[];metricsRapsodo=[];metricsGarmin=[];recovery={};hydration={};calEvents=[];requests=[];nutritionLog={};tasks=[];gameday={items:JSON.parse(JSON.stringify(DEFAULT_GD_ITEMS)),custom:[]};adminLog=[];
     showToast('All data cleared');renderAdmin();
@@ -7295,8 +7769,237 @@ document.querySelectorAll('.more-card[data-more]').forEach(function(b){
 
 
 /* ========== PARENT VIEW ========== */
+/* The child's Metrics, from the parent's side. Sport-config groups and
+   the physical benchmarks are loggable here — a parent at the game
+   often has the stat line — while the softball/baseball game logs show
+   as career summaries. Everything writes into the athlete's own data,
+   tagged with who logged it. */
+function aosParentMetricsHTML(prof,custom,phys,batting,pitching){
+  var sport=prof.sport||'Other';
+  var groups=(typeof aosSportGroups==='function')?aosSportGroups(sport):[];
+  var h='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Metrics \u00B7 '+escH(sport)+'</div>';
+  if(!groups.length&&!batting.length&&!pitching.length&&!Object.keys(phys||{}).length)
+    h+='<div style="color:var(--white-dim);font-size:13px">Nothing logged yet.</div>';
+  groups.forEach(function(g){
+    if(g.legacy) return;
+    var entries=(custom[g.id]||[]).slice().sort(function(a,b){return (b.date||'').localeCompare(a.date||'');});
+    h+='<div style="margin-bottom:10px"><div style="font-weight:700;font-size:12px;color:#00E0FF;margin-bottom:4px">'+escH(g.label)+'</div>';
+    if(!entries.length) h+='<div style="font-size:12px;color:var(--white-dim)">No entries.</div>';
+    entries.slice(0,5).forEach(function(e){
+      var line=(g.fields||[]).map(function(f){
+        var v=(e.values||{})[f.id];
+        return (v===''||v===undefined)?'':escH(f.label)+': '+escH(String(v));
+      }).filter(Boolean).join(' \u00B7 ');
+      h+='<div style="font-size:12px;color:#e8f4fd;padding:3px 0">'+line+
+         '<span style="color:#8899aa;font-size:10px"> \u00B7 '+escH(e.date||'')+(e.loggedByParent?' \u00B7 by you':'')+'</span></div>';
+    });
+    h+='<button class="btn btn-sm pm-add" data-g="'+escH(g.id)+'" style="margin-top:6px;font-size:11px">+ Log '+escH(g.label)+'</button>';
+    h+='<div id="pm-form-'+escH(g.id)+'" style="display:none;margin-top:8px"></div></div>';
+  });
+  if(batting.length){
+    var ab=0,hi=0,hr=0,rbi=0;
+    batting.forEach(function(s){ab+=s.ab||0;hi+=s.h||0;hr+=s.hr||0;rbi+=s.rbi||0;});
+    h+='<div style="font-size:12px;color:#e8f4fd;padding:4px 0">Batting \u00B7 '+ab+' AB \u00B7 '+hi+' H \u00B7 '+hr+' HR \u00B7 '+rbi+' RBI \u00B7 BA '+(ab?(hi/ab).toFixed(3):'\u2014')+'</div>';
+  }
+  if(pitching.length){
+    var ip=0,k=0,er=0;
+    pitching.forEach(function(s){ip+=s.ip||0;k+=s.k||0;er+=s.er||0;});
+    h+='<div style="font-size:12px;color:#e8f4fd;padding:4px 0">Pitching \u00B7 '+(Math.round(ip*10)/10)+' IP \u00B7 '+k+' K \u00B7 ERA '+(ip?((er*7)/ip).toFixed(2):'\u2014')+'</div>';
+  }
+  /* Physical benchmarks: bests, plus a logging form */
+  if(typeof BENCHMARKS!=='undefined'){
+    h+='<div style="margin-top:10px"><div style="font-weight:700;font-size:12px;color:#00E0FF;margin-bottom:4px">Physical bests</div>';
+    var any=false;
+    BENCHMARKS.forEach(function(bm){
+      var entries=(phys[bm.key]||[]);
+      if(!entries.length) return;
+      any=true;
+      var vals=entries.map(function(e){return Number(e.value);}).filter(function(v){return !isNaN(v);});
+      var best=bm.lower?Math.min.apply(null,vals):Math.max.apply(null,vals);
+      h+='<div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0"><span>'+escH(bm.label)+'</span><span style="color:var(--gold);font-weight:700">'+best+'</span></div>';
+    });
+    if(!any) h+='<div style="font-size:12px;color:var(--white-dim)">None recorded.</div>';
+    h+='<div class="form-row" style="margin-top:6px">'+
+      '<div class="form-group"><label>Metric</label><select id="pm-key">'+BENCHMARKS.map(function(bm){return '<option value="'+escH(bm.key)+'">'+escH(bm.label)+'</option>';}).join('')+'</select></div>'+
+      '<div class="form-group"><label>Value</label><input type="number" step="0.01" id="pm-val"></div></div>'+
+      '<button class="btn btn-sm" id="pm-save" style="font-size:11px">+ Log physical metric</button>'+
+      '<div id="pm-msg" style="font-size:11px;margin-top:6px;min-height:14px"></div></div>';
+  }
+  return h+'</div>';
+}
+function aosParentWriteChild(childId,key,value){
+  return fbDb.collection('users').doc(childId).collection('appdata').doc(key).set({value:value});
+}
+function aosBindParentMetrics(cid,prof,custom,phys,refresh){
+  var body=safeGet('pch-body'); if(!body) return;
+  body.querySelectorAll('.pm-add').forEach(function(btn){
+    btn.addEventListener('click',function(){
+      var gid=this.getAttribute('data-g');
+      var g=(aosSportGroups(prof.sport||'Other')||[]).find(function(x){return x.id===gid;});
+      var box=safeGet('pm-form-'+gid); if(!g||!box) return;
+      if(box.style.display==='block'){ box.style.display='none'; return; }
+      var f='';
+      (g.fields||[]).forEach(function(fl){
+        f+='<div class="form-group"><label>'+escH(fl.label)+'</label><input id="pmf-'+escH(fl.id)+'" type="'+(fl.text?'text':'number')+'"'+(fl.text?'':' step="'+(fl.dec?'0.01':'1')+'" value="0"')+'></div>';
+      });
+      f+='<div class="form-group"><label>Date</label><input type="date" id="pmf-date" value="'+todayStr()+'"></div>'+
+         '<button class="btn btn-sm btn-primary pm-commit" data-g="'+escH(gid)+'" style="font-size:11px">Save entry</button>';
+      box.innerHTML=f; box.style.display='block';
+      box.querySelector('.pm-commit').addEventListener('click',function(){
+        var vals={};
+        (g.fields||[]).forEach(function(fl){
+          var el=safeGet('pmf-'+fl.id); if(!el) return;
+          vals[fl.id]=fl.text?el.value.trim():(parseFloat(el.value)||0);
+        });
+        custom[gid]=custom[gid]||[];
+        custom[gid].push({id:'e_'+Date.now().toString(36),date:safeVal('pmf-date')||todayStr(),values:vals,
+          loggedByParent:(window.AOS_USER||{}).name||'parent'});
+        aosParentWriteChild(cid,'sb_metrics_custom',custom).then(function(){
+          showToast('Logged for '+(window._parentChild&&window._parentChild.name||'your athlete'));
+          refresh();
+        }).catch(function(e){ showToast('Could not save.'); console.warn('AOS parent metric write failed',e); });
+      });
+    });
+  });
+  var save=safeGet('pm-save');
+  if(save) save.addEventListener('click',function(){
+    var key=safeVal('pm-key'), val=parseFloat(safeVal('pm-val'));
+    var msg=safeGet('pm-msg');
+    if(isNaN(val)){ msg.style.color='#e74c3c'; msg.textContent='Enter a value.'; return; }
+    phys[key]=phys[key]||[];
+    phys[key].push({id:'p_'+Date.now().toString(36),value:val,date:todayStr(),loggedByParent:(window.AOS_USER||{}).name||'parent'});
+    aosParentWriteChild(cid,'sb_metrics_physical',phys).then(function(){
+      msg.style.color='#2ecc71'; msg.textContent='Logged.'; refresh();
+    }).catch(function(e){ msg.style.color='#e74c3c'; msg.textContent='Could not save.'; console.warn(e); });
+  });
+}
+
+/* ── Parent view of an athlete ──────────────────────────────────────
+   A linked parent can open their child's Home screen — today's check-in,
+   training, hydration, streak, goals and next event — and edit the
+   athlete's profile information. The athlete's own data still lives in
+   their private space; the rules grant a linked parent read access to
+   it, and write access to the profile only.
+
+   Age note: this is on for every age. To limit teenagers to the summary
+   view, gate the button below on childAcc.ageMode==='youth'. */
+function aosChildData(childId,key){
+  return fbDb.collection('users').doc(childId).collection('appdata').doc(key).get()
+    .then(function(s){ return (s.exists?s.data().value:null); })
+    .catch(function(e){ console.warn('AOS child read failed',key,e); return null; });
+}
+window.aosOpenChildHome=function(childId,childName){
+  window._parentChild={id:childId,name:childName||'Your Athlete'};
+  renderParentChildHome();
+};
+window.aosCloseChildHome=function(){ window._parentChild=null; renderParent(); };
+function renderParentChildHome(){
+  var el=safeGet('sec-parent'); if(!el||!window._parentChild) return;
+  var cid=window._parentChild.id, cname=window._parentChild.name;
+  el.innerHTML='<div style="padding:16px;max-width:600px;margin:0 auto">'+
+    '<button class="btn btn-sm" onclick="aosCloseChildHome()" style="margin-bottom:10px">\u2190 Back to Parent Portal</button>'+
+    '<div style="font-family:\'Barlow Condensed\',sans-serif;font-size:24px;font-weight:900;color:#ff88aa;letter-spacing:1px">'+escH(cname)+'</div>'+
+    '<div id="pch-body" style="font-size:12px;color:var(--white-dim);margin-top:10px">Loading&hellip;</div></div>';
+  Promise.all([
+    aosChildData(cid,'sb_profile'), aosChildData(cid,'sb_recovery'), aosChildData(cid,'sb_training'),
+    aosChildData(cid,'sb_hydration'), aosChildData(cid,'sb_goals'), aosChildData(cid,'sb_calendar'),
+    aosChildData(cid,'sb_metrics_custom'), aosChildData(cid,'sb_metrics_physical'),
+    aosChildData(cid,'sb_metrics_batting'), aosChildData(cid,'sb_metrics_pitching')
+  ]).then(function(r){
+    var prof=r[0]||{}, rec=r[1]||{}, tr=r[2]||[], hyd=r[3]||{}, goals=r[4]||[], cal=r[5]||[];
+    var custom=r[6]||{}, phys=r[7]||{}, batting=r[8]||[], pitching=r[9]||[];
+    var td=(typeof getTodayKey==='function')?getTodayKey():new Date().toISOString().slice(0,10);
+    var today=rec[td]||{};
+    var water=((hyd[td]||{entries:[]}).entries||[]).reduce(function(s,e){return s+(e.oz||0);},0);
+    var weekAgo=new Date(Date.now()-6*86400000).toISOString().slice(0,10);
+    var sessions=(Array.isArray(tr)?tr:[]).filter(function(s){return (s.date||'')>=weekAgo;}).length;
+    var openGoals=(Array.isArray(goals)?goals:[]).filter(function(g){return !g.completed;}).length;
+    var next=(Array.isArray(cal)?cal:[]).filter(function(e){return (e.date||'')>=td;})
+      .sort(function(a,b){return (a.date||'').localeCompare(b.date||'');})[0];
+    function stat(v,l,c){ return '<div class="stat-card"><div class="stat-value"'+(c?' style="color:'+c+'"':'')+'>'+v+'</div><div class="stat-label">'+l+'</div></div>'; }
+    var rd=(today.readiness!==undefined)?today.readiness:null;
+    var rdColor=rd===null?'#8899aa':rd>=8?'#00ff88':rd>=5?'#FFD700':'#ff4466';
+    var html='<div class="stat-grid">'+
+      stat(rd===null?'\u2014':rd+'/10','Readiness today',rdColor)+
+      stat(today.sleep!==undefined?today.sleep+'h':'\u2014','Sleep')+
+      stat(water+'oz','Water today')+
+      stat(sessions,'Sessions (7d)')+
+      stat(prof.streak||0,'Day streak')+
+      stat(openGoals,'Open goals')+'</div>';
+    html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:6px">Today\'s check-in</div>';
+    if(today.readiness===undefined){
+      html+='<div style="color:var(--white-dim);font-size:13px">No check-in logged today.</div>';
+    } else {
+      var sore=Object.keys(today.soreness||{}).filter(function(k){return today.soreness[k];});
+      html+='<div style="font-size:13px;color:#e8f4fd;line-height:1.8">'+
+        'Energy: '+(today.energy!==undefined?today.energy+'/10':'\u2014')+'<br>'+
+        'Mood: '+escH(today.mood||'\u2014')+'<br>'+
+        'Sore areas: '+(sore.length?escH(sore.join(', ')):'none reported')+'<br>'+
+        'Recovery methods: '+((today.methods||[]).length?escH((today.methods||[]).join(', ')):'none')+'</div>';
+    }
+    html+='</div>';
+    if(next) html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">Next event</div>'+
+      '<div style="font-size:13px;color:#e8f4fd">'+escH(next.title||'Event')+' \u00B7 '+escH(next.date||'')+(next.time?' '+escH(next.time):'')+'</div></div>';
+    html+=aosParentMetricsHTML(prof,custom,phys,batting,pitching);
+
+    /* Editable athlete information */
+    var sports=(typeof aosSportList==='function')?aosSportList():['Other'];
+    var positions=(typeof aosSportPositions==='function')?aosSportPositions(prof.sport||'Other'):['Athlete'];
+    function field(id,label,val,type){ return '<div class="form-group"><label>'+label+'</label><input id="pci-'+id+'" type="'+(type||'text')+'" value="'+escH(val||'')+'"></div>'; }
+    html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Athlete information</div>'+
+      '<div class="form-row">'+field('firstName','First name',prof.firstName)+field('lastName','Last name',prof.lastName)+'</div>'+
+      '<div class="form-row">'+
+        '<div class="form-group"><label>Sport</label><select id="pci-sport">'+sports.map(function(s){
+          return '<option'+((prof.sport||'')===s?' selected':'')+'>'+escH(s)+'</option>';}).join('')+'</select></div>'+
+        '<div class="form-group"><label>Position</label><select id="pci-position">'+['']. concat(positions).map(function(s){
+          return '<option'+((prof.position||'')===s?' selected':'')+'>'+escH(s)+'</option>';}).join('')+'</select></div>'+
+      '</div>'+
+      '<div class="form-row">'+field('jersey','Jersey #',prof.jersey)+field('school','School',prof.school)+'</div>'+
+      '<div class="form-row">'+field('teamName','Team name',prof.teamName)+field('season','Season',prof.season)+'</div>'+
+      '<div class="form-row">'+field('email','Contact email',prof.email,'email')+field('phone','Contact phone',prof.phone,'tel')+'</div>'+
+      '<button class="btn btn-primary btn-full" id="pci-save">Save athlete info</button>'+
+      '<div id="pci-msg" style="margin-top:8px;font-size:12px;min-height:16px"></div>'+
+      '<div style="font-size:11px;color:var(--white-dim);margin-top:6px">Your athlete sees these changes on their own profile.</div></div>';
+    var body=safeGet('pch-body'); if(!body) return;
+    body.innerHTML=html;
+    aosBindParentMetrics(cid,prof,custom,phys,renderParentChildHome);
+    var sp=safeGet('pci-sport');
+    if(sp) sp.addEventListener('change',function(){
+      var pos=aosSportPositions(this.value), sel=safeGet('pci-position');
+      if(sel) sel.innerHTML=['']. concat(pos).map(function(s){return '<option>'+escH(s)+'</option>';}).join('');
+    });
+    var save=safeGet('pci-save');
+    if(save) save.addEventListener('click',function(){
+      var msg=safeGet('pci-msg');
+      var updated=Object.assign({},prof,{
+        firstName:safeVal('pci-firstName').trim(), lastName:safeVal('pci-lastName').trim(),
+        sport:safeVal('pci-sport'), position:safeVal('pci-position'),
+        jersey:safeVal('pci-jersey'), school:safeVal('pci-school'),
+        teamName:safeVal('pci-teamName'), season:safeVal('pci-season'),
+        email:safeVal('pci-email'), phone:safeVal('pci-phone'),
+        updatedByParent:(window.AOS_USER||{}).name||'', updatedByParentAt:Date.now()
+      });
+      fbDb.collection('users').doc(cid).collection('appdata').doc('sb_profile').set({value:updated})
+        .then(function(){
+          /* keep the directory record in step so coaches see the change */
+          return AppSDK.getItem('aos_local_accounts').then(function(accs){
+            accs=accs||{};
+            if(!accs[cid]) return null;
+            accs[cid].name=((updated.firstName||'')+' '+(updated.lastName||'')).trim()||accs[cid].name;
+            accs[cid].sport=updated.sport||accs[cid].sport;
+            accs[cid].position=updated.position||accs[cid].position;
+            return AppSDK.setItem('aos_local_accounts',accs);
+          }).catch(function(){});
+        })
+        .then(function(){ msg.style.color='#2ecc71'; msg.textContent='Saved.'; prof=updated; })
+        .catch(function(e){ msg.style.color='#e74c3c'; msg.textContent='Could not save: '+((e&&e.message)||'error'); });
+    });
+  });
+}
+
 function renderParent(){
   var el=safeGet('sec-parent');if(!el)return;
+  if(window._parentChild){ renderParentChildHome(); return; }
   var u=window.AOS_USER||{};
   Promise.all([
     AppSDK.getItem('aos_parent_links'),
@@ -7375,6 +8078,7 @@ function renderParent(){
         /* Availability — parent can mark the child out (injury, illness,
            etc.) so Coach/Trainer see an honest status instead of just a
            missing check-in. */
+        html+='<button onclick="aosOpenChildHome(\''+escH(ch.childId)+'\',\''+escH((childAcc.name||ch.childName||'Your Athlete').replace(/\'/g,"\\'"))+'\')" style="width:100%;margin:8px 0;background:rgba(255,136,170,0.15);border:1px solid #ff88aa;color:#ff88aa;border-radius:10px;padding:10px;font-weight:700;font-size:13px">\uD83C\uDFE0 Open their Home &amp; info</button>';
         var childIsOut=childAcc.availabilityStatus==='unavailable';
         html+='<div style="background:#0A1A2F;border-radius:8px;padding:10px 12px;margin-bottom:10px">';
         html+='<div style="font-size:11px;font-weight:700;color:var(--gold);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Availability</div>';
@@ -7593,10 +8297,9 @@ function renderProfile() {
     return;
   }
   var p = profile;
-  var AOS_SPORTS=['Softball','Baseball','Basketball','Football','Soccer','Volleyball','Track & Field','Wrestling','Swimming','Other'];
-  var SPORT_POS={'Softball':['Pitcher','Catcher','1B','2B','3B','SS','LF','CF','RF','Utility','DP/FLEX'],'Baseball':['Pitcher','Catcher','1B','2B','3B','SS','LF','CF','RF','DH'],'Basketball':['Point Guard','Shooting Guard','Small Forward','Power Forward','Center'],'Football':['QB','RB','WR','TE','OL','DL','LB','CB','S','K','P','Athlete'],'Soccer':['Goalkeeper','Defender','Midfielder','Forward','Winger'],'Volleyball':['Setter','Libero','Outside Hitter','Middle Blocker','DS'],'Other':['Athlete','Captain','Starter','Reserve']};
-  var athleteSport=p.sport||'Softball';
-  var positions=(SPORT_POS[athleteSport]||SPORT_POS['Other']);
+  var AOS_SPORTS=aosSportList();
+  var athleteSport=p.sport||'Other';
+  var positions=aosSportPositions(athleteSport);
   var recStatuses = ['Not Started','Exploring','Actively Recruiting','Committed','Signed','Walk-On'];
   var grades = ['7th','8th','9th (Freshman)','10th (Sophomore)','11th (Junior)','12th (Senior)','College Freshman','College Sophomore','College Junior','College Senior'];
   var gradYears = [];
@@ -7911,7 +8614,8 @@ function renderTrainer(){
     AppSDK.getItem('aos_season_events'),
     AppSDK.getItem('aos_dev_focus'),
     AppSDK.getItem('aos_dev_skills'),
-    AppSDK.getItem('aos_teams')
+    AppSDK.getItem('aos_teams'),
+    AppSDK.getItem('aos_team_members')
   ]).then(function(res){
     var accs=res[0]||{}, tasks=res[1]||[], devPlans=res[2]||{}, targets=res[3]||{}, links=res[4]||{};
     var allWeeklyPlans=res[5]||{}, allSeasonEvents=res[6]||[], allDevFocus=res[7]||{}, allDevSkills=res[8]||{};
@@ -7919,12 +8623,12 @@ function renderTrainer(){
     window._trainerSeasonEvents=allSeasonEvents;
     window._trainerDevFocus=allDevFocus[u.userId]||{};
     window._trainerDevSkills=allDevSkills;
-    var _allTeams=res[9]||{}, _myTeamsById={};
-    var _myTeams=Object.keys(_allTeams).filter(function(t){return _allTeams[t]&&_allTeams[t].ownerId===u.userId;})
-      .map(function(t){_myTeamsById[t]=_allTeams[t];return _allTeams[t];})
-      .sort(function(a,b){return (a.name||'').localeCompare(b.name||'');});
+    var _allTeams=res[9]||{}, _teamMembers=res[10]||{}, _myTeamsById={};
+    window._teamMembersCache=_teamMembers;
+    var _myTeams=aosTeamsFor({teams:_allTeams},u.userId);
+    _myTeams.forEach(function(t){_myTeamsById[t.teamId]=t;});
     if(window._staffTeam && !_myTeamsById[window._staffTeam]) window._staffTeam='';
-    var players=aosFilterRosterByTeam(getMyLinkedPlayers(accs, links, u), links, u.userId);
+    var players=aosFilterRosterByTeam(getMyLinkedPlayers(accs, links, u), links, u.userId, _teamMembers);
     var myTasks=tasks.filter(function(t){return t.toPlayerId===u.userId&&!t.dismissed;});
     var avgR=0;
     if(players.length){var sum=players.reduce(function(s,p){return s+(p.readiness||0);},0);avgR=Math.round(sum/players.length*10)/10;}
@@ -8170,7 +8874,9 @@ function renderTrainer(){
       html+='<div style="flex:1"><div style="font-weight:700;color:#e8f4fd;font-size:14px">'+escH(r.name||r.userId||'Player')+'</div>';
       html+='<div style="font-size:11px;color:'+(s.unavailable?'#8b5cf6':s.checkedIn?'#00ff88':'#8899aa')+'">'+(s.unavailable?'🏥 Out'+(r.availabilityReason?': '+escH(r.availabilityReason):''):s.checkedIn?'✓ Checked in today':'No check-in yet')+'</div></div>';
       html+='<div style="text-align:right"><div style="font-size:20px;font-weight:900;color:'+rColor+'">'+(r.readiness||'—')+'</div><div style="font-size:10px;color:#8899aa">readiness</div></div>';
-      html+=aosPlayerTeamSelectHTML(r.userId,_myTeams,((links[r.userId]||{})[u.userId]||{}).teamId||'');
+      var _curTid=''; Object.keys(_teamMembers).forEach(function(tid){ if(_teamMembers[tid]&&_teamMembers[tid][r.userId]) _curTid=tid; });
+      if(!_curTid) _curTid=((links[r.userId]||{})[u.userId]||{}).teamId||'';
+      html+=aosPlayerTeamSelectHTML(r.userId,_myTeams,_curTid);
       html+='<button onclick="trainerUnlinkPlayer(\''+escH(r.userId||'')+'\',\''+escH((r.name||'Player').replace(/'/g,"\\'"))+'\')" title="Remove from roster" style="background:none;border:1px solid rgba(231,76,60,.5);color:#e74c3c;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;padding:8px 10px;white-space:nowrap;touch-action:manipulation">Remove</button>';
       html+='</div>';
     });
