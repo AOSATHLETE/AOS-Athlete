@@ -171,7 +171,7 @@ select option{background:var(--navy-light)}
 .task-text.done{text-decoration:line-through;opacity:0.5}
 .intensity-display{display:inline-block;min-width:20px;text-align:center;font-weight:700;color:var(--gold);font-family:JetBrains Mono,monospace}
 .stars{display:flex;gap:4px;margin:4px 0}
-.star{font-size:20px;cursor:pointer;opacity:0.3;transition:opacity 0.15s}
+.star{font-size:24px;cursor:pointer;opacity:0.3;transition:opacity 0.15s;display:inline-flex;align-items:center;justify-content:center;min-width:44px;min-height:44px;touch-action:manipulation}
 .star.lit{opacity:1}
 .mood-row{display:flex;gap:8px;margin:8px 0}
 .mood-btn{font-size:24px;cursor:pointer;opacity:0.4;transition:all 0.15s;background:none;border:none;padding:4px}
@@ -265,6 +265,26 @@ select option{background:var(--navy-light)}
 .demo-btn{background:rgba(0,224,255,0.08);border:1px solid rgba(0,224,255,0.2);border-radius:6px;color:var(--gold);font-size:11px;font-weight:600;padding:4px 10px;cursor:pointer}
 .demo-btn:hover{background:rgba(0,224,255,0.15)}
 
+
+/* ── Tap targets ──────────────────────────────────────────────
+   Phone controls need roughly 44px of touch area; a lot of these
+   were 24-32px tall, and icon-only buttons as small as 25x24.
+   Minimums here rather than per-button so new buttons inherit them.
+   touch-action:manipulation removes the 300ms double-tap delay. */
+button, .btn, .tab-pill, .chip, [onclick] { touch-action: manipulation; }
+button, .btn {
+  min-height: 44px;
+  min-width: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.btn-full, .btn-block { width: 100%; }
+/* Pills and chips sit in tight rows: a little smaller, still tappable. */
+.tab-pill, .chip, .demo-btn, .rpt-view-tab { min-height: 38px; }
+/* Rows of small controls should wrap instead of running off-screen. */
+.tab-pills, .demo-btns, .chip-row { flex-wrap: wrap; }
 </style>
 
 <meta name="theme-color" content="#111111">
@@ -471,6 +491,140 @@ function _deleteOwnAccount(uid){
 }
 /* ── End accounts directory ── */
 /* ══════════════════════════════════════════════════════════════════
+   CONNECTIONS — one Firestore document per link instead of four big
+   shared documents. Who is on whose team drives message delivery,
+   roster access and parent permissions, so a single document any
+   signed-in user could rewrite was the last big hole.
+
+   Each document names its two parties, and only those two can write
+   it: you can't add yourself to someone's team, put someone on yours,
+   or delete a link you aren't part of. Reads stay open to signed-in
+   users — finding teammates means reading other athletes' links, and
+   "who coaches whom" is low-sensitivity next to the tampering risk.
+
+   The map shape the app already uses is rebuilt on read, so no screen
+   changed. Documents still in the old shared maps are merged in until
+   they're migrated by whoever is party to them.
+   ══════════════════════════════════════════════════════════════════ */
+var _LINK_KEYS={
+  aos_player_links:{coll:'links',      outer:'playerId', inner:'linkerId'},
+  aos_parent_links:{coll:'parentLinks', outer:'parentId', inner:'childId'},
+  aos_staff_links: {coll:'staffLinks',  outer:'staffId',  inner:'otherId'}
+};
+var _linkSeen={}, _linkLegacy={};
+function _linkDocId(outer,inner){ return outer+'__'+inner; }
+function _readLinks(key,uid){
+  var cfg=_LINK_KEYS[key];
+  return Promise.all([
+    fbDb.collection(cfg.coll).get(),
+    fbDb.collection('shared_data').doc(key).get().catch(function(){return null;})
+  ]).then(function(res){
+    var map={}, seen={};
+    res[0].forEach(function(d){
+      var v=d.data(), o=v[cfg.outer], i=v[cfg.inner];
+      if(!o||!i) return;
+      map[o]=map[o]||{};
+      map[o][i]=v.rec||{};
+      seen[d.id]=JSON.stringify(map[o][i]);
+    });
+    var legacy=(res[1]&&res[1].exists&&res[1].data().value)||{};
+    var fromLegacy={};
+    Object.keys(legacy).forEach(function(o){
+      Object.keys(legacy[o]||{}).forEach(function(i){
+        if(map[o]&&map[o][i]) return;              // already migrated
+        map[o]=map[o]||{}; map[o][i]=legacy[o][i];
+        fromLegacy[_linkDocId(o,i)]=[o,i];
+      });
+    });
+    _linkSeen[key]=seen; _linkLegacy[key]=fromLegacy;
+    return map;
+  });
+}
+function _writeLinks(key,uid,val){
+  var cfg=_LINK_KEYS[key], seen=_linkSeen[key]||{}, now={}, ops=[];
+  val=val||{};
+  Object.keys(val).forEach(function(o){
+    Object.keys(val[o]||{}).forEach(function(i){
+      now[_linkDocId(o,i)]={outer:o,inner:i,rec:val[o][i]};
+    });
+  });
+  Object.keys(now).forEach(function(docId){
+    var cur=JSON.stringify(now[docId].rec);
+    if(seen[docId]===cur) return;
+    var doc={parties:[now[docId].outer,now[docId].inner], rec:now[docId].rec, updatedAt:Date.now(),
+             reqId:(now[docId].rec&&now[docId].rec.reqId)||''};
+    doc[cfg.outer]=now[docId].outer; doc[cfg.inner]=now[docId].inner;
+    ops.push(fbDb.collection(cfg.coll).doc(docId).set(doc)
+      .then(function(){ seen[docId]=cur; })
+      .catch(function(e){ console.warn('AOS link write failed',docId,e); }));
+  });
+  Object.keys(seen).forEach(function(docId){
+    if(now[docId]) return;                          // still there
+    ops.push(fbDb.collection(cfg.coll).doc(docId).delete()
+      .then(function(){ delete seen[docId]; })
+      .catch(function(e){ console.warn('AOS link delete failed',docId,e); }));
+  });
+  /* Unlinking something that still lives in the old shared map has to be
+     removed from there too, or it reappears on the next read. */
+  var legacy=_linkLegacy[key]||{}, drop=Object.keys(legacy).filter(function(d){ return !now[d]; });
+  if(drop.length){
+    ops.push(fbDb.collection('shared_data').doc(key).get().then(function(snap){
+      if(!snap.exists) return;
+      var v=snap.data().value||{}, changed=false;
+      drop.forEach(function(d){
+        var o=legacy[d][0], i=legacy[d][1];
+        if(v[o]&&v[o][i]){ delete v[o][i]; changed=true; delete legacy[d]; }
+      });
+      if(changed) return fbDb.collection('shared_data').doc(key).set({value:v});
+    }).catch(function(e){ console.warn('AOS legacy link cleanup failed',e); }));
+  }
+  _linkSeen[key]=seen;
+  return Promise.all(ops).then(function(){});
+}
+/* Connection requests: one document each, readable and writable only by
+   the two people involved (either side may approve or deny). */
+var _REQ_KEY='aos_conn_requests', _reqSeen={};
+function _readRequests(uid){
+  if(!uid) return Promise.resolve([]);
+  return Promise.all([
+    fbDb.collection('connRequests').where('parties','array-contains',uid).get(),
+    fbDb.collection('shared_data').doc(_REQ_KEY).get().catch(function(){return null;})
+  ]).then(function(res){
+    var out=[], seen={}, have={};
+    res[0].forEach(function(d){
+      var r=d.data().req||{}; r.id=r.id||d.id;
+      out.push(r); have[r.id]=1; seen[d.id]=JSON.stringify(r);
+    });
+    var legacy=(res[1]&&res[1].exists&&res[1].data().value)||[];
+    (Array.isArray(legacy)?legacy:[]).forEach(function(r){
+      if(!r||have[r.id]) return;
+      if(r.fromUserId===uid||r.toUserId===uid) out.push(r);
+    });
+    out.sort(function(a,b){ return (b.ts||0)-(a.ts||0); });
+    _reqSeen=seen;
+    return out;
+  });
+}
+function _writeRequests(uid,val){
+  var ops=[], now={};
+  (Array.isArray(val)?val:[]).forEach(function(r){
+    if(!r||!r.id) return;
+    now[r.id]=r;
+    var cur=JSON.stringify(r);
+    if(_reqSeen[r.id]===cur) return;
+    ops.push(fbDb.collection('connRequests').doc(r.id).set({
+      parties:[r.fromUserId,r.toUserId].filter(Boolean), req:r, updatedAt:Date.now()
+    }).then(function(){ _reqSeen[r.id]=cur; })
+      .catch(function(e){ console.warn('AOS request write failed',r.id,e); }));
+  });
+  Object.keys(_reqSeen).forEach(function(id){
+    if(now[id]) return;
+    ops.push(fbDb.collection('connRequests').doc(id).delete()
+      .then(function(){ delete _reqSeen[id]; }).catch(function(){}));
+  });
+  return Promise.all(ops).then(function(){});
+}
+/* ══════════════════════════════════════════════════════════════════
    AUDIENCES — who belongs to whose team / org
    Built from the existing links, nothing new to maintain:
    - A coach's or trainer's TEAM = them + their linked athletes + those
@@ -661,6 +815,87 @@ function _writeMsgKey(key,uid,arr){
   return Promise.all(ops).then(function(){}).catch(function(e){ console.warn('AOS message write failed',key,e); });
 }
 /* ── End messaging ── */
+/* ══════════════════════════════════════════════════════════════════
+   SCOPED LISTS — challenges, polls, and the communications log were
+   each one shared list that every screen showed in full, so a
+   challenge created by a coach in another org appeared on every
+   athlete's Challenges screen, and any athlete's poll showed to
+   everyone. Same mistake as the global Team Feed.
+
+   Reads return only what belongs to you; new entries are stamped with
+   their creator and that creator's team/org hubs. Entries filtered out
+   are kept aside and written back untouched, so one person's save
+   can't delete another team's rows.
+
+   Entries created before this change carry no stamp. They stay
+   visible to everyone rather than vanishing; clear them out once
+   testing is done.
+   ══════════════════════════════════════════════════════════════════ */
+var _SCOPED_LISTS={aos_team_challenges:1,aos_polls:1,aos_comms_log:1};
+var _scopedHidden={}, _scopedSeen={};
+function _myHubIds(g,me,role){
+  if(role==='coach'||role==='trainer'||role==='org') return _aosUniq([me].concat(aosStaffLinksOf(g,me)));
+  if(role==='player') return _aosUniq([me].concat(aosStaffOfAthlete(g,me)));
+  if(role==='parent'){
+    var h=[me]; aosChildrenOf(g,me).forEach(function(k){ h=h.concat([k],aosStaffOfAthlete(g,k)); });
+    return _aosUniq(h);
+  }
+  return [me];
+}
+function _scopedVisible(key,item,me,hubs){
+  if(!item||typeof item!=='object') return true;
+  if(key==='aos_comms_log'){
+    if(!item.fromId&&!item.toId) return !item.creatorId || item.creatorId===me; // captain announcements
+    return item.fromId===me||item.toId===me||hubs.indexOf(item.fromId)>=0||hubs.indexOf(item.toId)>=0;
+  }
+  if(item.creatorId===me) return true;
+  if(Array.isArray(item.participants)&&item.participants.indexOf(me)>=0) return true;
+  if(Array.isArray(item.hubs)&&item.hubs.some(function(h){return hubs.indexOf(h)>=0;})) return true;
+  if(!item.creatorId&&!item.hubs) return true;   // created before scoping existed
+  return false;
+}
+function _readScopedList(key,uid){
+  return Promise.all([
+    fbDb.collection('shared_data').doc(key).get().catch(function(){return null;}),
+    aosLoadGraph()
+  ]).then(function(r){
+    var raw=(r[0]&&r[0].exists&&r[0].data().value)||[];
+    if(!Array.isArray(raw)) return raw;
+    var g=r[1], role=(window.AOS_USER&&window.AOS_USER.role)||'player';
+    var hubs=_myHubIds(g,uid,role);
+    var mine=[], hidden=[], seen={};
+    raw.forEach(function(it){
+      (_scopedVisible(key,it,uid,hubs)?mine:hidden).push(it);
+      if(it&&it.id) seen[it.id]=1;
+    });
+    _scopedHidden[key]=hidden; _scopedSeen[key]=seen;
+    return mine;
+  });
+}
+function _writeScopedList(key,uid,val){
+  if(!Array.isArray(val)){
+    return fbDb.collection('shared_data').doc(key).set({value:val});
+  }
+  var role=(window.AOS_USER&&window.AOS_USER.role)||'player';
+  return aosLoadGraph().then(function(g){
+    var hubs=_myHubIds(g,uid,role);
+    var seen=_scopedSeen[key]||{};
+    var stamped=val.map(function(it){
+      if(!it||typeof it!=='object') return it;
+      /* Only stamp rows that are new in this save. Rows that already
+         existed (including ones created before scoping) keep whatever
+         they had, so editing a list can't quietly claim someone
+         else's row or hide an old shared one. */
+      if(it.creatorId||it.hubs||key==='aos_comms_log') return it;
+      if(it.id && seen[it.id]) return it;
+      var copy=Object.assign({},it);
+      copy.creatorId=uid; copy.hubs=hubs;
+      return copy;
+    });
+    var merged=stamped.concat(_scopedHidden[key]||[]);
+    return fbDb.collection('shared_data').doc(key).set({value:merged});
+  });
+}
 window.AppSDK = {
   getItem: function(key){
     if(key==='aos_session'){
@@ -670,6 +905,9 @@ window.AppSDK = {
     return _fbCurrentUid().then(function(uid){
       if(key===_ACCT_KEY) return _readAccounts(uid);
       if(_MSG_KEYS[key]) return uid ? _readMsgKey(key,uid) : [];
+      if(_SCOPED_LISTS[key] && uid) return _readScopedList(key,uid);
+      if(_LINK_KEYS[key] && uid) return _readLinks(key,uid);
+      if(key===_REQ_KEY && uid) return _readRequests(uid);
       var ref = _isPersonalKey(key)
         ? (uid ? fbDb.collection('users').doc(uid).collection('appdata').doc(key) : null)
         : fbDb.collection('shared_data').doc(key);
@@ -690,6 +928,9 @@ window.AppSDK = {
     return _fbCurrentUid().then(function(uid){
       if(key===_ACCT_KEY) return _writeAccounts(uid,val);
       if(_MSG_KEYS[key]) return _writeMsgKey(key,uid,val);
+      if(_SCOPED_LISTS[key] && uid) return _writeScopedList(key,uid,val);
+      if(_LINK_KEYS[key] && uid) return _writeLinks(key,uid,val);
+      if(key===_REQ_KEY && uid) return _writeRequests(uid,val);
       var ref = _isPersonalKey(key)
         ? (uid ? fbDb.collection('users').doc(uid).collection('appdata').doc(key) : null)
         : fbDb.collection('shared_data').doc(key);
@@ -728,11 +969,6 @@ window.AppSDK = {
       <div class="auth-title">Welcome Back</div>
       <div class="auth-subtitle">Sign in to your AOS account</div>
 
-      <!-- NI Button (Netlify-hosted) -->
-      <button class="btn btn-primary" style="width:100%;margin-top:8px;font-size:15px" id="ni-signin-btn">&#128274; Sign In with Netlify</button>
-
-      <div class="auth-divider">or sign in manually</div>
-
       <!-- Manual email/password form -->
       <div class="form-group">
         <label>Email</label>
@@ -749,16 +985,6 @@ window.AppSDK = {
         No account? <button class="auth-link" id="go-signup-btn">Create Account</button>
       </div>
 
-      <div class="auth-demo">
-        <div class="auth-demo-title">&#9654; Quick Demo Login</div>
-        <div class="demo-btns">
-          <button class="demo-btn" data-demo="player">&#9918; Player</button>
-          <button class="demo-btn" data-demo="coach">&#128104;&#8205;&#127979; Coach</button>
-          <button class="demo-btn" data-demo="trainer">&#127947;&#65039; Trainer</button>
-          <button class="demo-btn" data-demo="org">&#127962; Org</button>
-          <button class="demo-btn" data-demo="parent">&#128106; Parent</button>
-        </div>
-      </div>
     </div>
 
     <!-- ── CREATE ACCOUNT VIEW ────────────────────────────────────── -->
@@ -766,10 +992,6 @@ window.AppSDK = {
       <div class="auth-title">Create Account</div>
       <div class="auth-subtitle">Join AOS — free to get started</div>
 
-      <!-- NI signup (Netlify-hosted) -->
-      <button class="btn" style="width:100%;margin-top:8px;font-size:15px;background:rgba(0,224,255,0.1);border:1px solid var(--gold);color:var(--gold)" id="ni-signup-btn">&#128274; Sign Up with Netlify</button>
-
-      <div class="auth-divider">or create manually</div>
 
       <div class="form-group">
         <label>First Name *</label>
@@ -896,7 +1118,7 @@ window.AppSDK = {
 <div data-id="49" class="more-sheet">
 <div data-id="50" style="display:flex;justify-content:space-between;align-items:center">
 <div data-id="51" style="font-weight:700;font-size:16px">More</div>
-<button data-id="52" id="more-close-btn" style="background:none;border:none;color:var(--white-dim);font-size:20px;cursor:pointer">✕</button>
+<button data-id="52" id="more-close-btn" title="Close" aria-label="Close" style="background:none;border:none;color:var(--white);font-size:22px;cursor:pointer">✕</button>
 </div>
 
 <!-- ═══ GLOBAL ADMIN ══════════════════════════════════════════════ -->
@@ -1295,6 +1517,7 @@ function navigateTo(sec){
   var nb=document.querySelector('[data-nav="'+navHighlight+'"]');
   if(nb)nb.classList.add('active');
   window.scrollTo(0,0);
+  if(sec==='team') window._teamScopeReady=false;
   var renders={home:renderHome,gameday:renderGameday,training:renderTraining,team:renderTeam,player:renderPlayer,goals:renderGoals,metrics:renderMetrics,recovery:renderRecovery,timer:renderTimer,hydration:renderHydration,calendar:renderCalendar,analytics:renderAnalytics,requests:renderRequests,reports:renderReports,nutrition:renderNutrition,tasks:renderTasks,coach:renderCoach,org:renderOrg,admin:renderAdmin,profile:renderProfile,trainer:renderTrainer,leaderboard:renderLeaderboard,referral:renderReferral,subscription:renderSubscription,parent:renderParent,challenges:renderChallenges,chat:renderChatHub};
   if(renders[sec])renders[sec]();
   // Persistent home bar — lives outside sections so re-renders can't wipe it
@@ -3145,7 +3368,7 @@ function renderTrainingToday(){
   var sessHTML='';
   sessions.forEach(function(s,i){
     var intColor=(parseInt(s.intensity)||0)>=7?'var(--green)':(parseInt(s.intensity)||0)>=4?'var(--warning)':'var(--danger)';
-    sessHTML+='<div class="card card-sm"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px"><div style="font-weight:700;font-size:13px">'+escH(s.activity)+'</div><div style="display:flex;gap:4px;flex-wrap:wrap">'+(s.secondary&&s.secondary!=='Trainer Assigned'?'<span class="badge badge-blue">'+escH(s.secondary)+'</span>':'')+(s.trainerAssigned?'<span class="badge" style="background:rgba(139,92,246,0.2);color:#8b5cf6;border:1px solid rgba(139,92,246,0.3);font-size:10px;margin-left:4px">🏋️ Trainer</span>':'')+(s.assignedByName?'<span class="badge" style="background:rgba(0,224,255,0.15);color:#00E0FF;border:1px solid rgba(0,224,255,0.3);font-size:10px">📋 '+escH(s.assignedByName)+'</span>':'')+'<span class="badge badge-gold">'+escH(s.duration||0)+'m</span><span class="badge" style="background:'+intColor+'22;color:'+intColor+'">⚡'+escH(s.intensity)+'</span><span class="badge '+(s.done?'badge-green':'badge-gray')+'">'+(s.done?'✅ Done':'⬜ Pending')+'</span>'+(s.isRecurring?'<span class="badge" style="background:rgba(139,92,246,0.2);color:#8b5cf6;border:1px solid rgba(139,92,246,0.3)">🔄 Recurring</span>':'')+'</div></div>'+(s.focus?'<div style="font-style:italic;font-size:11px;color:var(--white-dim);margin-top:4px">'+escH(s.focus)+'</div>':'')+(s.notes?'<div style="font-size:11px;color:var(--white-dim);margin-top:2px">'+escH(s.notes)+'</div>':'')+'<div style="display:flex;gap:6px;margin-top:8px"><button class="btn btn-sm btn-secondary ts-done" data-ti="'+i+'">'+(s.done?'↩ Undo':'✅ Mark Done')+'</button><button class="btn btn-sm btn-danger ts-del" data-ti="'+i+'">✕</button></div></div>';
+    sessHTML+='<div class="card card-sm"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px"><div style="font-weight:700;font-size:13px">'+escH(s.activity)+'</div><div style="display:flex;gap:4px;flex-wrap:wrap">'+(s.secondary&&s.secondary!=='Trainer Assigned'?'<span class="badge badge-blue">'+escH(s.secondary)+'</span>':'')+(s.trainerAssigned?'<span class="badge" style="background:rgba(139,92,246,0.2);color:#8b5cf6;border:1px solid rgba(139,92,246,0.3);font-size:10px;margin-left:4px">🏋️ Trainer</span>':'')+(s.assignedByName?'<span class="badge" style="background:rgba(0,224,255,0.15);color:#00E0FF;border:1px solid rgba(0,224,255,0.3);font-size:10px">📋 '+escH(s.assignedByName)+'</span>':'')+'<span class="badge badge-gold">'+escH(s.duration||0)+'m</span><span class="badge" style="background:'+intColor+'22;color:'+intColor+'">⚡'+escH(s.intensity)+'</span><span class="badge '+(s.done?'badge-green':'badge-gray')+'">'+(s.done?'✅ Done':'⬜ Pending')+'</span>'+(s.isRecurring?'<span class="badge" style="background:rgba(139,92,246,0.2);color:#8b5cf6;border:1px solid rgba(139,92,246,0.3)">🔄 Recurring</span>':'')+'</div></div>'+(s.focus?'<div style="font-style:italic;font-size:11px;color:var(--white-dim);margin-top:4px">'+escH(s.focus)+'</div>':'')+(s.notes?'<div style="font-size:11px;color:var(--white-dim);margin-top:2px">'+escH(s.notes)+'</div>':'')+'<div style="display:flex;gap:6px;margin-top:8px"><button class="btn btn-sm btn-secondary ts-done" data-ti="'+i+'">'+(s.done?'↩ Undo':'✅ Mark Done')+'</button><button class="btn btn-sm btn-danger ts-del" data-ti="'+i+'" title="Delete session" aria-label="Delete session">✕</button></div></div>';
   });
   c.innerHTML='<div class="card"><div style="font-size:14px;font-weight:700;margin-bottom:10px;color:var(--gold)">+ Add Training Session</div>'+
   '<div class="form-group"><label>Primary Activity</label><select id="tf-act">'+actOpts+'</select></div>'+
@@ -3168,7 +3391,7 @@ function renderTrainingToday(){
     return '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.04);font-size:12px">'+
       '<div><div style="font-weight:600">'+escH(rs.activity)+(rs.secondary?' · '+escH(rs.secondary):'')+'</div>'+
       '<div style="color:var(--white-dim);font-size:10px">'+(rs.freq==='daily'?'Every day':(rs.days&&rs.days.length?rs.days.map(function(d){return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d];}).join(', '):'Weekly'))+' · '+rs.duration+'min · ⚡'+rs.intensity+'</div></div>'+
-      '<button class="btn btn-sm btn-danger rs-del" data-rid="'+rs.id+'" style="padding:3px 8px;font-size:10px">✕</button>'+
+      '<button class="btn btn-sm btn-danger rs-del" data-rid="'+rs.id+'" style="padding:3px 8px;font-size:10px" title="Delete recurring session" aria-label="Delete recurring session">✕</button>'+
     '</div>';
   }).join('')+
   '</div>'
@@ -3352,7 +3575,7 @@ function openChallengeBuilder(existingChs){
     '<div style="background:#0A1A2F;border-radius:20px 20px 0 0;width:100%;max-width:430px;padding:20px;max-height:90vh;overflow-y:auto;border-top:2px solid rgba(0,224,255,0.3)">'+
       '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">'+
         '<div style="font-family:Barlow Condensed,sans-serif;font-size:22px;font-weight:800;color:var(--gold)">🏆 CREATE CHALLENGE</div>'+
-        '<button id="ch-close" style="background:none;border:none;color:var(--white-dim);font-size:20px;cursor:pointer;padding:4px">✕</button>'+
+        '<button id="ch-close" title="Close" aria-label="Close" style="background:none;border:none;color:var(--white);font-size:22px;cursor:pointer;padding:4px">✕</button>'+
       '</div>'+
 
       // Challenge type
@@ -3638,8 +3861,41 @@ function captainVote(pollId, optionIdx){
   });
 }
 
+/* Teammates = athletes who share at least one coach, trainer, or org with
+   you. aos_team_roster holds every user in the app, so without this the
+   Team page listed strangers as teammates. Readiness and streak are taken
+   from the live account records, which the daily check-in updates. */
+function refreshTeamRosterScope(cb){
+  return Promise.all([
+    AppSDK.getItem('aos_team_roster'),
+    AppSDK.getItem('aos_player_links'),
+    AppSDK.getItem('aos_local_accounts')
+  ]).then(function(r){
+    var roster=r[0]||{}, links=r[1]||{}, accs=r[2]||{};
+    var me=(window.AOS_USER||{}).userId||'';
+    var myHubs=Object.keys(links[me]||{}).filter(function(k){ return links[me][k] && links[me][k].linkerRole!=='parent'; });
+    var out={};
+    Object.keys(roster).forEach(function(pid){
+      var theirs=links[pid]||{};
+      var shares=myHubs.some(function(h){ return !!theirs[h]; });
+      if(pid!==me && !shares) return;
+      var entry=Object.assign({},roster[pid]);
+      var acc=accs[pid]||Object.values(accs).find(function(a){return a&&a.userId===pid;});
+      if(acc){
+        if(acc.readiness!==undefined) entry.readiness=acc.readiness;
+        if(acc.streak!==undefined) entry.streak=acc.streak;
+        if(acc.lastCheckIn) entry.lastCheckIn=acc.lastCheckIn;
+        if(acc.name) entry.name=entry.name||acc.name;
+      }
+      out[pid]=entry;
+    });
+    window._teamRoster=out; window._teamAccounts=accs; window._teamScopeReady=true;
+    if(cb)cb();
+  }).catch(function(e){ console.warn('AOS team roster refresh failed',e); });
+}
 function renderTeam(){
   var el=safeGet('sec-team'); if(!el) return;
+  if(!window._teamScopeReady){ refreshTeamRosterScope(function(){ renderTeam(); }); return; }
   var _uRole=(window.AOS_USER&&window.AOS_USER.role)||'player';
   if(_uRole==='coach'||_uRole==='trainer'||_uRole==='org'){ renderTeamHubForStaff(); return; }
   var me=((profile.firstName||'')+' '+(profile.lastName||'')).trim()||'Athlete';
@@ -4352,7 +4608,7 @@ function renderTeamHubForStaff(){
         otSeriesList.forEach(function(s){
           html+='<div style="display:flex;align-items:center;gap:8px;background:rgba(255,215,0,0.05);border-radius:8px;padding:10px;margin-bottom:8px">'+
             '<div style="flex:1"><span style="font-size:13px;color:#e8f4fd;font-weight:700">🔁 '+escH(s.title)+'</span><br><span style="font-size:10px;color:#8899aa">'+s.count+' sessions, '+(s.first||'')+' \u2192 '+(s.last||'')+' · '+s.totalReg+'/'+s.totalCap+' total spots filled</span></div>'+
-            '<button onclick="removeOrgTrainingSeries(\''+s.rid+'\')" style="background:none;border:none;color:#8899aa;cursor:pointer;font-size:14px">✕</button></div>';
+            '<button onclick="removeOrgTrainingSeries(\''+s.rid+'\')" style="background:rgba(231,76,60,0.12);border:1px solid rgba(231,76,60,0.5);color:#e74c3c;border-radius:6px;cursor:pointer;font-size:14px;font-weight:700;padding:6px 10px" title="Remove whole series" aria-label="Remove whole series">✕</button></div>';
         });
         otOneOff.sort(function(a,b){return (a.date||'').localeCompare(b.date||'');}).forEach(function(t){
           var reg=(t.registrations||[]).length, cap=t.capacity||0;
@@ -4360,7 +4616,7 @@ function renderTeamHubForStaff(){
           html+='<div style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,0.03);border-radius:8px;padding:10px;margin-bottom:8px">'+
             '<div style="flex:1"><span style="font-size:13px;color:#e8f4fd;font-weight:700">'+escH(t.title)+'</span><br><span style="font-size:10px;color:#8899aa">'+escH(t.date)+' '+escH(t.time||'')+' · '+escH(t.location||'')+'</span></div>'+
             '<div style="text-align:right"><span style="font-size:13px;font-weight:800;color:'+fillColor+'">'+reg+'/'+cap+'</span><br><span style="font-size:9px;color:#8899aa">spots</span></div>'+
-            '<button onclick="removeOrgTraining(\''+t.id+'\')" style="background:none;border:none;color:#8899aa;cursor:pointer;font-size:14px">✕</button></div>';
+            '<button onclick="removeOrgTraining(\''+t.id+'\')" style="background:rgba(231,76,60,0.12);border:1px solid rgba(231,76,60,0.5);color:#e74c3c;border-radius:6px;cursor:pointer;font-size:14px;font-weight:700;padding:6px 10px" title="Remove session" aria-label="Remove session">✕</button></div>';
         });
       }
     }
@@ -4929,7 +5185,7 @@ function renderGoals(){
     var idx=goals.indexOf(g);
     var pct=g.target?Math.min(100,Math.round((g.progress||0)/g.target*100)):0;
     var daysLeft=g.targetDate?Math.max(0,Math.ceil((new Date(g.targetDate)-new Date())/(86400000))):'—';
-    return '<div class="card card-sm"><div style="display:flex;justify-content:space-between;align-items:center"><div style="font-weight:700;font-size:13px">'+escH(g.title)+'</div><span class="badge badge-'+(g.priority==='High'?'red':g.priority==='Med'?'gold':'gray')+'">'+escH(g.priority)+'</span></div><div style="font-size:11px;color:var(--white-dim);margin-top:4px">'+escH(g.category||'General')+' · '+daysLeft+' days left</div><div class="progress-bar" style="margin:6px 0"><div class="progress-fill" style="width:'+pct+'%;background:var(--gold)"></div></div><div style="display:flex;align-items:center;gap:6px;margin-top:4px"><input type="range" class="goal-slider" data-gi="'+idx+'" min="0" max="'+(g.target||100)+'" value="'+(g.progress||0)+'" style="flex:1"><span style="font-size:12px;font-weight:700;color:var(--gold)">'+pct+'%</span></div><div style="display:flex;gap:6px;margin-top:8px"><button class="btn btn-sm btn-primary goal-complete" data-gi="'+idx+'">✅ Complete</button><button class="btn btn-sm btn-danger goal-del" data-gi="'+idx+'">✕</button></div></div>';
+    return '<div class="card card-sm"><div style="display:flex;justify-content:space-between;align-items:center"><div style="font-weight:700;font-size:13px">'+escH(g.title)+'</div><span class="badge badge-'+(g.priority==='High'?'red':g.priority==='Med'?'gold':'gray')+'">'+escH(g.priority)+'</span></div><div style="font-size:11px;color:var(--white-dim);margin-top:4px">'+escH(g.category||'General')+' · '+daysLeft+' days left</div><div class="progress-bar" style="margin:6px 0"><div class="progress-fill" style="width:'+pct+'%;background:var(--gold)"></div></div><div style="display:flex;align-items:center;gap:6px;margin-top:4px"><input type="range" class="goal-slider" data-gi="'+idx+'" min="0" max="'+(g.target||100)+'" value="'+(g.progress||0)+'" style="flex:1"><span style="font-size:12px;font-weight:700;color:var(--gold)">'+pct+'%</span></div><div style="display:flex;gap:6px;margin-top:8px"><button class="btn btn-sm btn-primary goal-complete" data-gi="'+idx+'">✅ Complete</button><button class="btn btn-sm btn-danger goal-del" data-gi="'+idx+'" title="Delete goal" aria-label="Delete goal">✕</button></div></div>';
   }).join('');
   el.innerHTML='<div class="section-title">🎯 Goals</div>'+
   '<div class="card"><div style="font-weight:700;margin-bottom:8px;font-size:13px">Set New Goal</div>'+
@@ -4986,7 +5242,7 @@ function renderMetricsPhysical(){
     pbHTML+='<div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.04)"><span>'+escH(b.m)+'</span><span>'+(best!==null?'<span class="badge badge-gold">PB: '+best+(b.u?' '+b.u:'')+'</span>':'<span class="badge badge-gray">No data</span>')+'</span></div>';
     if(entries.length){
       entries.slice().reverse().forEach(function(e){
-        pbHTML+='<div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;padding:2px 8px;color:var(--white-dim)"><span>'+escH(e.date)+': '+e.value+(b.u?' '+b.u:'')+'</span><span style="display:flex;align-items:center;gap:4px">'+(e.confirmedByTrainer?'<span class="badge" style="background:rgba(46,204,113,0.2);color:var(--green);border:1px solid rgba(46,204,113,0.3);font-size:9px">✅ '+escH(e.trainerName||'Trainer')+'</span> ':e.pendingConfirmation?'<span class="badge" style="background:rgba(0,224,255,0.15);color:var(--gold);font-size:9px">⏳ Pending</span> ':'<button class="btn-xs pm-req-confirm" data-key="'+b.key+'" data-id="'+e.id+'" style="font-size:9px;padding:2px 6px;background:rgba(139,92,246,0.2);color:#8b5cf6;border:1px solid rgba(139,92,246,0.3);border-radius:6px;cursor:pointer">🔔 Request</button> ')+'<button class="btn-xs pm-del" data-key="'+b.key+'" data-id="'+e.id+'" style="font-size:9px;padding:2px 6px;background:rgba(231,76,60,0.2);color:var(--danger);border:1px solid rgba(231,76,60,0.3);border-radius:6px;cursor:pointer">✕</button></span></div>';
+        pbHTML+='<div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;padding:2px 8px;color:var(--white-dim)"><span>'+escH(e.date)+': '+e.value+(b.u?' '+b.u:'')+'</span><span style="display:flex;align-items:center;gap:4px">'+(e.confirmedByTrainer?'<span class="badge" style="background:rgba(46,204,113,0.2);color:var(--green);border:1px solid rgba(46,204,113,0.3);font-size:9px">✅ '+escH(e.trainerName||'Trainer')+'</span> ':e.pendingConfirmation?'<span class="badge" style="background:rgba(0,224,255,0.15);color:var(--gold);font-size:9px">⏳ Pending</span> ':'<button class="btn-xs pm-req-confirm" data-key="'+b.key+'" data-id="'+e.id+'" style="font-size:9px;padding:2px 6px;background:rgba(139,92,246,0.2);color:#8b5cf6;border:1px solid rgba(139,92,246,0.3);border-radius:6px;cursor:pointer">🔔 Request</button> ')+'<button class="btn-xs pm-del" data-key="'+b.key+'" data-id="'+e.id+'" style="font-size:9px;padding:2px 6px;background:rgba(231,76,60,0.2);color:var(--danger);border:1px solid rgba(231,76,60,0.3);border-radius:6px;cursor:pointer" title="Delete entry" aria-label="Delete entry">✕</button></span></div>';
       });
     }
   });
@@ -5726,7 +5982,7 @@ function renderRequests(){
   var estTotal=requests.reduce(function(s,r){return s+(parseFloat(r.cost)||0)},0);
   var reqHTML=requests.map(function(r,i){
     var sBadge=r.status==='Pending'?'badge-gold':r.status==='Approved'?'badge-green':r.status==='Received'?'badge-blue':r.status==='Denied'?'badge-red':'badge-gray';
-    return '<div class="card card-sm"><div style="display:flex;justify-content:space-between;align-items:center"><div style="font-weight:700;font-size:13px">'+escH(r.title)+'</div><span class="badge '+sBadge+'">'+escH(r.status)+'</span></div><div style="font-size:11px;color:var(--white-dim);margin-top:4px">'+escH(r.category)+' · '+escH(r.priority)+' · '+(r.cost?'$'+r.cost:'Free')+'</div>'+(r.description?'<div style="font-size:12px;margin-top:4px">'+escH(r.description)+'</div>':'')+'<div style="display:flex;gap:4px;margin-top:8px;flex-wrap:wrap"><select class="req-status" data-ri="'+i+'" style="flex:1;font-size:12px"><option'+(r.status==='Pending'?' selected':'')+'>Pending</option><option'+(r.status==='Approved'?' selected':'')+'>Approved</option><option'+(r.status==='Ordered'?' selected':'')+'>Ordered</option><option'+(r.status==='Received'?' selected':'')+'>Received</option><option'+(r.status==='Denied'?' selected':'')+'>Denied</option></select><button class="btn btn-sm btn-danger req-del" data-ri="'+i+'">✕</button></div></div>';
+    return '<div class="card card-sm"><div style="display:flex;justify-content:space-between;align-items:center"><div style="font-weight:700;font-size:13px">'+escH(r.title)+'</div><span class="badge '+sBadge+'">'+escH(r.status)+'</span></div><div style="font-size:11px;color:var(--white-dim);margin-top:4px">'+escH(r.category)+' · '+escH(r.priority)+' · '+(r.cost?'$'+r.cost:'Free')+'</div>'+(r.description?'<div style="font-size:12px;margin-top:4px">'+escH(r.description)+'</div>':'')+'<div style="display:flex;gap:4px;margin-top:8px;flex-wrap:wrap"><select class="req-status" data-ri="'+i+'" style="flex:1;font-size:12px"><option'+(r.status==='Pending'?' selected':'')+'>Pending</option><option'+(r.status==='Approved'?' selected':'')+'>Approved</option><option'+(r.status==='Ordered'?' selected':'')+'>Ordered</option><option'+(r.status==='Received'?' selected':'')+'>Received</option><option'+(r.status==='Denied'?' selected':'')+'>Denied</option></select><button class="btn btn-sm btn-danger req-del" data-ri="'+i+'" title="Delete request" aria-label="Delete request">✕</button></div></div>';
   }).join('');
   el.innerHTML='<div class="section-title">📬 Equipment Requests</div>'+
   '<div class="stat-grid"><div class="stat-card"><div class="stat-value">'+total+'</div><div class="stat-label">Total</div></div><div class="stat-card"><div class="stat-value" style="color:var(--warning)">'+pending+'</div><div class="stat-label">Pending</div></div><div class="stat-card"><div class="stat-value" style="color:var(--green)">'+approved+'</div><div class="stat-label">Approved</div></div><div class="stat-card"><div class="stat-value">$'+estTotal.toFixed(0)+'</div><div class="stat-label">💰 Est. Total</div></div></div>'+
@@ -5976,12 +6232,21 @@ function syncMeToTeamRoster(){
         j:parseInt(p.jersey||p.jerseyNum)||0,
         jerseyNum:parseInt(p.jersey||p.jerseyNum)||0,
         s:'Active',
-        readiness:p.readiness||0,
+        readiness:0, /* filled from today's check-in just below */
         tag:p.tagline||'',
         streak:p.streak||0,
         updated:Date.now()
       };
-      return AppSDK.setItem('aos_team_roster',roster);
+      /* Readiness lives in the daily check-in (sb_recovery), not on the
+         profile, which is why the Team page used to show 0 for everyone. */
+      return AppSDK.getItem('sb_recovery').then(function(rec){
+        rec=rec||{};
+        var td=getTodayKey(), today=rec[td]||{};
+        roster[u.userId].readiness = (today.readiness!==undefined)?Number(today.readiness):(p.readiness||0);
+        roster[u.userId].lastCheckIn = (today.readiness!==undefined)?td:(p.lastCheckIn||'');
+        if(p.streak!==undefined) roster[u.userId].streak=p.streak||0;
+        return AppSDK.setItem('aos_team_roster',roster);
+      });
     });
   });
 }
@@ -6043,8 +6308,8 @@ function approveConnRequest(reqId,cb){
         sl=sl||{};
         sl[req.fromUserId]=sl[req.fromUserId]||{};
         sl[req.toUserId]=sl[req.toUserId]||{};
-        sl[req.fromUserId][req.toUserId]={id:req.toUserId,name:req.toName,role:req.toRole,linkedAt:Date.now()};
-        sl[req.toUserId][req.fromUserId]={id:req.fromUserId,name:req.fromName,role:req.fromRole,linkedAt:Date.now()};
+        sl[req.fromUserId][req.toUserId]={id:req.toUserId,name:req.toName,role:req.toRole,linkedAt:Date.now(),reqId:req.id};
+        sl[req.toUserId][req.fromUserId]={id:req.fromUserId,name:req.fromName,role:req.fromRole,linkedAt:Date.now(),reqId:req.id};
         return AppSDK.setItem('aos_staff_links',sl);
       }).then(function(){if(cb)cb();});
       return;
@@ -6058,7 +6323,7 @@ function approveConnRequest(reqId,cb){
     }).then(function(links){
       links=links||{};
       links[playerId]=links[playerId]||{};
-      links[playerId][partyId]={linkerId:partyId,linkerName:partyName,linkerRole:partyRole,linkedAt:Date.now()};
+      links[playerId][partyId]={linkerId:partyId,linkerName:partyName,linkerRole:partyRole,linkedAt:Date.now(),reqId:req.id};
       return AppSDK.setItem('aos_player_links',links);
     }).then(function(){
       // Parent connections also populate aos_parent_links, which
@@ -6067,7 +6332,7 @@ function approveConnRequest(reqId,cb){
       AppSDK.getItem('aos_parent_links').then(function(pl){
         pl=pl||{};
         pl[partyId]=pl[partyId]||{};
-        pl[partyId][playerId]={childId:playerId,childName:req.fromRole==='player'?req.fromName:req.toName,linkedAt:Date.now()};
+        pl[partyId][playerId]={childId:playerId,childName:req.fromRole==='player'?req.fromName:req.toName,linkedAt:Date.now(),reqId:req.id};
         return AppSDK.setItem('aos_parent_links',pl);
       }).then(function(){if(cb)cb();});
     });
@@ -6116,6 +6381,7 @@ function removePlayerLink(linkerId,name){
     AppSDK.setItem('aos_player_links',links).then(function(){
       showToast((name||'Link')+' removed.');
       if(typeof renderProfile==='function') renderProfile();
+      if(typeof _renderConnectionSystem==='function') _renderConnectionSystem();
     });
   });
 }
@@ -6425,7 +6691,7 @@ function renderCoach(){
       seriesList.forEach(function(s){
         html+='<div style="display:flex;align-items:center;gap:8px;background:rgba(0,224,255,0.05);border-radius:8px;padding:6px 10px">'+
           '<div style="flex:1"><span style="font-size:12px;color:#e8f4fd;font-weight:600">🔁 '+escH(s.title)+'</span> <span style="font-size:10px;color:#8899aa">'+s.count+' occurrences, '+(s.first||'')+' \u2192 '+(s.last||'')+' · '+s.type+'</span></div>'+
-          '<button onclick="removeCoachSeasonSeries(\''+s.rid+'\')" style="background:none;border:none;color:#8899aa;cursor:pointer;font-size:14px" title="Remove whole series">✕</button></div>';
+          '<button onclick="removeCoachSeasonSeries(\''+s.rid+'\')" style="background:rgba(231,76,60,0.12);border:1px solid rgba(231,76,60,0.5);color:#e74c3c;border-radius:6px;cursor:pointer;font-size:14px;font-weight:700;padding:6px 10px" title="Remove whole series" aria-label="Remove whole series">✕</button></div>';
       });
       oneOff.sort(function(a,b){return (a.date||'').localeCompare(b.date||'');}).forEach(function(e){
         var rsvps=e.rsvps||[];
@@ -6436,7 +6702,7 @@ function renderCoach(){
         html+='<div style="background:rgba(255,255,255,0.03);border-radius:8px;padding:8px 10px;margin-bottom:0">'+
           '<div style="display:flex;align-items:center;gap:8px">'+
           '<div style="flex:1"><span style="font-size:12px;color:#e8f4fd;font-weight:600">'+escH(e.title)+'</span> <span style="font-size:10px;color:#8899aa">'+(e.date||'')+' · '+e.type+'</span></div>'+
-          '<button onclick="removeCoachSeasonEvent(\''+e.id+'\')" style="background:none;border:none;color:#8899aa;cursor:pointer;font-size:14px">✕</button></div>'+
+          '<button onclick="removeCoachSeasonEvent(\''+e.id+'\')" style="background:rgba(231,76,60,0.12);border:1px solid rgba(231,76,60,0.5);color:#e74c3c;border-radius:6px;cursor:pointer;font-size:14px;font-weight:700;padding:6px 10px" title="Remove event" aria-label="Remove event">✕</button></div>'+
           '<div style="font-size:10px;margin-top:4px"><span style="color:#2ecc71">✅ '+attN+' attending</span>'+(attNames.length?': '+escH(attNames.join(', ')):'')+
           (declN?'<br><span style="color:#ff4466">❌ '+declN+' can\'t make it</span>: '+escH(declNames.join(', ')):'')+'</div>'+
         '</div>';
@@ -6525,7 +6791,7 @@ function renderCoach(){
       html+='<div style="flex:1"><div style="font-weight:700;color:#e8f4fd;font-size:14px">'+escH(r.name||r.userId||'Player')+'</div>';
       html+='<div style="font-size:11px;color:'+(s.unavailable?'#8b5cf6':s.checkedIn?'#00ff88':'#8899aa')+'">'+(s.unavailable?'🏥 Out'+(r.availabilityReason?': '+escH(r.availabilityReason):''):s.checkedIn?'✓ Checked in today':'No check-in yet')+'</div></div>';
       html+='<div style="text-align:right"><div style="font-size:20px;font-weight:900;color:'+rColor+'">'+(r.readiness||'—')+'</div><div style="font-size:10px;color:#8899aa">readiness</div></div>';
-      html+='<button onclick="coachUnlinkPlayer(\''+escH(r.userId||'')+'\',\''+escH((r.name||'Player').replace(/'/g,"\\'"))+'\')" title="Remove from roster" style="background:none;border:none;color:#8899aa;font-size:16px;cursor:pointer;padding:4px">✕</button>';
+      html+='<button onclick="coachUnlinkPlayer(\''+escH(r.userId||'')+'\',\''+escH((r.name||'Player').replace(/'/g,"\\'"))+'\')" title="Remove from roster" style="background:none;border:1px solid rgba(231,76,60,.5);color:#e74c3c;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;padding:8px 10px;white-space:nowrap;touch-action:manipulation">Remove</button>';
       html+='</div>';
     });
 
@@ -7069,7 +7335,13 @@ function renderProfile() {
         var mine=_allLinks[_s.userId]||{};
         Object.keys(mine).forEach(function(pid){
           var rec=mine[pid];
-          _lines.push((_roleIcon[rec.linkerRole]||'&#x1F464; Connection')+': '+escH(rec.linkerName||pid));
+          /* Athletes can remove a coach, trainer, or org connection they
+             no longer want. Parent links stay parent-controlled. */
+          var canDrop=rec.linkerRole!=='parent';
+          _lines.push('<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:2px 0">'+
+            '<span>'+(_roleIcon[rec.linkerRole]||'&#x1F464; Connection')+': '+escH(rec.linkerName||pid)+'</span>'+
+            (canDrop?'<button onclick="removePlayerLink(\''+escH(pid)+'\',\''+escH((rec.linkerName||'Link').replace(/\'/g,"\\\\'"))+'\')" title="Disconnect" style="background:none;border:1px solid rgba(231,76,60,.5);color:#e74c3c;border-radius:6px;cursor:pointer;font-size:11px;padding:2px 8px;touch-action:manipulation">Disconnect</button>':'')+
+          '</div>');
         });
       } else {
         // Players connected to ME (I'm a coach/trainer/org/parent)
@@ -7081,7 +7353,7 @@ function renderProfile() {
               _lines.push('&#x26BE; Athlete: '+escH((pAcc&&pAcc.name)||playerId));
             }
           });
-          _lb.innerHTML=_lines.length?_lines.join('<br>'):'<span style="color:var(--white-dim)">No linked accounts yet. Share your AOS ID above.</span>';
+          _lb.innerHTML=_lines.length?_lines.join(''):'<span style="color:var(--white-dim)">No linked accounts yet. Share your AOS ID above.</span>';
         });
         return;
       }
@@ -7591,7 +7863,7 @@ function renderTrainer(){
       seriesList.forEach(function(s){
         html+='<div style="display:flex;align-items:center;gap:8px;background:rgba(0,255,136,0.05);border-radius:8px;padding:6px 10px">'+
           '<div style="flex:1"><span style="font-size:12px;color:#e8f4fd;font-weight:600">🔁 '+escH(s.title)+'</span> <span style="font-size:10px;color:#8899aa">'+s.count+' occurrences, '+(s.first||'')+' \u2192 '+(s.last||'')+' · '+s.type+'</span></div>'+
-          '<button onclick="removeTrainerSeasonSeries(\''+s.rid+'\')" style="background:none;border:none;color:#8899aa;cursor:pointer;font-size:14px" title="Remove whole series">✕</button></div>';
+          '<button onclick="removeTrainerSeasonSeries(\''+s.rid+'\')" style="background:rgba(231,76,60,0.12);border:1px solid rgba(231,76,60,0.5);color:#e74c3c;border-radius:6px;cursor:pointer;font-size:14px;font-weight:700;padding:6px 10px" title="Remove whole series" aria-label="Remove whole series">✕</button></div>';
       });
       oneOff.sort(function(a,b){return (a.date||'').localeCompare(b.date||'');}).forEach(function(e){
         var rsvps=e.rsvps||[];
@@ -7602,7 +7874,7 @@ function renderTrainer(){
         html+='<div style="background:rgba(255,255,255,0.03);border-radius:8px;padding:8px 10px;margin-bottom:0">'+
           '<div style="display:flex;align-items:center;gap:8px">'+
           '<div style="flex:1"><span style="font-size:12px;color:#e8f4fd;font-weight:600">'+escH(e.title)+'</span> <span style="font-size:10px;color:#8899aa">'+(e.date||'')+' · '+e.type+'</span></div>'+
-          '<button onclick="removeTrainerSeasonEvent(\''+e.id+'\')" style="background:none;border:none;color:#8899aa;cursor:pointer;font-size:14px">✕</button></div>'+
+          '<button onclick="removeTrainerSeasonEvent(\''+e.id+'\')" style="background:rgba(231,76,60,0.12);border:1px solid rgba(231,76,60,0.5);color:#e74c3c;border-radius:6px;cursor:pointer;font-size:14px;font-weight:700;padding:6px 10px" title="Remove event" aria-label="Remove event">✕</button></div>'+
           '<div style="font-size:10px;margin-top:4px"><span style="color:#2ecc71">✅ '+attN+' attending</span>'+(attNames.length?': '+escH(attNames.join(', ')):'')+
           (declN?'<br><span style="color:#ff4466">❌ '+declN+' can\'t make it</span>: '+escH(declNames.join(', ')):'')+'</div>'+
         '</div>';
@@ -7703,7 +7975,7 @@ function renderTrainer(){
       html+='<div style="flex:1"><div style="font-weight:700;color:#e8f4fd;font-size:14px">'+escH(r.name||r.userId||'Player')+'</div>';
       html+='<div style="font-size:11px;color:'+(s.unavailable?'#8b5cf6':s.checkedIn?'#00ff88':'#8899aa')+'">'+(s.unavailable?'🏥 Out'+(r.availabilityReason?': '+escH(r.availabilityReason):''):s.checkedIn?'✓ Checked in today':'No check-in yet')+'</div></div>';
       html+='<div style="text-align:right"><div style="font-size:20px;font-weight:900;color:'+rColor+'">'+(r.readiness||'—')+'</div><div style="font-size:10px;color:#8899aa">readiness</div></div>';
-      html+='<button onclick="trainerUnlinkPlayer(\''+escH(r.userId||'')+'\',\''+escH((r.name||'Player').replace(/'/g,"\\'"))+'\')" title="Remove from roster" style="background:none;border:none;color:#8899aa;font-size:16px;cursor:pointer;padding:4px">✕</button>';
+      html+='<button onclick="trainerUnlinkPlayer(\''+escH(r.userId||'')+'\',\''+escH((r.name||'Player').replace(/'/g,"\\'"))+'\')" title="Remove from roster" style="background:none;border:1px solid rgba(231,76,60,.5);color:#e74c3c;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;padding:8px 10px;white-space:nowrap;touch-action:manipulation">Remove</button>';
       html+='</div>';
     });
 
@@ -7998,7 +8270,7 @@ function renderTrainerContent(){
           '</div>'+
           '<div style="display:flex;gap:6px;margin-top:8px">'+
             '<button class="btn btn-sm btn-secondary tt-toggle" data-ti="'+t.id+'">'+(t.done?'↩ Reopen':'✅ Mark Done')+'</button>'+
-            '<button class="btn btn-sm btn-danger tt-del" data-ti="'+t.id+'">✕ Remove</button>'+
+            '<button class="btn btn-sm btn-danger tt-del" data-ti="'+t.id+'" title="Remove" aria-label="Remove">✕ Remove</button>'+
           '</div>'+
         '</div>';
       });
@@ -8521,18 +8793,24 @@ var AOS_AUTH = {
   checkSession: function(){
     var self = this;
 
-    // 1. Check for live Netlify Identity session first
-    if(typeof netlifyIdentity !== 'undefined'){
-      var niUser = netlifyIdentity.currentUser();
-      if(niUser && niUser.email){
-        self.handleNIUser(niUser);
-        return;
-      }
-    }
+    // Sign-in is Firebase Auth only (Netlify Identity and demo logins were
+    // removed: they created users Firebase doesn't know about, whom the
+    // security rules correctly block from all data).
 
     setTimeout(dismissSplash,4000);
     // 2. Fall back to cached localStorage session (demo / offline)
     AppSDK.getItem('aos_session').then(function(session){
+      // A saved session only counts if Firebase agrees the same person is
+      // signed in. Otherwise (a leftover session from an older version, a
+      // demo session, or an expired sign-in) clear it and show the login.
+      return _fbCurrentUid().then(function(fbUid){
+        if(session && (!fbUid || fbUid!==session.userId)){
+          AppSDK.setItem('aos_session',null);
+          return null;
+        }
+        return session;
+      });
+    }).then(function(session){
       // Validate session has required fields
       if(session && session.userId && session.role && session.name){
         window.AOS_USER = session;
@@ -8664,8 +8942,8 @@ var AOS_AUTH = {
       btn.addEventListener('click', function(){ self.logout(); });
     });
 
-    // Netlify Identity events
-    if(typeof netlifyIdentity !== 'undefined'){
+    // Netlify Identity events: disabled (Firebase Auth is the only sign-in).
+    if(false && typeof netlifyIdentity !== 'undefined'){
       netlifyIdentity.on('login', function(user){
         netlifyIdentity.close();
         self.handleNIUser(user);
