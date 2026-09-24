@@ -1131,6 +1131,42 @@ function aosMoreTilesHTML(role){
         '<span style="font-size:22px">'+t[1]+'</span><span style="font-size:11px;font-weight:600">'+t[2]+'</span></button>';
     }).join('')+'</div>';
 }
+/* Reports, Tasks and Goals were written for an athlete's own data. A
+   coach opening them sees their own (empty) numbers, which reads as a
+   broken screen. Say whose data it is, and point at the team view. */
+function aosPersonalScreenNote(what){
+  var r=(window.AOS_USER||{}).role;
+  if(['coach','trainer','org'].indexOf(r)<0) return '';
+  return '<div style="background:rgba(243,156,18,0.08);border:1px solid rgba(243,156,18,0.25);border-radius:10px;'+
+    'padding:10px;margin-bottom:12px;font-size:11px;color:#f39c12;line-height:1.5">'+
+    'This is your own '+escH(what)+', not your team\'s. Team numbers are on your dashboard and in Team Hub.</div>';
+}
+/* Under-13 accounts are never listed outside their own club. Publishing
+   a young child's name to strangers isn't the child's decision to make,
+   and isn't ours either. */
+function aosIsYouth(){
+  var prof=(typeof profile!=='undefined'&&profile)?profile:{};
+  var mode=(typeof aosAgeModeFromProfile==='function')
+    ? aosAgeModeFromProfile({dob:prof.dob||(window.AOS_USER||{}).dob,grade:prof.grade,ageMode:prof.ageMode||(window.AOS_USER||{}).ageMode})
+    : (prof.ageMode||(window.AOS_USER||{}).ageMode||'');
+  return mode==='youth';
+}
+/* Taking part in the AOS-wide leaderboard is the athlete's decision. */
+window.aosSetGlobalLeaderboard=function(on){
+  var u=window.AOS_USER||{};
+  if(on&&aosIsYouth()){ showToast('Not available for athletes under 13.'); return; }
+  AppSDK.getItem('aos_local_accounts').then(function(accs){
+    accs=accs||{};
+    var key=Object.keys(accs).find(function(k){return accs[k]&&accs[k].userId===u.userId;});
+    if(!key) return null;
+    accs[key].lbGlobal=!!on;
+    return AppSDK.setItem('aos_local_accounts',accs);
+  }).then(function(){
+    if(typeof profile!=='undefined'&&profile){ profile.lbGlobal=!!on; saveItem('sb_profile',profile); }
+    showToast(on?'You\'re on the AOS board.':'Removed from the AOS board.');
+    if(typeof renderLeaderboard==='function') renderLeaderboard();
+  });
+};
 window.aosPickTeam=function(teamId){ window._staffTeam=teamId||''; _aosRerenderStaff(); };
 window.aosNewTeamPrompt=function(){
   var name=prompt('New team name (e.g. Varsity, JV, 14U):','');
@@ -1913,7 +1949,7 @@ function updateMoreNavLabel(){
   }
 }
 let chatHistory=[];
-let calMonth=7, calYear=2026; // Aug 2026
+let calMonth=new Date().getMonth(), calYear=new Date().getFullYear();  /* was pinned to Aug 2026 */
 
 const SEC_TYPES = {
   batting:'Batting',pitching:'Pitching',fielding:'Fielding',physical:'Physical',
@@ -2162,6 +2198,47 @@ function checkCOPPA(dob){
   if(age<18) return 'teen';
   return 'adult';
 }
+/* ── Age gate hardening ────────────────────────────────────────────
+   A typed birth date is the only age evidence the app has, and a child
+   who wants the AOS board can type an older year. Two things make that
+   harder without pretending to be verification:
+     1. The answer sticks. Once this browser has given an under-13 date,
+        going back and typing 2005 doesn't change the outcome.
+     2. Grade contradicts it. Where school grade and birth date disagree,
+        the younger reading wins.
+   Neither is proof. Real verification means a parent's card, an ID check
+   or a signed form — a product decision, not a code one. */
+var AOS_AGEGATE_KEY='aos_agegate';
+function aosRecordAgeAnswer(result){
+  try{ if(result==='under13') localStorage.setItem(AOS_AGEGATE_KEY,'under13'); }catch(e){}
+}
+function aosAgeGateLocked(){
+  try{ return localStorage.getItem(AOS_AGEGATE_KEY)==='under13'; }catch(e){ return false; }
+}
+/* Youngest plausible age for each grade. A safeguard should assume the
+   younger reading: most 7th graders are 12, so a 7th grader claiming a
+   2005 birth date is treated as under 13, not taken at their word. */
+var AOS_GRADE_MIN_AGE={'7th':11,'8th':12,'9th (Freshman)':13,'10th (Sophomore)':14,
+  '11th (Junior)':15,'12th (Senior)':16,'College Freshman':17,'College Sophomore':18,
+  'College Junior':19,'College Senior':20};
+function aosAgeFromDob(dob){
+  if(!dob) return null;
+  var b=new Date(dob); if(isNaN(b)) return null;
+  var t=new Date(), a=t.getFullYear()-b.getFullYear(), m=t.getMonth()-b.getMonth();
+  if(m<0||(m===0&&t.getDate()<b.getDate())) a--;
+  return a;
+}
+/* The stricter of what the birth date and the school grade imply. */
+function aosAgeModeFromProfile(prof){
+  prof=prof||{};
+  var age=aosAgeFromDob(prof.dob);
+  var claimed=age===null?null:(age<13?'youth':age<18?'teen':'adult');
+  var gradeMin=AOS_GRADE_MIN_AGE[prof.grade];
+  var implied=(gradeMin===undefined)?null:(gradeMin<13?'youth':gradeMin<18?'teen':'adult');
+  var order={youth:0,teen:1,adult:2};
+  if(claimed&&implied) return order[implied]<order[claimed]?implied:claimed;
+  return claimed||implied||prof.ageMode||'adult';
+}
 function showCOPPABlock(){showYouthModeSetup('',function(){});}
 
 // Youth Mode Modal (Under 13)
@@ -2358,7 +2435,7 @@ function renderReports(){
     {k:'org',label:'🏢 Org View'},
     {k:'auto',label:'🔄 Auto-Send'}
   ];
-  el.innerHTML='<div class="section-title">📄 Reports & Sharing</div>'+
+  el.innerHTML='<div class="section-title">📄 Reports & Sharing</div>'+aosPersonalScreenNote('reports')+
   '<div class="tab-pills" style="overflow-x:auto;flex-wrap:nowrap;padding-bottom:4px">'+
     views.map(function(v){return '<button class="tab-pill rpt-view-tab'+(reportView===v.k?' active':'')+'" data-rv="'+v.k+'">'+v.label+'</button>';}).join('')+
   '</div>'+
@@ -3467,7 +3544,11 @@ function renderLeaderboard(){
   var u=window.AOS_USER||{};
   var myId=u.userId||'';
   var myName=((profile.firstName||'')+' '+(profile.lastName||'')).trim()||u.name||'Me';
-  var scope=window._lbScope||'global';
+  /* Staff aren't athletes: they get their squad, not a rank of their own. */
+  var _amStaff=['coach','trainer','org'].indexOf(u.role)>=0;
+  window._lbAmStaff=_amStaff;
+  /* Default to your own team rather than every athlete in AOS. */
+  var scope=window._lbScope||'team';
 
   // Scoring functions per category — challengePoints now folds into overall
   // and has its own tab, since challenge point rewards are actually paid
@@ -3504,15 +3585,24 @@ function renderLeaderboard(){
     // What I'm linked to, for scope options and filtering
     var myLinks=links[myId]||{};
     var myCoachTrainerIds=Object.keys(myLinks).filter(function(id){return myLinks[id]&&(myLinks[id].linkerRole==='coach'||myLinks[id].linkerRole==='trainer');});
-    var myOrgCode=u.orgCode||'';
+    /* Signing up without a club still stamps a role prefix (AOS-PLY,
+       AOS-COA...). Treating that as an organisation grouped every
+       unaffiliated athlete in AOS together, so ignore those. */
+    var _placeholderOrg=/^AOS-(PLY|COA|TRN|ORG|PAR)$/i;
+    var myOrgCode=(u.orgCode&&!_placeholderOrg.test(u.orgCode))?u.orgCode:'';
 
     // Build the real player pool from aos_local_accounts — no demo/fake fallback.
-    var allAccounts=Object.values(accs).filter(function(a){return a&&(a.role||'player')==='player';});
+    var allAccounts=Object.values(accs).filter(function(a){
+      if(!a) return false;
+      var roles=(typeof aosRolesOf==='function')?aosRolesOf(a):[a.role||'player'];
+      return roles.indexOf('player')>=0;   /* athletes only, however many hats they wear */
+    });
     var pool=allAccounts.map(function(a){
       return {userId:a.userId,name:a.name||'Athlete',sport:a.sport||'',role:a.teamRole||'player',
         streak:a.streak||0,totalSessions:a.totalSessions||0,completedGoals:a.completedGoals||0,
         recoveryDays:a.recoveryDays||0,readiness:a.readiness||0,hydration:a.hydrationToday||0,
-        taskPoints:a.taskPoints||0,challengePoints:a.challengePoints||0,orgCode:a.orgCode||''};
+        taskPoints:a.taskPoints||0,challengePoints:a.challengePoints||0,orgCode:a.orgCode||'',
+        lbGlobal:a.lbGlobal===true};
     });
     // Make sure the viewer appears even if their own account record is
     // momentarily behind (edge case right after signup).
@@ -3527,10 +3617,23 @@ function renderLeaderboard(){
       scoped=pool.filter(function(p){
         if(p.userId===myId)return true;
         var theirLinks=links[p.userId]||{};
+        /* For a coach or trainer, "my team" means the athletes linked to them. */
+        if(window._lbAmStaff) return !!theirLinks[myId];
+        if(!myCoachTrainerIds.length) return false;   /* no team yet: just you */
         return myCoachTrainerIds.some(function(cid){return theirLinks[cid];});
       });
     } else if(scope==='org'){
+      /* Same rule as Team: your club, or just you if you aren't in one. */
       scoped=pool.filter(function(p){return p.userId===myId||(myOrgCode&&p.orgCode===myOrgCode);});
+    } else if(scope==='global'){
+      /* The AOS-wide board is opt-in both ways: you appear only if you
+         joined, and you can only see the others once you have. */
+      var _meIn=(pool.find(function(p){return p.userId===myId;})||{}).lbGlobal===true;
+      scoped=pool.filter(function(p){
+        if(p.userId===myId) return true;
+        if(window._lbAmStaff) return p.lbGlobal===true;   /* staff browse, never listed */
+        return _meIn&&p.lbGlobal===true;
+      });
     }
 
     var sorted=scoped.map(function(p){return Object.assign({},p,{score:calcScore(p,lbTab)});})
@@ -3588,24 +3691,54 @@ function renderLeaderboard(){
     // Update my rank badge
     var myRankIdx=sorted.findIndex(function(p){return p.userId===myId;});
     var myRankEl=document.getElementById('my-rank-badge');
-    if(myRankEl)myRankEl.innerHTML=myRankIdx>=0?'Your rank: <b style="color:var(--gold)">#'+(myRankIdx+1)+'</b> of '+sorted.length+' athletes':'<span style="color:var(--white-dim)">Log activity to appear on leaderboard</span>';
+    if(myRankEl&&window._lbAmStaff)myRankEl.innerHTML='<span style="color:var(--white-dim)">Your athletes, ranked \u2014 you\'re not in the standings.</span>';
+    else if(myRankEl)myRankEl.innerHTML=myRankIdx>=0?'Your rank: <b style="color:var(--gold)">#'+(myRankIdx+1)+'</b> of '+sorted.length+' athletes':'<span style="color:var(--white-dim)">Log activity to appear on leaderboard</span>';
 
     // Scope pills — only offer scopes that actually mean something for this viewer
     var scopeBar=document.getElementById('lb-scope-bar');
     if(scopeBar){
-      var scopes=[['global','🌍 Global']];
-      if(myCoachTrainerIds.length)scopes.push(['team','👥 My Team']);
-      if(myOrgCode)scopes.push(['org','🏢 My Org']);
+      /* "Global" listed every athlete in AOS, including other clubs'
+         children, so it is only offered to someone with no team yet. */
+      /* Team first, always. Org when you're in one. The AOS-wide board
+         is a choice you make, not the default. */
+      var scopes=[['team','\uD83C\uDFC6 My Team']];
+      if(myOrgCode)scopes.push(['org','\uD83C\uDFE2 My Org']);
+      scopes.push(['global','\uD83C\uDF0D AOS']);
       scopeBar.innerHTML=scopes.map(function(s){return '<button class="tab-pill lb-scope'+(scope===s[0]?' active':'')+'" data-ls="'+s[0]+'" style="font-size:11px">'+s[1]+'</button>';}).join('');
       scopeBar.querySelectorAll('.lb-scope').forEach(function(b){
         b.addEventListener('click',function(){window._lbScope=this.getAttribute('data-ls');renderLeaderboard();});
       });
+    }
+    /* On the AOS board, say plainly whether you're taking part, and let
+       the athlete decide. Staff aren't listed either way. */
+    var optEl=document.getElementById('lb-optin');
+    if(optEl){
+      if(scope!=='global'||window._lbAmStaff){ optEl.innerHTML=''; }
+      else {
+        var meAcc=Object.values(accs).find(function(a){return a&&a.userId===myId;})||{};
+        var inIt=meAcc.lbGlobal===true;
+        if(aosIsYouth()){
+          /* Belt and braces: if an account was flagged before this rule, drop it. */
+          if(inIt) aosSetGlobalLeaderboard(false);
+          optEl.innerHTML='<div style="background:rgba(243,156,18,0.08);border:1px solid rgba(243,156,18,0.25);border-radius:10px;padding:10px;margin-bottom:10px;font-size:11px;color:#f39c12;line-height:1.5">'+
+            'The AOS-wide board is for athletes 13 and over. Your team and club boards work as normal.</div>';
+          return;
+        }
+        optEl.innerHTML='<div style="background:rgba(0,224,255,0.06);border:1px solid rgba(0,224,255,0.2);border-radius:10px;padding:10px;margin-bottom:10px;font-size:11px;color:#8899aa;line-height:1.5">'+
+          (inIt?'You\'re on the AOS-wide board. Athletes outside your club can see your name and totals.'
+               :'The AOS-wide board is opt-in. Right now only you appear here.')+
+          '<button id="lb-optin-btn" class="btn btn-sm" style="display:block;margin-top:8px;font-size:11px">'+
+          (inIt?'Leave the AOS board':'Join the AOS board')+'</button></div>';
+        var ob=document.getElementById('lb-optin-btn');
+        if(ob) ob.addEventListener('click',function(){ aosSetGlobalLeaderboard(!inIt); });
+      }
     }
   });
 
   var tabs=['overall','streak','training','recovery','hydration','goals','tasks','challenges'];
   var tabLabels={overall:'🏆 Overall',streak:'🔥 Streak',training:'💪 Training',recovery:'💤 Recovery',hydration:'💧 Hydration',goals:'🎯 Goals',tasks:'📋 Tasks',challenges:'🏅 Challenges'};
   el.innerHTML='<div class="section-title">🏆 Leaderboard</div>'+
+  '<div id="lb-optin"></div>'+
   '<div id="my-rank-badge" style="text-align:center;font-size:12px;margin-bottom:10px;padding:8px;background:rgba(0,224,255,0.07);border-radius:8px;border:1px solid rgba(0,224,255,0.15)">Loading rank...</div>'+
   '<div id="lb-scope-bar" class="tab-pills" style="overflow-x:auto;flex-wrap:nowrap;padding-bottom:4px;margin-bottom:2px"></div>'+
   '<div class="tab-pills" style="overflow-x:auto;flex-wrap:nowrap;padding-bottom:4px">'+
@@ -5810,7 +5943,7 @@ function renderGoals(){
     var daysLeft=g.targetDate?Math.max(0,Math.ceil((new Date(g.targetDate)-new Date())/(86400000))):'—';
     return '<div class="card card-sm"><div style="display:flex;justify-content:space-between;align-items:center"><div style="font-weight:700;font-size:13px">'+escH(g.title)+'</div><span class="badge badge-'+(g.priority==='High'?'red':g.priority==='Med'?'gold':'gray')+'">'+escH(g.priority)+'</span></div><div style="font-size:11px;color:var(--white-dim);margin-top:4px">'+escH(g.category||'General')+' · '+daysLeft+' days left</div><div class="progress-bar" style="margin:6px 0"><div class="progress-fill" style="width:'+pct+'%;background:var(--gold)"></div></div><div style="display:flex;align-items:center;gap:6px;margin-top:4px"><input type="range" class="goal-slider" data-gi="'+idx+'" min="0" max="'+(g.target||100)+'" value="'+(g.progress||0)+'" style="flex:1"><span style="font-size:12px;font-weight:700;color:var(--gold)">'+pct+'%</span></div><div style="display:flex;gap:6px;margin-top:8px"><button class="btn btn-sm btn-primary goal-complete" data-gi="'+idx+'">✅ Complete</button><button class="btn btn-sm btn-danger goal-del" data-gi="'+idx+'" title="Delete goal" aria-label="Delete goal">✕</button></div></div>';
   }).join('');
-  el.innerHTML='<div class="section-title">🎯 Goals</div>'+
+  el.innerHTML='<div class="section-title">🎯 Goals</div>'+aosPersonalScreenNote('goals')+
   '<div class="card"><div style="font-weight:700;margin-bottom:8px;font-size:13px">Set New Goal</div>'+
   '<div class="form-group"><label>Goal Title*</label><input id="gl-title" placeholder="What do you want to achieve?"></div>'+
   '<div class="form-row"><div class="form-group"><label>Category</label><select id="gl-cat"><option>Hitting</option><option>Pitching</option><option>Fielding</option><option>Speed</option><option>Strength</option><option>Academic</option><option>Recruiting</option><option>General</option></select></div><div class="form-group"><label>Target Value</label><input type="number" id="gl-target" placeholder="100"></div></div>'+
@@ -7169,7 +7302,7 @@ AppSDK.setItem('aos_assigned_tasks',a2).then(renderTasks);});
       };});
     }
   });
-  el.innerHTML='<div class="section-title">📋 Daily Tasks</div>'+'<div id="tasks-assigned"><div style="font-size:12px;color:var(--white-dim);padding:4px 0">Loading assigned tasks…</div></div>'+
+  el.innerHTML='<div class="section-title">📋 Daily Tasks</div>'+aosPersonalScreenNote('tasks')+'<div id="tasks-assigned"><div style="font-size:12px;color:var(--white-dim);padding:4px 0">Loading assigned tasks…</div></div>'+
   (total?'<div class="card card-sm"><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>Progress</span><span style="font-weight:700">'+done+'/'+total+'</span></div><div class="progress-bar"><div class="progress-fill" style="width:'+pct+'%;background:var(--gold)"></div></div></div>':'')+
   '<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Add Task</div>'+
   '<div class="form-group"><label>Task</label><input id="tk-text" placeholder="What needs to be done?"></div>'+
@@ -10160,6 +10293,9 @@ var AOS_AUTH = {
     // is entered. This mirrors the manual sign-up path: under-13 (and
     // teen) users must clear a consent step before anything is saved.
     var coppaResult = (typeof checkCOPPA==='function') ? checkCOPPA(dob) : 'adult';
+    /* This browser already answered "under 13" once; a new date doesn't undo it. */
+    if(typeof aosAgeGateLocked==='function'&&aosAgeGateLocked()&&coppaResult!=='under13') coppaResult='under13';
+    if(typeof aosRecordAgeAnswer==='function') aosRecordAgeAnswer(coppaResult);
     var ageMode = coppaResult==='under13'?'youth':coppaResult==='teen'?'teen':'adult';
 
     // Persists NI metadata (once consent, if required, is confirmed) and
@@ -10273,6 +10409,9 @@ var AOS_AUTH = {
     // account record first and patching consent on afterward is exactly
     // the ordering COPPA (15 U.S.C. §6501) is designed to prevent.
     var coppaResult = (typeof checkCOPPA==='function') ? checkCOPPA(dob) : 'adult';
+    /* This browser already answered "under 13" once; a new date doesn't undo it. */
+    if(typeof aosAgeGateLocked==='function'&&aosAgeGateLocked()&&coppaResult!=='under13') coppaResult='under13';
+    if(typeof aosRecordAgeAnswer==='function') aosRecordAgeAnswer(coppaResult);
 
     // Builds the account object and persists it — only ever called once
     // consent (if required for this age) has already been confirmed.
