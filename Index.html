@@ -75,9 +75,9 @@ select option{background:var(--navy-light)}
 .stat-label{font-size:10px;color:var(--white-dim);margin-top:2px}
 .section-title{text-transform:uppercase;letter-spacing:1.5px;font-size:20px;font-weight:900;color:var(--gold);margin-bottom:16px;font-family:Barlow Condensed,sans-serif;letter-spacing:2px;text-transform:uppercase}
 .empty-state{text-align:center;padding:40px 20px;color:var(--white-dim);font-size:14px}
-.section{display:none;padding:72px 16px 76px;min-height:100vh}
+.section{display:none;padding:calc(72px + env(safe-area-inset-top)) 16px calc(76px + env(safe-area-inset-bottom));min-height:100vh}
 .section.active{display:block}
-.top-header{position:fixed;top:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;height:56px;background:var(--navy);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 16px;z-index:100}
+.top-header{position:fixed;top:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;height:calc(56px + env(safe-area-inset-top));padding-top:env(safe-area-inset-top);background:var(--navy);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 16px;z-index:100}
 .bottom-nav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;height:calc(60px + env(safe-area-inset-bottom));padding-bottom:env(safe-area-inset-bottom);background:var(--navy);border-top:1px solid var(--border);display:flex;z-index:100}
 .nav-btn{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;border:none;background:transparent;color:var(--white-dim);cursor:pointer;font-size:9px;padding:4px 0}
 .nav-btn .nav-icon{font-size:18px;line-height:1}
@@ -285,6 +285,15 @@ button, .btn {
 .tab-pill, .chip, .demo-btn, .rpt-view-tab { min-height: 38px; }
 /* Rows of small controls should wrap instead of running off-screen. */
 .tab-pills, .demo-btns, .chip-row { flex-wrap: wrap; }
+/* Two-column form rows: let columns shrink and labels wrap, so a long
+   label like "AOS TRAINING" can't push its checkbox off the screen. */
+.form-row { flex-wrap: wrap; }
+.form-row > .form-group { min-width: 0; flex: 1 1 140px; }
+.form-group label { overflow-wrap: break-word; }
+.card, .section { overflow-wrap: break-word; }
+input, select, textarea { max-width: 100%; box-sizing: border-box; }
+/* Nothing should be able to scroll the page sideways. */
+html, body { overflow-x: hidden; }
 </style>
 
 <meta name="theme-color" content="#111111">
@@ -949,12 +958,17 @@ window.aosCreateTeam=function(name,cb){
   }).then(function(tid){ showToast('Team "'+name+'" created.'); if(cb)cb(tid); });
 };
 /* Put an athlete on a team, or take them off it. */
-window.aosSetPlayerTeam=function(playerId,teamId){
+/* Add to a team, or remove from one. An athlete can be on several —
+   a school squad and a club squad, or two age groups — so adding to one
+   never takes them off another. */
+window.aosSetPlayerTeam=function(playerId,teamId,remove){
   var u=window.AOS_USER||{};
+  if(!teamId) return;
   AppSDK.getItem('aos_team_members').then(function(m){
     m=m||{};
-    Object.keys(m).forEach(function(tid){ if(m[tid]&&m[tid][playerId]) delete m[tid][playerId]; });
-    if(teamId){
+    if(remove){
+      if(m[teamId]) delete m[teamId][playerId];
+    } else {
       m[teamId]=m[teamId]||{};
       m[teamId][playerId]={teamId:teamId,athleteId:playerId,addedBy:u.userId,addedAt:Date.now()};
     }
@@ -969,7 +983,7 @@ window.aosSetPlayerTeam=function(playerId,teamId){
       });
       return changed?AppSDK.setItem('aos_player_links',l):null;
     }).catch(function(){});   /* an org isn't party to that link; harmless */
-  }).then(function(){ showToast(teamId?'Moved.':'Removed from team.'); _aosRerenderStaff(); });
+  }).then(function(){ showToast(remove?'Removed from team.':'Added to team.'); _aosRerenderStaff(); });
 };
 /* Assign or unassign a coach or trainer to one of my org's teams. */
 window.aosSetTeamStaff=function(teamId,staffId,on){
@@ -1007,6 +1021,56 @@ window.aosDeleteTeam=function(teamId){
     });
   }).then(function(){ if(window._staffTeam===teamId) window._staffTeam=''; showToast('Team deleted.'); _aosRerenderStaff(); });
 };
+/* Change which sport a connection is for (either party may set it). */
+window.aosSetLinkSport=function(playerId,sport){
+  var u=window.AOS_USER||{};
+  AppSDK.getItem('aos_player_links').then(function(l){
+    l=l||{};
+    if(!l[playerId]||!l[playerId][u.userId]) return null;
+    l[playerId][u.userId].sport=sport||'';
+    return AppSDK.setItem('aos_player_links',l);
+  }).then(function(){ showToast(sport?('Now coaching them for '+sport):'Sport cleared.'); _aosRerenderStaff(); });
+};
+/* What to show a coach about an athlete who plays more than one sport. */
+function aosLinkSportHTML(playerId,link,acc){
+  var linkSport=(link&&link.sport)||'';
+  var all=(Array.isArray(acc&&acc.sports)&&acc.sports.length)?acc.sports:((acc&&acc.sport)?[acc.sport]:[]);
+  if(!all.length) return '';
+  var others=all.filter(function(sp){return sp!==linkSport;});
+  var h='';
+  if(all.length>1){
+    h+='<select onchange="aosSetLinkSport(\''+playerId+'\',this.value)" title="Sport you coach them for" '+
+       'style="background:#0A1A2F;border:1px solid #334;color:#8899aa;font-size:11px;border-radius:6px;padding:5px">'+
+       all.map(function(sp){return '<option'+(sp===linkSport?' selected':'')+'>'+escH(sp)+'</option>';}).join('')+'</select>';
+    if(others.length) h+='<span title="Also plays" style="font-size:10px;color:#8899aa;margin-left:4px">also '+escH(others.join(', '))+'</span>';
+  } else if(linkSport){
+    h+='<span style="font-size:10px;color:#8899aa">'+escH(linkSport)+'</span>';
+  }
+  return h;
+}
+/* A coach names the captains; it used to be a label an athlete picked
+   for themselves, which meant Captain Tools were open to everyone. */
+window.aosSetCaptain=function(playerId,on){
+  var u=window.AOS_USER||{};
+  AppSDK.getItem('aos_player_links').then(function(l){
+    l=l||{};
+    if(!l[playerId]||!l[playerId][u.userId]) return null;
+    l[playerId][u.userId].captain=!!on;
+    return AppSDK.setItem('aos_player_links',l);
+  }).then(function(){ showToast(on?'Named captain.':'Captain removed.'); _aosRerenderStaff(); });
+};
+function aosCaptainButtonHTML(playerId,link){
+  var on=!!(link&&link.captain);
+  return '<button onclick="aosSetCaptain(\''+playerId+'\','+(on?'false':'true')+')" title="'+(on?'Remove captain':'Name as captain')+'" '+
+    'style="border-radius:8px;font-size:11px;font-weight:700;padding:6px 9px;'+
+    (on?'background:rgba(255,215,0,0.15);border:1px solid var(--gold);color:var(--gold)':'background:none;border:1px solid #334;color:#8899aa')+
+    '">\uD83D\uDC51'+(on?' Captain':'')+'</button>';
+}
+/* Is the signed-in athlete a captain for any of their coaches? */
+function aosAmCaptain(links,myId){
+  var mine=(links||{})[myId]||{};
+  return Object.keys(mine).some(function(k){ return mine[k]&&mine[k].captain; });
+}
 window.aosPickTeam=function(teamId){ window._staffTeam=teamId||''; _aosRerenderStaff(); };
 window.aosNewTeamPrompt=function(){
   var name=prompt('New team name (e.g. Varsity, JV, 14U):','');
@@ -1037,14 +1101,23 @@ function aosTeamPickerHTML(teams,accent){
   return h;
 }
 /* The per-athlete team dropdown on a roster card. */
-function aosPlayerTeamSelectHTML(playerId,teams,currentTeamId){
+function aosPlayerTeamSelectHTML(playerId,teams,currentTeamIds){
   if(!teams.length) return '';
-  var h='<select onchange="aosSetPlayerTeam(\''+playerId+'\',this.value)" title="Team" style="background:#0A1A2F;border:1px solid #334;color:#8899aa;font-size:11px;border-radius:6px;padding:6px">';
-  h+='<option value=""'+(!currentTeamId?' selected':'')+'>No team</option>';
-  teams.forEach(function(t){
-    h+='<option value="'+t.teamId+'"'+(currentTeamId===t.teamId?' selected':'')+'>'+escH(t.name||'Team')+'</option>';
+  var on=Array.isArray(currentTeamIds)?currentTeamIds:(currentTeamIds?[currentTeamIds]:[]);
+  var h='<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">';
+  teams.filter(function(t){return on.indexOf(t.teamId)>=0;}).forEach(function(t){
+    h+='<button onclick="aosSetPlayerTeam(\''+playerId+'\',\''+t.teamId+'\',true)" title="Remove from '+escH(t.name||'team')+'" '+
+       'style="background:rgba(0,224,255,0.15);border:1px solid #00E0FF;color:#00E0FF;border-radius:12px;font-size:11px;padding:5px 9px">'+
+       escH(t.name||'Team')+' \u00D7</button>';
   });
-  return h+'</select>';
+  var avail=teams.filter(function(t){return on.indexOf(t.teamId)<0;});
+  if(avail.length){
+    h+='<select onchange="if(this.value)aosSetPlayerTeam(\''+playerId+'\',this.value)" title="Add to a team" '+
+       'style="background:#0A1A2F;border:1px solid #334;color:#8899aa;font-size:11px;border-radius:6px;padding:6px">'+
+       '<option value="">+ Add to team</option>'+avail.map(function(t){
+         return '<option value="'+t.teamId+'">'+escH(t.name||'Team')+'</option>';}).join('')+'</select>';
+  }
+  return h+'</div>';
 }
 /* Filter a roster to the picked team. */
 function aosFilterRosterByTeam(players,links,staffId,members){
@@ -1128,16 +1201,168 @@ function _writeScopedList(key,uid,val){
          existed (including ones created before scoping) keep whatever
          they had, so editing a list can't quietly claim someone
          else's row or hide an old shared one. */
-      if(it.creatorId||it.hubs||key==='aos_comms_log') return it;
+      if(it.hubs||key==='aos_comms_log') return it;
       if(it.id && seen[it.id]) return it;
       var copy=Object.assign({},it);
-      copy.creatorId=uid; copy.hubs=hubs;
+      copy.creatorId=it.creatorId||uid;   // a creator set by the form still needs a team stamp
+      copy.hubs=hubs;
       return copy;
     });
     var merged=stamped.concat(_scopedHidden[key]||[]);
     return fbDb.collection('shared_data').doc(key).set({value:merged});
   });
 }
+/* ══════════════════════════════════════════════════════════════════
+   DEMO MODE — a working AOS with invented people, held in memory only.
+   It never touches Firebase, so a demo can't see or change real data,
+   and every demo starts clean. Pick a role on the sign-in screen.
+   ══════════════════════════════════════════════════════════════════ */
+var AOS_DEMO=false, _demoStore={}, _demoUsers={};
+function _demoDate(offset){ return new Date(Date.now()-(offset||0)*86400000).toISOString().slice(0,10); }
+function aosBuildDemoData(){
+  var org={userId:'demo_org',name:'Northside Fastpitch',role:'org',roles:['org'],email:'org@demo.aos',orgCode:'AOS-DEMO-ORG'};
+  var coach={userId:'demo_coach',name:'Coach Rivera',role:'coach',roles:['coach'],email:'coach@demo.aos',coachCode:'AOS-DEMO-COACH',sport:'Softball'};
+  var trainer={userId:'demo_trainer',name:'Sam Doyle',role:'trainer',roles:['trainer'],email:'trainer@demo.aos',sport:'Softball'};
+  var parent={userId:'demo_parent',name:'Jordan Blake',role:'parent',roles:['parent'],email:'parent@demo.aos'};
+  var athletes=[
+    {userId:'demo_a1',name:'Maya Blake',readiness:8,streak:12,sport:'Softball',sports:['Softball','Volleyball'],position:'Catcher',jersey:'12',challengePoints:120},
+    {userId:'demo_a2',name:'Ari Chen',readiness:6,streak:4,sport:'Softball',position:'Pitcher',jersey:'7',challengePoints:80},
+    {userId:'demo_a3',name:'Tess Moreau',readiness:9,streak:21,sport:'Softball',position:'SS',jersey:'3',challengePoints:210},
+    {userId:'demo_a4',name:'Priya Nair',readiness:5,streak:2,sport:'Softball',position:'CF',jersey:'24',challengePoints:45},
+    {userId:'demo_a5',name:'Robin Vega',readiness:7,streak:9,sport:'Softball',position:'1B',jersey:'18',challengePoints:95}
+  ].map(function(a){ a.role='player'; a.roles=['player']; a.email=a.userId+'@demo.aos'; a.athleteCode='AOS-DEMO-'+a.jersey; a.lastCheckIn=_demoDate(0); return a; });
+  var accounts={};
+  [org,coach,trainer,parent].concat(athletes).forEach(function(a){ accounts[a.userId]=a; });
+  var links={};
+  athletes.forEach(function(a){
+    links[a.userId]={};
+    links[a.userId][coach.userId]={linkerId:coach.userId,linkerName:coach.name,linkerRole:'coach',linkedAt:Date.now(),sport:'Softball',athleteSports:a.sports||[a.sport]};
+    if(a.userId==='demo_a1'||a.userId==='demo_a2')
+      links[a.userId][trainer.userId]={linkerId:trainer.userId,linkerName:trainer.name,linkerRole:'trainer',linkedAt:Date.now(),sport:'Softball'};
+  });
+  links['demo_a1'][coach.userId].captain=true;
+  links['demo_a1'][parent.userId]={linkerId:parent.userId,linkerName:parent.name,linkerRole:'parent',linkedAt:Date.now()};
+  var teams={ demo_team_14u:{teamId:'demo_team_14u',name:'14U Gold',ownerId:org.userId,ownerName:org.name,ownerRole:'org',staff:[coach.userId,trainer.userId],createdAt:Date.now()} };
+  var members={demo_team_14u:{}};
+  athletes.forEach(function(a){ members.demo_team_14u[a.userId]={teamId:'demo_team_14u',athleteId:a.userId,addedBy:org.userId,addedAt:Date.now()}; });
+  var msgs=[
+    {kind:'feed',fromId:coach.userId,fromName:coach.name,fromRole:'coach',text:'Bus leaves at 4:15 on Saturday \u2014 be early.',ts:Date.now()-3600000,legacy:{from:coach.name,author:coach.name,text:'Bus leaves at 4:15 on Saturday \u2014 be early.',isCoach:true,role:'coach',date:_demoDate(0),time:'9:14 AM'}},
+    {kind:'feed',fromId:'demo_a3',fromName:'Tess Moreau',fromRole:'player',text:'21-day streak! \uD83D\uDD25',ts:Date.now()-7200000,legacy:{from:'Tess Moreau',author:'Tess Moreau',text:'21-day streak! \uD83D\uDD25',role:'player',date:_demoDate(0),time:'8:02 AM'}},
+    {kind:'chat',fromId:parent.userId,fromName:parent.name,fromRole:'parent',text:'Maya will be 10 minutes late to practice.',ts:Date.now()-5400000,legacy:{author:parent.name,text:'Maya will be 10 minutes late to practice.',role:'parent',date:_demoDate(0),time:'8:40 AM'}},
+    {kind:'task',fromId:coach.userId,fromName:coach.name,fromRole:'coach',text:'Watch the pickoff film before Thursday',title:'Watch the pickoff film before Thursday',ts:Date.now()-86400000,doneBy:{demo_a3:Date.now()},dismissedBy:{},legacy:{}},
+    {kind:'request',fromId:'demo_a2',fromName:'Ari Chen',fromRole:'player',text:'New catcher\u2019s mitt',title:'New catcher\u2019s mitt',status:'Pending',ts:Date.now()-172800000,
+      legacy:{title:'New catcher\u2019s mitt',category:'Equipment',cost:'85',priority:'Normal',description:'Current one is worn through'},audience:{type:'user',label:'Jordan Blake (parent)'}}
+  ].map(function(m,i){
+    m._mid='demo_m'+i;
+    m.recipients=[coach.userId,trainer.userId,org.userId,parent.userId].concat(athletes.map(function(a){return a.userId;}));
+    m.audience=m.audience||{type:'squad',id:'demo_team_14u',label:'14U Gold'};
+    return m;
+  });
+  var challenges=[
+    {id:'demo_ch1',title:'14-Day Check-In Streak',desc:'Log your readiness every day',type:'streak',target:14,points:75,emoji:'\uD83D\uDD25',
+     participants:['demo_a1','demo_a2','demo_a3','demo_a5'],completed:['demo_a3'],createdBy:'Coach Rivera',createdByRole:'coach',
+     creatorId:coach.userId,hubs:[coach.userId],endDate:_demoDate(-21)},
+    {id:'demo_ch2',title:'Positive Energy All Week',desc:'Bring it every session',type:'smile',target:7,unit:'sessions',points:30,emoji:'\u2B50',
+     participants:['demo_a1','demo_a4'],completed:[],progressBy:{demo_a1:4},createdBy:'Maya Blake',createdByRole:'player',
+     creatorId:'demo_a1',hubs:[coach.userId],endDate:_demoDate(-7)}
+  ];
+  var recovery={}, training={}, hydration={};
+  for(var d=0;d<10;d++){
+    var key=_demoDate(d);
+    recovery[key]={readiness:[8,7,9,6,8,7,9,8,7,8][d],sleep:[8,7.5,8,6.5,7,8,8.5,7,7.5,8][d],energy:7,mood:'\uD83D\uDE42',soreness:{},methods:['Stretch']};
+    if(d%2===0) training[key]=[{id:'t'+d,type:'Batting Practice',duration:60,intensity:7,notes:'Tee work + front toss'}];
+    hydration[key]={entries:[{oz:24,time:'8:00'},{oz:32,time:'13:00'}]};
+  }
+  return {
+    accounts:accounts, links:links, teams:teams, members:members, msgs:msgs, challenges:challenges,
+    personal:{
+      sb_profile:{firstName:'Maya',lastName:'Blake',sport:'Softball',sports:['Softball','Volleyball'],position:'Catcher',jersey:'12',
+        school:'Northside HS',teamName:'14U Gold',streak:12,teamRole:'captain',gradYear:'2029'},
+      sb_recovery:recovery, sb_training:training, sb_hydration:hydration,
+      sb_goals:[{id:'g1',text:'Throw-down under 2.0s',completed:false,target:'2.0s'},{id:'g2',text:'Hit .350 this season',completed:false}],
+      sb_calendar:[{id:'e1',title:'Scrimmage vs Lakeside',date:_demoDate(-2),time:'16:00'},{id:'e2',title:'Team lift',date:_demoDate(-4),time:'07:00'}],
+      sb_tasks:[{id:'k1',text:'Foam roll 10 min',cat:'Recovery',done:false,date:_demoDate(0)}],
+      sb_metrics_custom:{}, sb_metrics_physical:{}, sb_metrics_batting:[], sb_metrics_pitching:[]
+    }
+  };
+}
+/* Storage for demo mode: everything in memory, nothing shared. */
+function _demoRead(key){
+  var d=_demoStore, uid=(window.AOS_USER||{}).userId||'demo_a1';
+  if(key==='aos_local_accounts') return d.accounts;
+  if(key==='aos_player_links') return d.links;
+  if(key==='aos_parent_links') return {demo_parent:{demo_a1:{childId:'demo_a1',childName:'Maya Blake'}}};
+  if(key==='aos_staff_links') return {demo_coach:{demo_org:{id:'demo_org',name:'Northside Fastpitch',role:'org'}},
+                                      demo_trainer:{demo_org:{id:'demo_org',name:'Northside Fastpitch',role:'org'}},
+                                      demo_org:{demo_coach:{id:'demo_coach',name:'Coach Rivera',role:'coach'},demo_trainer:{id:'demo_trainer',name:'Sam Doyle',role:'trainer'}}};
+  if(key==='aos_teams') return d.teams;
+  if(key==='aos_team_members') return d.members;
+  if(key==='aos_team_challenges') return d.challenges;
+  if(key==='aos_conn_requests') return [];
+  if(key==='aos_team_feed') return d.msgs.filter(function(m){return m.kind==='feed';}).map(function(m){return _msgToLegacy('feed',m,uid);});
+  if(key==='aos_parent_chat') return d.msgs.filter(function(m){return m.kind==='chat';}).map(function(m){return _msgToLegacy('chat',m,uid);}).reverse();
+  if(key==='aos_assigned_tasks') return d.msgs.filter(function(m){return m.kind==='task';}).map(function(m){return _msgToLegacy('task',m,uid);});
+  if(key==='aos_team_roster') return d.roster||{};
+  if(d.personal.hasOwnProperty(key)) return d.personal[key];
+  return d.other&&d.other[key]!==undefined?d.other[key]:null;
+}
+function _demoWrite(key,val){
+  var d=_demoStore;
+  if(key==='aos_local_accounts'){ d.accounts=val; return; }
+  if(key==='aos_player_links'){ d.links=val; return; }
+  if(key==='aos_teams'){ d.teams=val; return; }
+  if(key==='aos_team_members'){ d.members=val; return; }
+  if(key==='aos_team_challenges'){ d.challenges=val; return; }
+  if(key==='aos_team_feed'||key==='aos_parent_chat'||key==='aos_assigned_tasks'){
+    var kind={aos_team_feed:'feed',aos_parent_chat:'chat',aos_assigned_tasks:'task'}[key];
+    (val||[]).forEach(function(item){
+      if(item._mid){
+        var ex=d.msgs.find(function(m){return m._mid===item._mid;});
+        if(ex&&kind==='task'){ ex.doneBy=ex.doneBy||{}; var me=(window.AOS_USER||{}).userId;
+          if(item.done) ex.doneBy[me]=Date.now(); else delete ex.doneBy[me]; }
+        return;
+      }
+      var u=window.AOS_USER||{};
+      d.msgs.unshift({_mid:'demo_m'+Date.now()+Math.random().toString(36).slice(2,5),kind:kind,fromId:u.userId,fromName:u.name,
+        fromRole:u.role,text:item.text||item.msg||'',title:item.title||'',ts:item.ts||Date.now(),legacy:item,doneBy:{},dismissedBy:{},
+        recipients:Object.keys(d.accounts),audience:{type:'squad',id:'demo_team_14u',label:'14U Gold'}});
+    });
+    return;
+  }
+  if(d.personal.hasOwnProperty(key)||key.indexOf('sb_')===0){ d.personal[key]=val; return; }
+  d.other=d.other||{}; d.other[key]=val;
+}
+window.aosStartDemo=function(role){
+  AOS_DEMO=true;
+  _demoStore=aosBuildDemoData();
+  var byRole={player:'demo_a1',coach:'demo_coach',trainer:'demo_trainer',org:'demo_org',parent:'demo_parent'};
+  var acc=_demoStore.accounts[byRole[role]||'demo_a1'];
+  window.AOS_USER={userId:acc.userId,name:acc.name,role:acc.role,roles:acc.roles,email:acc.email,athleteCode:acc.athleteCode};
+  profile=_demoStore.personal.sb_profile;
+  recovery=_demoStore.personal.sb_recovery;
+  training=_demoStore.personal.sb_training;
+  hydration=_demoStore.personal.sb_hydration;
+  goals=_demoStore.personal.sb_goals;
+  tasks=_demoStore.personal.sb_tasks;
+  calendar=_demoStore.personal.sb_calendar;
+  metricsCustom=_demoStore.personal.sb_metrics_custom;
+  var scr=document.getElementById('auth-screen'); if(scr) scr.style.display='none';
+  document.body.classList.add('aos-demo');
+  var bar=document.getElementById('aos-demo-bar');
+  if(!bar){
+    bar=document.createElement('div'); bar.id='aos-demo-bar';
+    bar.style.cssText='position:fixed;left:0;right:0;bottom:calc(60px + env(safe-area-inset-bottom));z-index:500;background:#f39c12;color:#0A1A2F;'+
+      'font-size:11px;font-weight:800;text-align:center;padding:6px 10px;letter-spacing:.4px';
+    bar.innerHTML='DEMO MODE \u00B7 sample data, nothing is saved \u00B7 <span style="text-decoration:underline;cursor:pointer" onclick="aosExitDemo()">exit</span>';
+    document.body.appendChild(bar);
+  }
+  if(typeof aosRenderRoleSwitcher==='function') aosRenderRoleSwitcher();
+  if(typeof updateMoreNavLabel==='function') updateMoreNavLabel();
+  navigateTo('home');
+  showToast('Demo mode \u00B7 '+acc.name+' ('+acc.role+')');
+};
+window.aosExitDemo=function(){ AOS_DEMO=false; _demoStore={}; location.reload(); };
+
 window.AppSDK = {
   getItem: function(key){
     if(key==='aos_session'){
@@ -1145,6 +1370,7 @@ window.AppSDK = {
       catch(e){ return Promise.resolve(null); }
     }
     return _fbCurrentUid().then(function(uid){
+      if(AOS_DEMO) return _demoRead(key);
       if(key===_ACCT_KEY) return _readAccounts(uid);
       if(_MSG_KEYS[key]) return uid ? _readMsgKey(key,uid) : [];
       if(_SCOPED_LISTS[key] && uid) return _readScopedList(key,uid);
@@ -1170,6 +1396,7 @@ window.AppSDK = {
       return Promise.resolve();
     }
     return _fbCurrentUid().then(function(uid){
+      if(AOS_DEMO) return _demoWrite(key,val);
       if(key===_ACCT_KEY) return _writeAccounts(uid,val);
       if(_MSG_KEYS[key]) return _writeMsgKey(key,uid,val);
       if(_SCOPED_LISTS[key] && uid) return _writeScopedList(key,uid,val);
@@ -1225,6 +1452,16 @@ window.AppSDK = {
         <input type="password" id="local-signin-pass" placeholder="Your password" autocomplete="current-password" style="width:100%">
       </div>
       <div class="auth-error" id="signin-error"></div>
+      <div style="margin-top:14px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.08)">
+        <div style="font-size:11px;color:#8899aa;text-align:center;margin-bottom:8px">Just looking? Try a demo team &mdash; sample data, nothing saved.</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center">
+          <button class="btn btn-sm" onclick="aosStartDemo('player')" style="font-size:12px">Athlete</button>
+          <button class="btn btn-sm" onclick="aosStartDemo('coach')" style="font-size:12px">Coach</button>
+          <button class="btn btn-sm" onclick="aosStartDemo('trainer')" style="font-size:12px">Trainer</button>
+          <button class="btn btn-sm" onclick="aosStartDemo('org')" style="font-size:12px">Org</button>
+          <button class="btn btn-sm" onclick="aosStartDemo('parent')" style="font-size:12px">Parent</button>
+        </div>
+      </div>
       <button class="btn btn-primary" style="width:100%;margin-top:4px" id="local-signin-btn">Sign In</button>
 
       <div class="auth-switch">
@@ -1767,6 +2004,7 @@ function navigateTo(sec){
   var renders={home:renderHome,gameday:renderGameday,training:renderTraining,team:renderTeam,player:renderPlayer,goals:renderGoals,metrics:renderMetrics,recovery:renderRecovery,timer:renderTimer,hydration:renderHydration,calendar:renderCalendar,analytics:renderAnalytics,requests:renderRequests,reports:renderReports,nutrition:renderNutrition,tasks:renderTasks,coach:renderCoach,org:renderOrg,admin:renderAdmin,profile:renderProfile,trainer:renderTrainer,leaderboard:renderLeaderboard,referral:renderReferral,subscription:renderSubscription,parent:renderParent,challenges:renderChallenges,chat:renderChatHub};
   if(renders[sec])renders[sec]();
   // Persistent home bar — lives outside sections so re-renders can't wipe it
+  if(typeof aosRenderRoleSwitcher==='function') aosRenderRoleSwitcher();
   var _ghb=document.getElementById('global-home-bar');
   if(!_ghb){
     _ghb=document.createElement('div');
@@ -1873,7 +2111,7 @@ function showYouthModeSetup(dob,onApproved){
   ov.id='coppa-block';
   ov.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(5,10,20,0.98);z-index:9999;display:flex;align-items:flex-end;justify-content:center;font-family:Inter,sans-serif';
   ov.innerHTML=
-    '<div style="width:100%;max-width:430px;background:#0A1A2F;border-radius:20px 20px 0 0;padding:24px;border-top:2px solid rgba(0,224,255,0.3);max-height:90vh;overflow-y:auto">'+
+    '<div style="width:100%;max-width:430px;background:#0A1A2F;border-radius:20px 20px 0 0;padding:24px;border-top:2px solid rgba(0,224,255,0.3);max-height:min(90vh,calc(100dvh - 24px));overflow-y:auto;padding-bottom:calc(24px + env(safe-area-inset-bottom));-webkit-overflow-scrolling:touch">'+
     '<div style="text-align:center;margin-bottom:16px"><div style="font-size:44px">&#128274;</div>'+
     '<div style="font-family:Barlow Condensed,sans-serif;font-size:22px;font-weight:800;color:#00E0FF">YOUTH ATHLETE MODE</div>'+
     '<div style="font-size:12px;color:#8899aa;margin-top:4px">Athletes under 13 require a parent or guardian</div></div>'+
@@ -1913,7 +2151,7 @@ function showTeenConsent(onApproved){
   ov.id='coppa-block-b';
   ov.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(5,10,20,0.98);z-index:9999;display:flex;align-items:flex-end;justify-content:center;font-family:Inter,sans-serif';
   ov.innerHTML=
-    '<div style="width:100%;max-width:430px;background:#0A1A2F;border-radius:20px 20px 0 0;padding:24px;border-top:2px solid rgba(243,156,18,0.4);max-height:90vh;overflow-y:auto">'+
+    '<div style="width:100%;max-width:430px;background:#0A1A2F;border-radius:20px 20px 0 0;padding:24px;border-top:2px solid rgba(243,156,18,0.4);max-height:min(90vh,calc(100dvh - 24px));overflow-y:auto;padding-bottom:calc(24px + env(safe-area-inset-bottom));-webkit-overflow-scrolling:touch">'+
     '<div style="text-align:center;margin-bottom:16px"><div style="font-size:44px">&#127939;</div>'+
     '<div style="font-family:Barlow Condensed,sans-serif;font-size:22px;font-weight:800;color:#f39c12">TEEN ATHLETE MODE</div>'+
     '<div style="font-size:12px;color:#8899aa;margin-top:4px">Ages 13&ndash;17 &middot; Parent monitoring active by default</div></div>'+
@@ -2608,6 +2846,7 @@ function loadParentTab(tab,body,childName){
   else if(tab==='connections'){
     Promise.all([AppSDK.getItem('aos_local_accounts'),AppSDK.getItem('aos_player_links')]).then(function(_r){
       var accs=_r[0]||{}, playerLinks=_r[1]||{};
+      window._myLinksCache=playerLinks;
       // Real connections: whoever this athlete is linked to in aos_player_links
       var myId=(window.AOS_USER&&window.AOS_USER.userId)||'';
       var myLinks=playerLinks[myId]||{};
@@ -3824,7 +4063,14 @@ function challengeCardHTML(ch,opts){
   var done=Array.isArray(ch.completed)?ch.completed:[];
   var iDone=done.indexOf(me)>=0;
   var target=ch.target||ch.goal||0;
-  var pct=target?Math.min(100,Math.round(((ch.progress||done.length||0)/target)*100)):0;
+  /* Progress is per person: streak / training / recovery / hydration
+     challenges read your own stats; everything else counts the times
+     you log it. Before this, every challenge sat at 0 until complete. */
+  var auto={streak:'streak',training:'totalSessions',recovery:'recoveryDays',hydration:'hydrationToday'}[ch.type];
+  var stats=opts.stats||{};
+  var mine=auto?(stats[auto]||0):((ch.progressBy&&ch.progressBy[me])||0);
+  if(iDone&&target) mine=Math.max(mine,target);
+  var pct=target?Math.min(100,Math.round((mine/target)*100)):0;
   var daysLeft=null;
   if(ch.endDate){ var d=Math.ceil((new Date(ch.endDate)-new Date())/86400000); daysLeft=Math.max(0,d); }
   var canRemove=(ch.creatorId&&ch.creatorId===me)||role==='org';
@@ -3839,12 +4085,18 @@ function challengeCardHTML(ch,opts){
   h+='<span>\u2705 '+done.length+' done</span>';
   if(daysLeft!==null) h+='<span>\u23F0 '+daysLeft+'d left</span>';
   if(ch.type) h+='<span>\uD83C\uDFAF '+escH(ch.type)+'</span>';
-  if(target) h+='<span>\uD83C\uDF1F Goal: '+target+(ch.unit?' '+escH(ch.unit):'')+'</span>';
+  h+= auto
+    ? '<span title="Counted from your logged data" style="color:#2ecc71">\u2713 measured</span>'
+    : '<span title="You log this yourself" style="color:#f39c12">\u270D\uFE0F self-reported</span>';
+  if(target) h+='<span>\uD83C\uDF1F '+(joined?mine+' / '+target:'Goal: '+target)+(ch.unit?' '+escH(ch.unit):'')+'</span>';
   if(ch.points) h+='<span>\uD83D\uDCA0 '+ch.points+' pts</span>';
   h+='</div>';
   h+='<div style="background:#1a3a5c;border-radius:6px;height:8px;overflow:hidden;margin-bottom:10px">'+
      '<div style="width:'+pct+'%;height:100%;background:'+(joined?accent:'#3a5a7c')+';border-radius:6px"></div></div>';
   h+='<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">';
+  if(role==='player'&&joined&&!iDone&&!auto&&target){
+    h+='<button onclick="logChallengeProgress(\''+ch.id+'\')" style="background:rgba(0,224,255,0.15);color:'+accent+';border:1px solid '+accent+';border-radius:10px;padding:8px 14px;font-weight:700;font-size:12px">+1 '+escH(ch.unit||'done today')+'</button>';
+  }
   if(role==='player'){
     h+= joined
       ? '<button onclick="leaveChallenge(\''+ch.id+'\')" style="background:rgba(0,224,255,0.15);color:'+accent+';border:1px solid '+accent+';border-radius:10px;padding:8px 20px;font-weight:700;font-size:13px;flex:1">\u2713 Joined \u2014 tap to leave</button>'
@@ -3876,7 +4128,7 @@ function openChallengeBuilder(existingChs){
   modal.id='ch-builder-modal';
   modal.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);z-index:9998;display:flex;align-items:flex-end;justify-content:center;backdrop-filter:blur(4px)';
   modal.innerHTML=
-    '<div style="background:#0A1A2F;border-radius:20px 20px 0 0;width:100%;max-width:430px;padding:20px;max-height:90vh;overflow-y:auto;border-top:2px solid rgba(0,224,255,0.3)">'+
+    '<div style="background:#0A1A2F;border-radius:20px 20px 0 0;width:100%;max-width:430px;padding:20px;max-height:min(90vh,calc(100dvh - 24px));overflow-y:auto;padding-bottom:calc(24px + env(safe-area-inset-bottom));-webkit-overflow-scrolling:touch;border-top:2px solid rgba(0,224,255,0.3)">'+
       '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">'+
         '<div style="font-family:Barlow Condensed,sans-serif;font-size:22px;font-weight:800;color:var(--gold)">🏆 CREATE CHALLENGE</div>'+
         '<button id="ch-close" title="Close" aria-label="Close" style="background:none;border:none;color:var(--white);font-size:22px;cursor:pointer;padding:4px">✕</button>'+
@@ -4036,7 +4288,9 @@ function openChallengeBuilder(existingChs){
       private:isPrivate,
       emoji:selEmoji,
       end:end,
-      participants:isStaff?[]:[myName], // staff create/support challenges, not join as a participant
+      endDate:end,          // the challenge card reads endDate for "days left"
+      participants:isStaff?[]:[u.userId].filter(Boolean),  // joining is tracked by user id
+      creatorId:u.userId,
       completed:[],
       progress:0,
       createdBy:myName,
@@ -4077,21 +4331,10 @@ function coachReplyParentChat(){
 
 
 /* ─── CAPTAIN TOOLS ──────────────────────────────────────────────── */
-function captainPostChallenge(){
-  var title=prompt('Challenge title (e.g. "100 Swings a Day"):','');
-  if(!title)return;
-  var goal=prompt('Goal number (e.g. 100):','100');
-  var unit=prompt('Unit (e.g. swings, sprints, min):','reps');
-  var days=parseInt(prompt('Duration (days):','7'))||7;
-  AppSDK.getItem('aos_team_challenges').then(function(ch){
-    var arr=Array.isArray(ch)?ch:[];
-    arr.push({id:'ch_'+Date.now(),title:title,goal:parseInt(goal)||100,unit:unit,days:days,
-      createdBy:(profile.firstName||'Captain'),createdAt:Date.now(),participants:[],type:'team'});
-    AppSDK.setItem('aos_team_challenges',arr);
-    showToast('\uD83C\uDFC6 Team challenge posted!');
-    if(typeof renderChallenges==='function')renderChallenges();
-  });
-}
+/* Captains use the same challenge builder as coaches — the prompt-based
+   version that used to live here created a different, thinner shape of
+   challenge (no type, points, emoji or end date) that the challenge card
+   couldn't render properly. */
 function captainAnnounce(){
   var msg=prompt('Announcement to team:','');
   if(!msg)return;
@@ -4177,6 +4420,7 @@ function refreshTeamRosterScope(cb){
   ]).then(function(r){
     var roster=r[0]||{}, links=r[1]||{}, accs=r[2]||{};
     var me=(window.AOS_USER||{}).userId||'';
+    window._myLinksCache=links;   /* the captain check reads this */
     var myHubs=Object.keys(links[me]||{}).filter(function(k){ return links[me][k] && links[me][k].linkerRole!=='parent'; });
     var out={};
     Object.keys(roster).forEach(function(pid){
@@ -4619,11 +4863,14 @@ function renderTeam(){
               '</div>';
           }
           else if(tab==='captain'){
-            var isCap=myRole==='captain'||myRole==='co-captain'||myRole==='coach';
+            /* A coach names captains on their roster; this used to be a
+               label an athlete set on themselves. */
+            var isCap=(typeof aosAmCaptain==='function'&&aosAmCaptain(window._myLinksCache,(window.AOS_USER||{}).userId))
+                      ||myRole==='coach';
             tb.innerHTML=
               (!isCap?'<div style="background:rgba(255,165,0,0.1);border:1px solid rgba(255,165,0,0.3);border-radius:10px;padding:12px;margin-bottom:12px;font-size:12px;color:#f39c12;font-weight:600">&#128081; Captain &amp; Coach tools only. Ask your captain for access.</div>':'')+ 
               '<div class="card" style="margin-bottom:10px">'+(isCap?'<div style="font-weight:700;font-size:13px;margin-bottom:10px;color:var(--gold)">&#128081; Captain Tools</div>'+
-              '<button class="btn btn-full" style="margin-bottom:8px;font-size:12px" onclick="captainPostChallenge()">&#127942; Post Team Challenge</button>'+
+              '<button class="btn btn-full" style="margin-bottom:8px;font-size:12px" onclick="openChallengeBuilder([])">&#127942; Post Team Challenge</button>'+
               '<button class="btn btn-full" style="margin-bottom:8px;font-size:12px" onclick="captainAnnounce()">&#128226; Send Team Announcement</button>'+
               '<button class="btn btn-full" style="margin-bottom:8px;font-size:12px" onclick="captainPoll()">&#128202; Create Team Poll</button>'+
               '<div id="captain-polls" style="margin-top:10px"></div>'+
@@ -5631,14 +5878,91 @@ function aosLoadSportConfigs(){
   }).catch(function(){ return {}; });
 }
 
+/* ── Multi-sport athletes ───────────────────────────────────────────
+   An athlete can play more than one sport (softball in spring,
+   volleyball in autumn). The profile keeps a list; one is active and
+   decides which Metrics tabs and positions you see.
+
+   Metric entries are stored per sport as "Sport|group", because group
+   ids repeat across sports — volleyball and soccer both have a group
+   called "match" — and without the sport in the key a multi-sport
+   athlete's entries would land in the same bucket. Entries saved under
+   a bare group id (before this) still read, against the primary sport. */
+function aosMySports(){
+  var list=Array.isArray(profile&&profile.sports)?profile.sports.slice():[];
+  if(profile&&profile.sport&&list.indexOf(profile.sport)<0) list.unshift(profile.sport);
+  return list.length?list:['Other'];
+}
+function aosActiveSport(){
+  var list=aosMySports();
+  var cur=window._mSport;
+  return (cur&&list.indexOf(cur)>=0)?cur:list[0];
+}
+window.aosPickSport=function(sp){ window._mSport=sp; window._mtPicked=false; renderMetrics(); };
+function aosMetricKey(sport,groupId){ return sport+'|'+groupId; }
+function aosMetricEntriesFor(sport,groupId){
+  var k=aosMetricKey(sport,groupId);
+  if(metricsCustom[k]) return metricsCustom[k];
+  /* entries logged before sports were separated */
+  if(sport===aosMySports()[0] && metricsCustom[groupId]) return metricsCustom[groupId];
+  return [];
+}
+/* The sport pills above the Metrics tabs, shown when there's more than one. */
+function aosSportPickerHTML(){
+  var list=aosMySports();
+  if(list.length<2) return '';
+  var cur=aosActiveSport();
+  return '<div class="tab-pills" style="margin-bottom:6px">'+list.map(function(sp){
+    return '<button class="tab-pill'+(sp===cur?' active':'')+'" onclick="aosPickSport(\''+escH(sp)+'\')">'+escH(sp)+'</button>';
+  }).join('')+'</div>';
+}
+window.aosSetMySports=function(list){
+  list=(list||[]).filter(Boolean);
+  if(!list.length){ showToast('Keep at least one sport.'); return; }
+  profile.sports=list;
+  if(list.indexOf(profile.sport)<0) profile.sport=list[0];
+  saveItem('sb_profile',profile);
+  /* the directory carries the list so coaches see both sports */
+  AppSDK.getItem('aos_local_accounts').then(function(accs){
+    accs=accs||{};
+    var u=window.AOS_USER||{};
+    var key=Object.keys(accs).find(function(k){return accs[k]&&accs[k].userId===u.userId;});
+    if(!key) return null;
+    accs[key].sports=list; accs[key].sport=profile.sport;
+    return AppSDK.setItem('aos_local_accounts',accs);
+  }).catch(function(){}).then(function(){
+    showToast('Sports updated.');
+    if(typeof renderProfile==='function') renderProfile();
+  });
+};
+function aosSportsCardHTML(){
+  var mine=aosMySports(), all=(typeof aosSportList==='function')?aosSportList():['Other'];
+  return '<div class="card card-sm" style="margin-bottom:12px">'+
+    '<div style="font-weight:700;font-size:12px;margin-bottom:6px;text-transform:uppercase;letter-spacing:.8px;color:var(--gold)">Sports you play</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin-bottom:8px">Pick every sport. Your Metrics and positions follow whichever one you are viewing.</div>'+
+    '<div style="display:flex;flex-wrap:wrap;gap:6px">'+all.map(function(sp){
+      var on=mine.indexOf(sp)>=0;
+      return '<button class="btn btn-sm aos-sport-opt" data-s="'+escH(sp)+'" style="font-size:12px;'+
+        (on?'background:rgba(0,224,255,0.15);color:#00E0FF;border:1px solid #00E0FF':'')+'">'+(on?'\u2713 ':'+ ')+escH(sp)+'</button>';
+    }).join('')+'</div></div>';
+}
+function aosBindSportsCard(root){
+  (root||document).querySelectorAll('.aos-sport-opt').forEach(function(b){
+    b.addEventListener('click',function(){
+      var sp=this.getAttribute('data-s'), mine=aosMySports();
+      aosSetMySports(mine.indexOf(sp)>=0?mine.filter(function(x){return x!==sp;}):mine.concat([sp]));
+    });
+  });
+}
+
 /* Metrics tabs come from the athlete's sport config. Softball and
    baseball keep their purpose-built screens; every other sport gets
    this generic one, driven by the fields in the config. Entries are
    stored long-format, one row per logged session, under the athlete's
    own data. */
 var metricsCustom={};
-function aosMySport(){ return (profile&&profile.sport)||'Other'; }
-function aosMetricEntries(groupId){ return (metricsCustom[groupId]||[]); }
+function aosMySport(){ return aosActiveSport(); }
+function aosMetricEntries(groupId){ return aosMetricEntriesFor(aosActiveSport(),groupId); }
 function renderMetricsGroup(group){
   var c=safeGet('metrics-content'); if(!c||!group) return;
   var fields=group.fields||[];
@@ -5695,8 +6019,9 @@ function renderMetricsGroup(group){
       var el=safeGet('mg-'+f.id); if(!el) return;
       vals[f.id]=f.text?el.value.trim():(parseFloat(el.value)||0);
     });
-    metricsCustom[group.id]=metricsCustom[group.id]||[];
-    metricsCustom[group.id].push({id:uid(),date:safeVal('mg-date')||todayStr(),values:vals});
+    var _k=aosMetricKey(aosActiveSport(),group.id);
+    metricsCustom[_k]=aosMetricEntriesFor(aosActiveSport(),group.id).slice();
+    metricsCustom[_k].push({id:uid(),date:safeVal('mg-date')||todayStr(),values:vals,sport:aosActiveSport()});
     saveItem('sb_metrics_custom',metricsCustom);
     showToast('Logged!');
     renderMetricsGroup(group);
@@ -5704,7 +6029,8 @@ function renderMetricsGroup(group){
   c.querySelectorAll('.mg-del').forEach(function(b){
     b.addEventListener('click',function(){
       var eid=this.getAttribute('data-id');
-      metricsCustom[group.id]=(metricsCustom[group.id]||[]).filter(function(x){return x.id!==eid;});
+      var _dk=aosMetricKey(aosActiveSport(),group.id);
+      metricsCustom[_dk]=aosMetricEntriesFor(aosActiveSport(),group.id).filter(function(x){return x.id!==eid;});
       saveItem('sb_metrics_custom',metricsCustom);
       showToast('Deleted'); renderMetricsGroup(group);
     });
@@ -5722,7 +6048,8 @@ function renderMetrics(){
   if(!groups.length) groups=[{id:'session',label:'Sessions',fields:aosSportConfig('Other').groups[0].fields}];
   if(!window._mtPicked || !groups.some(function(g){return g.id===metricsTab;})) metricsTab=groups[0].id;
   el.innerHTML='<div class="section-title">\uD83D\uDCCA Metrics</div>'+
-    '<div style="font-size:11px;color:var(--white-dim);margin:-6px 0 8px">'+escH(sport)+'</div>'+
+    aosSportPickerHTML()+
+    (aosMySports().length<2?'<div style="font-size:11px;color:var(--white-dim);margin:-6px 0 8px">'+escH(sport)+'</div>':'')+
     '<div class="tab-pills">'+groups.map(function(g){
       return '<button class="tab-pill m-tab'+(metricsTab===g.id?' active':'')+'" data-mt="'+escH(g.id)+'">'+escH(g.label)+'</button>';
     }).join('')+'</div><div id="metrics-content"></div>';
@@ -5915,6 +6242,14 @@ function renderMetricsGarmin(){
 }
 
 /* ========== RECOVERY ========== */
+/* Athletes should know who sees what before they log it — a check-in
+   only means something if it's honest. */
+function aosRecoveryVisibilityHTML(){
+  return '<div id="rec-visibility" style="background:rgba(0,224,255,0.06);border:1px solid rgba(0,224,255,0.2);border-radius:10px;padding:10px;margin-bottom:12px;font-size:11px;color:#8899aa;line-height:1.6">'+
+    '\uD83D\uDC41\uFE0F <b style="color:#00E0FF">Who sees this:</b> your coaches and trainers see your readiness score. '+
+    'A linked parent sees a weekly summary \u2014 how often you checked in, average readiness and sleep. '+
+    'Your mood, sore areas and notes are not shown to parents.</div>';
+}
 function renderRecovery(){
   var el=safeGet('sec-recovery');if(!el)return;
   var td=todayStr();
@@ -5977,6 +6312,7 @@ function renderRecovery(){
   var rdClr=rdVal>=8?'var(--green)':rdVal>=5?'var(--warning)':'var(--danger)';
   var rdLabel=rdVal>=8?'<span style="color:var(--green);font-weight:700">Peak Ready \u2705</span>':rdVal>=5?'<span style="color:var(--warning);font-weight:700">Moderate \u26A0\uFE0F</span>':(rdVal>0?'<span style="color:var(--danger);font-weight:700">Low \uD83D\uDD34</span>':'<span style="color:var(--white-dim)">Not set</span>');
   el.innerHTML='<div class="section-title">\uD83D\uDC9A Recovery</div>'
+  +aosRecoveryVisibilityHTML()
   +'<div class="card"><div class="form-group"><label>\uD83D\uDCA4 Sleep (hours): <span id="rec-sleep-val">'+rec.sleep+'</span>h</label>'
   +'<input type="range" id="rec-sleep" min="0" max="14" step="0.5" value="'+rec.sleep+'" oninput="(function(v){document.getElementById(\'rec-sleep-val\').textContent=v;if(!recovery[\''+td+'\'])recovery[\''+td+'\']=JSON.parse(JSON.stringify({sleep:parseFloat(v),quality:3,energy:5,readiness:5,mood:\'\',soreness:{},methods:[]}));else recovery[\''+td+'\'].sleep=parseFloat(v);})(this.value)"></div>'
   +'<div class="form-group"><label>\u2B50 Sleep Quality</label>'+starHTML+'</div>'
@@ -6484,6 +6820,18 @@ function renderAnalyticsChat(){
 }
 
 /* ========== REQUESTS ========== */
+/* Once a cost is entered, narrow the list to individuals: a bill can't
+   be sent to a whole team. */
+window.aosRequestCostChanged=function(){
+  var sel=safeGet('rq-to'), cost=parseFloat(safeVal('rq-cost'))||0, opts=window._rqOpts||[];
+  if(!sel) return;
+  var cur=opts[parseInt(sel.value,10)];
+  var list=cost>0?opts.filter(function(o){return o.type==='user';}):opts;
+  sel.innerHTML=list.map(function(o){return '<option value="'+opts.indexOf(o)+'">'+escH(o.label)+'</option>';}).join('');
+  if(cur&&list.indexOf(cur)>=0) sel.value=String(opts.indexOf(cur));
+  var note=safeGet('rq-money-note');
+  if(note) note.textContent=cost>0?'Costs go to one person \u2014 a parent decides spending.':'';
+};
 /* Requests — equipment, food, fees, travel — are sent to someone:
    a parent, a coach, a trainer, the org, or the whole team. They use
    the same one-document-per-item store as notes and tasks, so only the
@@ -6517,6 +6865,14 @@ function renderRequests(){
     var mine=all.filter(function(m){return m.fromId===me;}).sort(function(a,b){return (b.ts||0)-(a.ts||0);});
     var incoming=all.filter(function(m){return m.fromId!==me;}).sort(function(a,b){return (b.ts||0)-(a.ts||0);});
     var opts=aosAudienceOptions(g,me,u.role||'player');
+    /* Money is a parent's decision, so a request with a cost can only be
+       addressed to one person, and a parent is offered first. */
+    var parentIds=aosParentsOf(g,me);
+    opts.sort(function(a,b){
+      var ap=(a.type==='user'&&parentIds.indexOf(a.id)>=0)?0:(a.type==='user'?1:2);
+      var bp=(b.type==='user'&&parentIds.indexOf(b.id)>=0)?0:(b.type==='user'?1:2);
+      return ap-bp;
+    });
     window._rqOpts=opts;
     var pending=mine.filter(function(m){return (m.status||'Pending')==='Pending';}).length;
     var approved=mine.filter(function(m){return m.status==='Approved';}).length;
@@ -6556,10 +6912,11 @@ function renderRequests(){
           '<div class="form-group"><label>Priority</label><select id="rq-pri"><option>Normal</option><option>High</option><option>Low</option></select></div>'+
         '</div>'+
         '<div class="form-row">'+
-          '<div class="form-group"><label>Est. Cost ($)</label><input type="number" id="rq-cost" step="0.01"></div>'+
+          '<div class="form-group"><label>Est. Cost ($)</label><input type="number" id="rq-cost" step="0.01" oninput="aosRequestCostChanged()"></div>'+
           '<div class="form-group"><label>Date Needed</label><input type="date" id="rq-date"></div>'+
         '</div>'+
         '<div class="form-group"><label>Details</label><textarea id="rq-desc" rows="2" placeholder="Why you need it, size, brand..."></textarea></div>'+
+        '<div id="rq-money-note" style="font-size:11px;color:var(--warning);margin-bottom:6px;min-height:14px"></div>'+
         '<button class="btn btn-primary btn-full" id="rq-save">Send Request</button>'+
         '<div id="rq-msg" style="margin-top:8px;font-size:12px;min-height:16px"></div></div>';
     }
@@ -6584,6 +6941,12 @@ function renderRequests(){
       var msg=safeGet('rq-msg');
       if(!title){ msg.style.color='#e74c3c'; msg.textContent='Give the request a title.'; return; }
       var o=window._rqOpts[parseInt(safeVal('rq-to'),10)]; if(!o)return;
+      var _cost=parseFloat(safeVal('rq-cost'))||0;
+      if(_cost>0&&o.type!=='user'){
+        msg.style.color='#e74c3c';
+        msg.textContent='A request with a cost has to go to one person \u2014 usually a parent.';
+        return;
+      }
       var fields={title:title,text:title,category:safeVal('rq-cat'),priority:safeVal('rq-pri'),
         cost:safeVal('rq-cost'),dateNeeded:safeVal('rq-date'),description:safeVal('rq-desc'),ts:Date.now()};
       aosCreateMessage('request',me,fields,o.recipients,{type:o.type,id:o.id,label:o.label}).then(function(mid){
@@ -6736,7 +7099,8 @@ AppSDK.setItem('aos_assigned_tasks',a2).then(renderTasks);});
   (total?'<div class="card card-sm"><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><span>Progress</span><span style="font-weight:700">'+done+'/'+total+'</span></div><div class="progress-bar"><div class="progress-fill" style="width:'+pct+'%;background:var(--gold)"></div></div></div>':'')+
   '<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Add Task</div>'+
   '<div class="form-group"><label>Task</label><input id="tk-text" placeholder="What needs to be done?"></div>'+
-  '<div class="form-row"><div class="form-group"><label>Category</label><select id="tk-cat"><option>Training</option><option>Nutrition</option><option>Recovery</option><option>Academic</option><option>General</option></select></div><div class="form-group"><label style="display:flex;align-items:center;gap:6px;padding-top:18px"><input type="checkbox" id="tk-train"> AOS TRAINING</label></div></div>'+
+  '<div class="form-row"><div class="form-group"><label>Category</label><select id="tk-cat"><option>Training</option><option>Nutrition</option><option>Recovery</option><option>Academic</option><option>General</option></select></div></div>'+
+  '<label style="display:flex;align-items:center;gap:8px;margin:0 0 12px;font-size:13px;color:var(--white);cursor:pointer"><input type="checkbox" id="tk-train" style="flex-shrink:0;width:20px;height:20px"> Counts as AOS training</label>'+
   '<button class="btn btn-primary btn-full btn-sm" id="tk-save">+ Add Task</button></div>'+
   tasks.map(function(t,i){
     var catColor=t.category==='Training'?'badge-gold':t.category==='Nutrition'?'badge-green':t.category==='Recovery'?'badge-blue':t.category==='Academic'?'badge-red':'badge-gray';
@@ -6858,6 +7222,27 @@ function syncMeToTeamRoster(){
    Looks up the target by their real AOS ID in aos_local_accounts, infers
    both sides' roles from their actual accounts (not a self-reported
    dropdown), and queues a pending request for the OTHER side to approve. */
+/* Look up a code and confirm the person before sending. A mistyped or
+   stale code otherwise links you to whoever owns it, with nothing on
+   screen to catch it. */
+function sendConnRequestConfirmed(code,session,cb){
+  code=(code||'').trim();
+  if(!code){ if(cb)cb({ok:false,msg:'Enter an AOS ID.'}); return; }
+  AppSDK.getItem('aos_local_accounts').then(function(accs){
+    accs=accs||{};
+    var target=Object.values(accs).find(function(a){
+      return a&&(a.athleteCode===code||a.coachCode===code||a.orgCode===code||a.userId===code);
+    });
+    if(!target){ if(cb)cb({ok:false,msg:'No one found with that AOS ID. Check the code.'}); return; }
+    var roles=(typeof aosRolesOf==='function')?aosRolesOf(target):[target.role];
+    var label=(target.name||'This person')+' \u2014 '+roles.map(function(r){
+      return (typeof aosRoleLabel==='function')?aosRoleLabel(r):r; }).join(', ');
+    if(!confirm('Send a connection request to:\n\n'+label+'\n\nIs that the right person?')){
+      if(cb)cb({ok:false,msg:'Cancelled.'}); return;
+    }
+    sendConnRequest(code,session,cb);
+  });
+}
 function sendConnRequest(code,session,cb){
   code=(code||'').trim();
   if(!code){if(cb)cb({ok:false,msg:'Enter an AOS ID.'});return;}
@@ -6866,11 +7251,21 @@ function sendConnRequest(code,session,cb){
     var target=Object.values(accs).find(function(a){return a.userId===code||(a.athleteCode&&a.athleteCode===code);});
     if(!target){if(cb)cb({ok:false,msg:'AOS ID not found. Double-check the code with them.'});return;}
     if(target.userId===session.userId){if(cb)cb({ok:false,msg:'You cannot connect to yourself.'});return;}
-    var myIsPlayer=(session.role==='player');
-    var targetIsPlayer=(target.role==='player');
+    /* People can hold several roles, so a connection is allowed if ANY
+       pair of their roles allows it: a parent-and-coach can link to an
+       athlete either way, and to an org as staff. */
+    var myAcc=Object.values(accs).find(function(a){return a.userId===session.userId;})||{role:session.role};
+    var myRoles=aosRolesOf(myAcc), tgtRoles=aosRolesOf(target);
+    if(!myRoles.length) myRoles=[session.role];
     var _staffR=['coach','trainer','org'];
-    var staffPair=_staffR.indexOf(session.role)>=0&&_staffR.indexOf(target.role)>=0;
-    if(myIsPlayer===targetIsPlayer&&!staffPair){if(cb)cb({ok:false,msg:(myIsPlayer?'Athletes connect to a coach, trainer, org, or parent.':'You can connect with athletes, or coaches, trainers, and orgs connect with each other.')});return;}
+    var myIsPlayer=myRoles.indexOf('player')>=0;
+    var targetIsPlayer=tgtRoles.indexOf('player')>=0;
+    var myStaff=myRoles.some(function(r){return _staffR.indexOf(r)>=0||r==='parent';});
+    var tgtStaff=tgtRoles.some(function(r){return _staffR.indexOf(r)>=0||r==='parent';});
+    var staffPair=myRoles.some(function(r){return _staffR.indexOf(r)>=0;})&&tgtRoles.some(function(r){return _staffR.indexOf(r)>=0;});
+    var athletePair=(myIsPlayer&&tgtStaff)||(targetIsPlayer&&myStaff);
+    if(athletePair){ myIsPlayer=!targetIsPlayer||myIsPlayer; targetIsPlayer=!myIsPlayer; }
+    if(!athletePair&&!staffPair){if(cb)cb({ok:false,msg:(myIsPlayer?'Athletes connect to a coach, trainer, org, or parent.':'You can connect with athletes, or coaches, trainers, and orgs connect with each other.')});return;}
     AppSDK.getItem('aos_conn_requests').then(function(reqs){
       reqs=reqs||[];
       var dup=reqs.find(function(r){return r.fromUserId===session.userId&&r.toUserId===target.userId&&r.status==='pending';});
@@ -6919,7 +7314,17 @@ function approveConnRequest(reqId,cb){
       links=links||{};
       links[playerId]=links[playerId]||{};
       links[playerId][partyId]={linkerId:partyId,linkerName:partyName,linkerRole:partyRole,linkedAt:Date.now(),reqId:req.id};
-      return AppSDK.setItem('aos_player_links',links);
+      /* Which sport this connection is for. A multi-sport athlete can be
+         linked to a softball coach and a volleyball coach at once, and
+         each roster then shows the right one. Never block the link on it. */
+      return AppSDK.getItem('aos_local_accounts').then(function(_accs){
+        _accs=_accs||{};
+        var _pAcc=_accs[playerId]||Object.values(_accs).find(function(a){return a&&a.userId===playerId;})||{};
+        var _sp=(Array.isArray(_pAcc.sports)&&_pAcc.sports.length)?_pAcc.sports:(_pAcc.sport?[_pAcc.sport]:[]);
+        if(_sp.length){ links[playerId][partyId].sport=_sp[0]; links[playerId][partyId].athleteSports=_sp; }
+      }).catch(function(){}).then(function(){
+        return AppSDK.setItem('aos_player_links',links);
+      });
     }).then(function(){
       // Parent connections also populate aos_parent_links, which
       // renderParent reads from directly.
@@ -6977,6 +7382,8 @@ function removePlayerLink(linkerId,name){
       showToast((name||'Link')+' removed.');
       if(typeof renderProfile==='function') renderProfile();
       if(typeof _renderConnectionSystem==='function') _renderConnectionSystem();
+      if(typeof aosBindRolesCard==='function') aosBindRolesCard(document);
+      if(typeof aosBindSportsCard==='function') aosBindSportsCard(document);
     });
   });
 }
@@ -7037,8 +7444,15 @@ function renderChallenges(){
     } else {
       html+='<div style="display:flex;flex-direction:column;gap:10px">';
       var _u=window.AOS_USER||{};
+      var _td=getTodayKey();
+      var _stats={
+        streak:profile.streak||0,
+        totalSessions:Object.values(training||{}).reduce(function(s,d){return s+(d?d.length:0);},0),
+        recoveryDays:Object.keys(recovery||{}).filter(function(d){var r=recovery[d]||{};return r.readiness||r.sleep;}).length,
+        hydrationToday:Math.round((((hydration||{})[_td]||{}).entries||[]).reduce(function(s,e){return s+(e.oz||0);},0))
+      };
       chs.forEach(function(ch){
-        html+=challengeCardHTML(ch,{me:myId,role:_u.role||'player'});
+        html+=challengeCardHTML(ch,{me:myId,role:_u.role||'player',stats:_stats});
       });
       html+='</div>';
     }
@@ -7068,6 +7482,28 @@ window.leaveChallenge=function(id){
     c.participants=(c.participants||[]).filter(function(p){return p!==u.userId;});
     return AppSDK.setItem('aos_team_challenges',chs);
   }).then(function(){showToast('Left the challenge.');if(typeof renderChallenges==='function')renderChallenges();});
+};
+
+/* Log one unit of progress on a challenge that isn't tracked automatically. */
+window.logChallengeProgress=function(id){
+  var u=window.AOS_USER||{};
+  AppSDK.getItem('aos_team_challenges').then(function(chs){
+    chs=Array.isArray(chs)?chs:[];
+    var c=chs.find(function(x){return x&&x.id===id;});
+    if(!c)return null;
+    c.progressBy=c.progressBy||{};
+    c.progressBy[u.userId]=(c.progressBy[u.userId]||0)+1;
+    c.completed=c.completed||[];
+    var target=c.target||c.goal||0;
+    var hit=target&&c.progressBy[u.userId]>=target&&c.completed.indexOf(u.userId)<0;
+    if(hit) c.completed.push(u.userId);
+    return AppSDK.setItem('aos_team_challenges',chs).then(function(){
+      if(!hit) return null;
+      return awardChallengePointsToName(u.name||'',c.points||0).catch(function(){});
+    }).then(function(){
+      showToast(hit?('Challenge complete! +'+(c.points||0)+' pts'):('Logged \u00B7 '+c.progressBy[u.userId]+'/'+target));
+    });
+  }).then(function(){ if(typeof renderChallenges==='function') renderChallenges(); });
 };
 
 window.deleteChallenge=function(id){
@@ -7380,9 +7816,12 @@ function renderCoach(){
       html+='<div style="flex:1"><div style="font-weight:700;color:#e8f4fd;font-size:14px">'+escH(r.name||r.userId||'Player')+'</div>';
       html+='<div style="font-size:11px;color:'+(s.unavailable?'#8b5cf6':s.checkedIn?'#00ff88':'#8899aa')+'">'+(s.unavailable?'🏥 Out'+(r.availabilityReason?': '+escH(r.availabilityReason):''):s.checkedIn?'✓ Checked in today':'No check-in yet')+'</div></div>';
       html+='<div style="text-align:right"><div style="font-size:20px;font-weight:900;color:'+rColor+'">'+(r.readiness||'—')+'</div><div style="font-size:10px;color:#8899aa">readiness</div></div>';
-      var _curTid=''; Object.keys(_teamMembers).forEach(function(tid){ if(_teamMembers[tid]&&_teamMembers[tid][r.userId]) _curTid=tid; });
-      if(!_curTid) _curTid=((links[r.userId]||{})[u.userId]||{}).teamId||'';
-      html+=aosPlayerTeamSelectHTML(r.userId,_myTeams,_curTid);
+      html+=aosLinkSportHTML(r.userId,(links[r.userId]||{})[u.userId],r);
+      html+=aosCaptainButtonHTML(r.userId,(links[r.userId]||{})[u.userId]);
+      var _curTids=Object.keys(_teamMembers).filter(function(tid){ return _teamMembers[tid]&&_teamMembers[tid][r.userId]; });
+      var _legacyTid=((links[r.userId]||{})[u.userId]||{}).teamId;
+      if(_legacyTid&&_curTids.indexOf(_legacyTid)<0) _curTids.push(_legacyTid);
+      html+=aosPlayerTeamSelectHTML(r.userId,_myTeams,_curTids);
       html+='<button onclick="coachUnlinkPlayer(\''+escH(r.userId||'')+'\',\''+escH((r.name||'Player').replace(/'/g,"\\'"))+'\')" title="Remove from roster" style="background:none;border:1px solid rgba(231,76,60,.5);color:#e74c3c;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;padding:8px 10px;white-space:nowrap;touch-action:manipulation">Remove</button>';
       html+='</div>';
     });
@@ -7427,7 +7866,7 @@ window.doCoachLink=function(){
   var code=document.getElementById('coach-link-code').value.trim();
   if(!code){showToast('Enter a player code.');return;}
   var u=window.AOS_USER||{};
-  sendConnRequest(code,u,function(r){showToast(r.msg);if(r.ok){document.getElementById('coach-link-code').value='';}});
+  sendConnRequestConfirmed(code,u,function(r){showToast(r.msg);if(r.ok){document.getElementById('coach-link-code').value='';}});
 };
 
 window.sendDevPlan=function(){
@@ -7648,7 +8087,7 @@ function renderOrg(){
       });
       html+='<div style="font-weight:700;color:#e8f4fd;font-size:12px;margin:10px 0 6px">Assign athletes</div>';
       players.forEach(function(pl){
-        var cur=''; Object.keys(_teamMembers).forEach(function(tid){ if(_teamMembers[tid]&&_teamMembers[tid][pl.userId]) cur=tid; });
+        var cur=Object.keys(_teamMembers).filter(function(tid){ return _teamMembers[tid]&&_teamMembers[tid][pl.userId]; });
         html+='<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0">'+
           '<span style="font-size:12px;color:#e8f4fd">'+escH(pl.name||'Athlete')+'</span>'+
           aosPlayerTeamSelectHTML(pl.userId,_orgTeams,cur)+'</div>';
@@ -7703,7 +8142,7 @@ window.doOrgLink=function(){
   var code=document.getElementById('org-link-code').value.trim();
   if(!code){showToast('Enter a player code.');return;}
   var u=window.AOS_USER||{};
-  sendConnRequest(code,u,function(r){showToast(r.msg);if(r.ok){document.getElementById('org-link-code').value='';}});
+  sendConnRequestConfirmed(code,u,function(r){showToast(r.msg);if(r.ok){document.getElementById('org-link-code').value='';}});
 };
 
 window.createOrgTask=function(){
@@ -7775,14 +8214,18 @@ document.querySelectorAll('.more-card[data-more]').forEach(function(b){
    as career summaries. Everything writes into the athlete's own data,
    tagged with who logged it. */
 function aosParentMetricsHTML(prof,custom,phys,batting,pitching){
-  var sport=prof.sport||'Other';
+  var sports=(Array.isArray(prof.sports)&&prof.sports.length)?prof.sports:[prof.sport||'Other'];
+  var sport=(window._pcSport&&sports.indexOf(window._pcSport)>=0)?window._pcSport:sports[0];
   var groups=(typeof aosSportGroups==='function')?aosSportGroups(sport):[];
   var h='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Metrics \u00B7 '+escH(sport)+'</div>';
+  if(sports.length>1) h+='<div class="tab-pills" style="margin-bottom:8px">'+sports.map(function(sp){
+    return '<button class="tab-pill pm-sport'+(sp===sport?' active':'')+'" data-s="'+escH(sp)+'">'+escH(sp)+'</button>';
+  }).join('')+'</div>';
   if(!groups.length&&!batting.length&&!pitching.length&&!Object.keys(phys||{}).length)
     h+='<div style="color:var(--white-dim);font-size:13px">Nothing logged yet.</div>';
   groups.forEach(function(g){
     if(g.legacy) return;
-    var entries=(custom[g.id]||[]).slice().sort(function(a,b){return (b.date||'').localeCompare(a.date||'');});
+    var entries=((custom[sport+'|'+g.id]||(sport===sports[0]?custom[g.id]:null)||[])).slice().sort(function(a,b){return (b.date||'').localeCompare(a.date||'');});
     h+='<div style="margin-bottom:10px"><div style="font-weight:700;font-size:12px;color:#00E0FF;margin-bottom:4px">'+escH(g.label)+'</div>';
     if(!entries.length) h+='<div style="font-size:12px;color:var(--white-dim)">No entries.</div>';
     entries.slice(0,5).forEach(function(e){
@@ -7832,10 +8275,14 @@ function aosParentWriteChild(childId,key,value){
 }
 function aosBindParentMetrics(cid,prof,custom,phys,refresh){
   var body=safeGet('pch-body'); if(!body) return;
+  body.querySelectorAll('.pm-sport').forEach(function(b){
+    b.addEventListener('click',function(){ window._pcSport=this.getAttribute('data-s'); refresh(); });
+  });
   body.querySelectorAll('.pm-add').forEach(function(btn){
     btn.addEventListener('click',function(){
       var gid=this.getAttribute('data-g');
-      var g=(aosSportGroups(prof.sport||'Other')||[]).find(function(x){return x.id===gid;});
+      var _sp2=(window._pcSport)||((Array.isArray(prof.sports)&&prof.sports[0])||prof.sport||'Other');
+      var g=(aosSportGroups(_sp2)||[]).find(function(x){return x.id===gid;});
       var box=safeGet('pm-form-'+gid); if(!g||!box) return;
       if(box.style.display==='block'){ box.style.display='none'; return; }
       var f='';
@@ -7851,8 +8298,10 @@ function aosBindParentMetrics(cid,prof,custom,phys,refresh){
           var el=safeGet('pmf-'+fl.id); if(!el) return;
           vals[fl.id]=fl.text?el.value.trim():(parseFloat(el.value)||0);
         });
-        custom[gid]=custom[gid]||[];
-        custom[gid].push({id:'e_'+Date.now().toString(36),date:safeVal('pmf-date')||todayStr(),values:vals,
+        var _sp=(window._pcSport)||((Array.isArray(prof.sports)&&prof.sports[0])||prof.sport||'Other');
+        var _ck=_sp+'|'+gid;
+        custom[_ck]=(custom[_ck]||(custom[gid]||[])).slice();
+        custom[_ck].push({id:'e_'+Date.now().toString(36),date:safeVal('pmf-date')||todayStr(),values:vals,sport:_sp,
           loggedByParent:(window.AOS_USER||{}).name||'parent'});
         aosParentWriteChild(cid,'sb_metrics_custom',custom).then(function(){
           showToast('Logged for '+(window._parentChild&&window._parentChild.name||'your athlete'));
@@ -7871,6 +8320,113 @@ function aosBindParentMetrics(cid,prof,custom,phys,refresh){
     aosParentWriteChild(cid,'sb_metrics_physical',phys).then(function(){
       msg.style.color='#2ecc71'; msg.textContent='Logged.'; refresh();
     }).catch(function(e){ msg.style.color='#e74c3c'; msg.textContent='Could not save.'; console.warn(e); });
+  });
+}
+
+/* ── Multiple roles per person ──────────────────────────────────────
+   One account, several hats: a parent who also coaches, a coach who
+   trains for a second club, an org director whose own child plays.
+   The account keeps a list of roles; one of them is active at a time
+   and decides which dashboard and audiences you see. Connections and
+   permissions look at the whole list, so switching hats never costs
+   you access you already had. */
+var AOS_ALL_ROLES=[['player','Athlete'],['parent','Parent'],['coach','Coach'],['trainer','Trainer'],['org','Organization']];
+function aosRolesOf(acc){
+  if(!acc) return [];
+  var list=Array.isArray(acc.roles)?acc.roles.slice():[];
+  if(acc.role && list.indexOf(acc.role)<0) list.unshift(acc.role);
+  return list.length?list:(acc.role?[acc.role]:[]);
+}
+function aosMyRoles(){
+  var u=window.AOS_USER||{};
+  var list=Array.isArray(u.roles)?u.roles.slice():[];
+  if(u.role && list.indexOf(u.role)<0) list.unshift(u.role);
+  return list.length?list:(u.role?[u.role]:[]);
+}
+function aosRoleLabel(r){
+  var f=AOS_ALL_ROLES.find(function(x){return x[0]===r;});
+  return f?f[1]:r;
+}
+/* Switch the hat you're wearing. */
+window.aosSwitchRole=function(role){
+  var u=window.AOS_USER||{};
+  if(!role||aosMyRoles().indexOf(role)<0) return;
+  u.role=role; window.AOS_USER=u;
+  window._staffTeam=''; window._parentChild=null;
+  AppSDK.getItem('aos_session').then(function(sess){
+    sess=sess||{}; sess.role=role; sess.roles=aosMyRoles();
+    return AppSDK.setItem('aos_session',sess);
+  }).then(function(){
+    if(typeof updateMoreNavLabel==='function') updateMoreNavLabel();
+    aosRenderRoleSwitcher();
+    showToast('Now using AOS as '+aosRoleLabel(role));
+    navigateTo('home');
+  });
+};
+/* The switcher in the header, shown only to people with more than one role. */
+function aosRenderRoleSwitcher(){
+  var roles=aosMyRoles();
+  var host=document.querySelector('.top-header'); if(!host) return;
+  var el=document.getElementById('aos-role-switch');
+  if(roles.length<2){ if(el) el.remove(); return; }
+  if(!el){
+    el=document.createElement('select');
+    el.id='aos-role-switch';
+    el.style.cssText='background:#0A1A2F;border:1px solid rgba(0,224,255,0.35);color:#00E0FF;border-radius:8px;font-size:11px;font-weight:700;padding:6px 8px;margin-right:8px;max-width:120px';
+    el.addEventListener('change',function(){ aosSwitchRole(this.value); });
+    var anchor=host.querySelector('[data-nav-logout]')||host.lastElementChild;
+    host.insertBefore(el,anchor||null);
+  }
+  var cur=(window.AOS_USER||{}).role;
+  el.innerHTML=roles.map(function(r){
+    return '<option value="'+r+'"'+(r===cur?' selected':'')+'>'+escH(aosRoleLabel(r))+'</option>';
+  }).join('');
+}
+/* Add or drop a hat, from My Profile. */
+window.aosSetMyRoles=function(roles,cb){
+  var u=window.AOS_USER||{};
+  roles=(roles||[]).filter(Boolean);
+  if(!roles.length){ showToast('Keep at least one role.'); return; }
+  AppSDK.getItem('aos_local_accounts').then(function(accs){
+    accs=accs||{};
+    var key=Object.keys(accs).find(function(k){return accs[k]&&accs[k].userId===u.userId;});
+    if(!key) return null;
+    accs[key].roles=roles;
+    if(roles.indexOf(accs[key].role)<0) accs[key].role=roles[0];
+    return AppSDK.setItem('aos_local_accounts',accs);
+  }).then(function(){
+    u.roles=roles;
+    if(roles.indexOf(u.role)<0) u.role=roles[0];
+    window.AOS_USER=u;
+    return AppSDK.getItem('aos_session').then(function(sess){
+      sess=sess||{}; sess.roles=roles; sess.role=u.role;
+      return AppSDK.setItem('aos_session',sess);
+    });
+  }).then(function(){
+    showToast('Roles updated.');
+    aosRenderRoleSwitcher();
+    if(cb)cb();
+    if(typeof renderProfile==='function') renderProfile();
+  });
+};
+function aosRolesCardHTML(){
+  var mine=aosMyRoles();
+  return '<div class="card card-sm" style="margin-bottom:12px">'+
+    '<div style="font-weight:700;font-size:14px;color:var(--gold);margin-bottom:8px">\uD83C\uDFAD Your roles</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin-bottom:8px">Pick every role you fill. Switch between them from the selector at the top of the screen.</div>'+
+    '<div style="display:flex;flex-wrap:wrap;gap:6px">'+AOS_ALL_ROLES.map(function(r){
+      var on=mine.indexOf(r[0])>=0;
+      return '<button class="btn btn-sm aos-role-opt" data-r="'+r[0]+'" style="font-size:12px;'+
+        (on?'background:rgba(0,224,255,0.15);color:#00E0FF;border:1px solid #00E0FF':'')+'">'+(on?'\u2713 ':'+ ')+escH(r[1])+'</button>';
+    }).join('')+'</div></div>';
+}
+function aosBindRolesCard(root){
+  (root||document).querySelectorAll('.aos-role-opt').forEach(function(b){
+    b.addEventListener('click',function(){
+      var r=this.getAttribute('data-r'), mine=aosMyRoles();
+      var next=mine.indexOf(r)>=0?mine.filter(function(x){return x!==r;}):mine.concat([r]);
+      aosSetMyRoles(next);
+    });
   });
 }
 
@@ -7926,18 +8482,26 @@ function renderParentChildHome(){
       stat(sessions,'Sessions (7d)')+
       stat(prof.streak||0,'Day streak')+
       stat(openGoals,'Open goals')+'</div>';
-    html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:6px">Today\'s check-in</div>';
-    if(today.readiness===undefined){
-      html+='<div style="color:var(--white-dim);font-size:13px">No check-in logged today.</div>';
-    } else {
-      var sore=Object.keys(today.soreness||{}).filter(function(k){return today.soreness[k];});
-      html+='<div style="font-size:13px;color:#e8f4fd;line-height:1.8">'+
-        'Energy: '+(today.energy!==undefined?today.energy+'/10':'\u2014')+'<br>'+
-        'Mood: '+escH(today.mood||'\u2014')+'<br>'+
-        'Sore areas: '+(sore.length?escH(sore.join(', ')):'none reported')+'<br>'+
-        'Recovery methods: '+((today.methods||[]).length?escH((today.methods||[]).join(', ')):'none')+'</div>';
+    /* A summary, not the raw log. Sleep and readiness tell a parent what
+       they need; mood, soreness and notes stay between the athlete and
+       their coaching staff, so check-ins stay honest. */
+    var last7=[], sleeps=[];
+    for(var _i=0;_i<7;_i++){
+      var _d=new Date(Date.now()-_i*86400000).toISOString().slice(0,10);
+      var _r=rec[_d];
+      if(_r&&_r.readiness!==undefined) last7.push(Number(_r.readiness));
+      if(_r&&_r.sleep!==undefined) sleeps.push(Number(_r.sleep));
     }
-    html+='</div>';
+    var avgR=last7.length?Math.round(last7.reduce(function(a,c){return a+c;},0)/last7.length*10)/10:null;
+    var avgS=sleeps.length?Math.round(sleeps.reduce(function(a,c){return a+c;},0)/sleeps.length*10)/10:null;
+    var trend=last7.length>=4?(last7.slice(0,3).reduce(function(a,c){return a+c;},0)/3)-(last7.slice(3).reduce(function(a,c){return a+c;},0)/last7.slice(3).length):0;
+    html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:6px">Recovery summary</div>'+
+      '<div style="font-size:13px;color:#e8f4fd;line-height:1.9">'+
+        'Checked in: '+last7.length+' of the last 7 days<br>'+
+        'Average readiness: '+(avgR===null?'\u2014':avgR+'/10')+(last7.length>=4?(trend>0.5?' \u2197 improving':trend<-0.5?' \u2198 dipping':' \u2192 steady'):'')+'<br>'+
+        'Average sleep: '+(avgS===null?'\u2014':avgS+'h')+
+      '</div>'+
+      '<div style="font-size:11px;color:var(--white-dim);margin-top:8px">Your athlete\'s own notes \u2014 mood, soreness, how they felt \u2014 stay between them and their coaching staff.</div></div>';
     if(next) html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">Next event</div>'+
       '<div style="font-size:13px;color:#e8f4fd">'+escH(next.title||'Event')+' \u00B7 '+escH(next.date||'')+(next.time?' '+escH(next.time):'')+'</div></div>';
     html+=aosParentMetricsHTML(prof,custom,phys,batting,pitching);
@@ -8163,7 +8727,7 @@ window.doParentLink=function(){
   var code=document.getElementById('parent-link-code').value.trim();
   if(!code){showToast('Enter your child\'s code.');return;}
   var u=window.AOS_USER||{};
-  sendConnRequest(code,u,function(r){showToast(r.msg);if(r.ok){document.getElementById('parent-link-code').value='';}});
+  sendConnRequestConfirmed(code,u,function(r){showToast(r.msg);if(r.ok){document.getElementById('parent-link-code').value='';}});
 };
 
 window.parentVetoLink=function(childId,linkerId){
@@ -8264,6 +8828,7 @@ function renderProfile() {
       var _myKey=Object.keys(_accs3).find(function(k){return _accs3[k]&&_accs3[k].userId===_pu.userId;});
       var _myAcc=_myKey?_accs3[_myKey]:{};
       el.innerHTML='<div class="section-title">👤 My Profile</div>'+
+        aosRolesCardHTML()+
         '<div class="card card-sm" style="margin-bottom:12px">'+
           '<div style="font-weight:700;font-size:14px;color:var(--gold);margin-bottom:12px">📋 Professional Info</div>'+
           '<div class="form-group"><label>Name</label><input id="pf2-name" value="'+escH(_pu.name||'')+'" placeholder="Your name"></div>'+
@@ -8273,6 +8838,8 @@ function renderProfile() {
         '</div>'+
         '<button class="btn btn-primary btn-full" id="pf2-save-btn" style="margin-bottom:24px">\uD83D\uDCBE Save Profile</button>';
       _renderConnectionSystem();
+      if(typeof aosBindRolesCard==='function') aosBindRolesCard(document);
+      if(typeof aosBindSportsCard==='function') aosBindSportsCard(document);
       // Identity card last so it ends up on top (afterbegin = most recent first)
       el.insertAdjacentHTML('afterbegin', window._aosProfileTop||'');
       var _sBtn=document.getElementById('pf2-save-btn');
@@ -8307,6 +8874,8 @@ function renderProfile() {
 
   el.innerHTML = '<div class="section-title">👤 My Profile</div>'
   +'<div class="card card-sm" id="avail-card" style="margin-bottom:12px"></div>'
+  +aosRolesCardHTML()
+  +aosSportsCardHTML()
   +'<div class="card card-sm" style="margin-bottom:12px">'
   +'<div style="font-weight:700;font-size:12px;margin-bottom:8px;text-transform:uppercase;letter-spacing:.8px;color:var(--gold)">Sport &amp; Team Role</div>'
   +'<div class="form-row">'
@@ -8473,7 +9042,7 @@ function renderProfile() {
       sBtn.onclick=function(){
         var pid2=(document.getElementById('conn-pid-input').value||'').trim();
         var msgEl=document.getElementById('conn-send-msg');
-        sendConnRequest(pid2,_cu2,function(r){
+        sendConnRequestConfirmed(pid2,_cu2,function(r){
           msgEl.style.color=r.ok?'#2ecc71':'#e74c3c';
           msgEl.textContent=(r.ok?'\u2705 ':'')+r.msg;
           if(r.ok)document.getElementById('conn-pid-input').value='';
@@ -8482,6 +9051,8 @@ function renderProfile() {
     },0);
   }
   _renderConnectionSystem();
+      if(typeof aosBindRolesCard==='function') aosBindRolesCard(document);
+      if(typeof aosBindSportsCard==='function') aosBindSportsCard(document);
   // Inject AOS ID card LAST so it ends up visually on top (afterbegin
   // prepends put the most recent insert first).
   el.insertAdjacentHTML('afterbegin', window._aosProfileTop||'');
@@ -8874,9 +9445,12 @@ function renderTrainer(){
       html+='<div style="flex:1"><div style="font-weight:700;color:#e8f4fd;font-size:14px">'+escH(r.name||r.userId||'Player')+'</div>';
       html+='<div style="font-size:11px;color:'+(s.unavailable?'#8b5cf6':s.checkedIn?'#00ff88':'#8899aa')+'">'+(s.unavailable?'🏥 Out'+(r.availabilityReason?': '+escH(r.availabilityReason):''):s.checkedIn?'✓ Checked in today':'No check-in yet')+'</div></div>';
       html+='<div style="text-align:right"><div style="font-size:20px;font-weight:900;color:'+rColor+'">'+(r.readiness||'—')+'</div><div style="font-size:10px;color:#8899aa">readiness</div></div>';
-      var _curTid=''; Object.keys(_teamMembers).forEach(function(tid){ if(_teamMembers[tid]&&_teamMembers[tid][r.userId]) _curTid=tid; });
-      if(!_curTid) _curTid=((links[r.userId]||{})[u.userId]||{}).teamId||'';
-      html+=aosPlayerTeamSelectHTML(r.userId,_myTeams,_curTid);
+      html+=aosLinkSportHTML(r.userId,(links[r.userId]||{})[u.userId],r);
+      html+=aosCaptainButtonHTML(r.userId,(links[r.userId]||{})[u.userId]);
+      var _curTids=Object.keys(_teamMembers).filter(function(tid){ return _teamMembers[tid]&&_teamMembers[tid][r.userId]; });
+      var _legacyTid=((links[r.userId]||{})[u.userId]||{}).teamId;
+      if(_legacyTid&&_curTids.indexOf(_legacyTid)<0) _curTids.push(_legacyTid);
+      html+=aosPlayerTeamSelectHTML(r.userId,_myTeams,_curTids);
       html+='<button onclick="trainerUnlinkPlayer(\''+escH(r.userId||'')+'\',\''+escH((r.name||'Player').replace(/'/g,"\\'"))+'\')" title="Remove from roster" style="background:none;border:1px solid rgba(231,76,60,.5);color:#e74c3c;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;padding:8px 10px;white-space:nowrap;touch-action:manipulation">Remove</button>';
       html+='</div>';
     });
@@ -9528,6 +10102,7 @@ var AOS_AUTH = {
         orgCode: finalOrgCode,
         dob:     dob,
         ageMode: ageMode,
+        roles: [role],
         niUser:  true
       };
       if(extra){ for(var k2 in extra){ if(extra.hasOwnProperty(k2)) session[k2]=extra[k2]; } }
