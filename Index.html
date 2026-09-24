@@ -75,9 +75,9 @@ select option{background:var(--navy-light)}
 .stat-label{font-size:10px;color:var(--white-dim);margin-top:2px}
 .section-title{text-transform:uppercase;letter-spacing:1.5px;font-size:20px;font-weight:900;color:var(--gold);margin-bottom:16px;font-family:Barlow Condensed,sans-serif;letter-spacing:2px;text-transform:uppercase}
 .empty-state{text-align:center;padding:40px 20px;color:var(--white-dim);font-size:14px}
-.section{display:none;padding:calc(72px + env(safe-area-inset-top)) 16px calc(76px + env(safe-area-inset-bottom));min-height:100vh}
+.section{display:none;padding:calc(72px + max(env(safe-area-inset-top), 0px)) 16px calc(76px + max(env(safe-area-inset-bottom), 0px));min-height:100vh}
 .section.active{display:block}
-.top-header{position:fixed;top:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;height:calc(56px + env(safe-area-inset-top));padding-top:env(safe-area-inset-top);background:var(--navy);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 16px;z-index:100}
+.top-header{position:fixed;top:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;height:calc(56px + max(env(safe-area-inset-top), 0px));padding-top:max(env(safe-area-inset-top), 0px);box-sizing:border-box;background:var(--navy);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 16px;z-index:100}
 .bottom-nav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;height:calc(60px + env(safe-area-inset-bottom));padding-bottom:env(safe-area-inset-bottom);background:var(--navy);border-top:1px solid var(--border);display:flex;z-index:100}
 .nav-btn{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;border:none;background:transparent;color:var(--white-dim);cursor:pointer;font-size:9px;padding:4px 0}
 .nav-btn .nav-icon{font-size:18px;line-height:1}
@@ -291,7 +291,12 @@ button, .btn {
 .form-row > .form-group { min-width: 0; flex: 1 1 140px; }
 .form-group label { overflow-wrap: break-word; }
 .card, .section { overflow-wrap: break-word; }
-input, select, textarea { max-width: 100%; box-sizing: border-box; }
+input, select, textarea { max-width: 100%; width: 100%; box-sizing: border-box; }
+/* iOS renders date/time inputs at an intrinsic width that ignores the
+   column, which pushed the birthdate field over the GPA field. */
+input[type="date"], input[type="time"], input[type="datetime-local"] {
+  min-width: 0; -webkit-appearance: none; appearance: none;
+}
 /* Nothing should be able to scroll the page sideways. */
 html, body { overflow-x: hidden; }
 </style>
@@ -1070,6 +1075,61 @@ function aosCaptainButtonHTML(playerId,link){
 function aosAmCaptain(links,myId){
   var mine=(links||{})[myId]||{};
   return Object.keys(mine).some(function(k){ return mine[k]&&mine[k].captain; });
+}
+/* Recurring sessions used to be created only for today, only at app
+   start. A day you didn't open the app never got its session, and
+   finishing one didn't produce the next. This fills in every day a
+   recurrence should have covered (up to 14 back) and is run whenever
+   Training is opened. */
+function aosSyncRecurring(daysBack){
+  daysBack=daysBack||14;
+  if(!Array.isArray(recurringSessions)||!recurringSessions.length) return Promise.resolve(false);
+  var added=false;
+  for(var d=daysBack;d>=0;d--){
+    var dt=new Date(Date.now()-d*86400000);
+    var key=dt.toISOString().slice(0,10), dow=dt.getDay();
+    recurringSessions.forEach(function(rs){
+      if(rs.startDate&&key<rs.startDate) return;
+      var matches=(rs.freq==='daily')||(rs.freq==='weekly'&&rs.days&&rs.days.indexOf(dow)>-1);
+      if(!matches) return;
+      training[key]=training[key]||[];
+      var exists=training[key].some(function(x){return x.recurringId===rs.id;});
+      if(exists) return;
+      training[key].push({id:uid(),activity:rs.activity,secondary:rs.secondary||'',focus:rs.focus||'',
+        duration:rs.duration||30,intensity:rs.intensity||5,notes:rs.notes||'',done:false,
+        time:dt.getTime(),date:key,recurringId:rs.id,isRecurring:true});
+      added=true;
+    });
+  }
+  return added?Promise.resolve(saveItem('sb_training',training)).then(function(){return true;}):Promise.resolve(false);
+}
+/* Tick a session off (or back on) for any day, not just today. */
+window.aosToggleSessionDone=function(date,sessionId){
+  var list=training[date]||[];
+  var s=list.find(function(x){return x.id===sessionId;});
+  if(!s) return;
+  s.done=!s.done;
+  s.completedAt=s.done?Date.now():null;
+  saveItem('sb_training',training);
+  showToast(s.done?'Marked complete':'Marked not done');
+  if(typeof renderTraining==='function') renderTraining();
+};
+/* Coaches, trainers, orgs and parents had no route to these screens at
+   all: their More button opens Messages, and the cards that link to them
+   live in the owner-only menu. */
+function aosMoreTilesHTML(role){
+  var tiles=[['requests','\uD83D\uDCE6','Requests'],['challenges','\uD83C\uDFC6','Challenges'],
+             ['calendar','\uD83D\uDCC5','Calendar'],['leaderboard','\uD83C\uDFC5','Leaderboard'],
+             ['chat','\uD83D\uDCAC','Messages']];
+  if(role==='coach'||role==='trainer'||role==='org') tiles.push(['reports','\uD83D\uDCC4','Reports'],['referral','\uD83D\uDC8E','Referral']);
+  tiles.push(['subscription','\u2B50','Plan']);
+  return '<div style="margin:18px 0 8px;font-size:11px;font-weight:700;letter-spacing:1.5px;color:var(--white-dim);text-transform:uppercase">More</div>'+
+    '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px">'+
+    tiles.map(function(t){
+      return '<button onclick="navigateTo(\''+t[0]+'\')" style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.15);border-radius:10px;'+
+        'padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)">'+
+        '<span style="font-size:22px">'+t[1]+'</span><span style="font-size:11px;font-weight:600">'+t[2]+'</span></button>';
+    }).join('')+'</div>';
 }
 window.aosPickTeam=function(teamId){ window._staffTeam=teamId||''; _aosRerenderStaff(); };
 window.aosNewTeamPrompt=function(){
@@ -2933,13 +2993,17 @@ function renderChatHub(){
   var myId=u.userId||'';
   var myName=(u.name||((profile.firstName||'')+(profile.lastName?' '+profile.lastName:''))).trim()||'You';
   var tab=window._chTab||'chat';
-  var tabs=[['chat','Team Chat'],['inbox','Inbox'],['new','New'],['sent','Sent']];
+  var tabs=[['chat','Team Chat'],['inbox','Inbox'],['new','New'],['sent','Sent'],['requests','Requests']];
   el.innerHTML='<div class="section-title">&#128172; Messages</div>'+
     '<div class="tab-pills" style="margin-bottom:12px">'+tabs.map(function(t){
       return '<button class="tab-pill ch-tab'+(tab===t[0]?' active':'')+'" data-ch="'+t[0]+'">'+t[1]+'</button>';
     }).join('')+'</div>'+
     '<div id="ch-body"></div>';
-  el.querySelectorAll('.ch-tab').forEach(function(b){ b.addEventListener('click',function(){ window._chTab=this.getAttribute('data-ch'); renderChatHub(); }); });
+  el.querySelectorAll('.ch-tab').forEach(function(b){ b.addEventListener('click',function(){
+    var t=this.getAttribute('data-ch');
+    if(t==='requests'){ window._chTab='inbox'; navigateTo('requests'); return; }
+    window._chTab=t; renderChatHub();
+  }); });
   var body=safeGet('ch-body'); if(!body) return;
   var roleColor={coach:'#2ecc71',trainer:'#e67e22',org:'#9b59b6',parent:'#f39c12',player:'#00E0FF'};
   var roleLabel={coach:'&#127942; Coach: ',trainer:'&#127947;&#65039; Trainer: ',org:'&#127970; Org: ',parent:'&#128106; Parent: ',player:''};
@@ -3700,6 +3764,10 @@ function renderHome(){
   '<button class="home-nav-btn" data-hnav="analytics" style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.15);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1F4C8;</span><span style="font-size:11px;font-weight:600">Analytics</span></button>'+
   '<button class="home-nav-btn" data-hnav="tasks"     style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.15);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x2705;</span><span style="font-size:11px;font-weight:600">Tasks</span></button>'+
   '<button class="home-nav-btn" data-hnav="reports"   style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.15);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1F4CB;</span><span style="font-size:11px;font-weight:600">Reports</span></button>'+
+  /* Requests used to live only in the owner's More menu, so nobody else
+     could find the screen at all. */
+  '<button class="home-nav-btn" data-hnav="requests"  style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.15);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1F4E6;</span><span style="font-size:11px;font-weight:600">Requests</span></button>'+
+  '<button class="home-nav-btn" data-hnav="challenges" style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.15);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1F3C6;</span><span style="font-size:11px;font-weight:600">Challenges</span></button>'+
   '<button class="home-nav-btn" data-hnav="profile"   style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.15);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1F464;</span><span style="font-size:11px;font-weight:600">Profile</span></button>'+
   '<button class="home-nav-btn" data-hnav="leaderboard" style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.15);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1F3C6;</span><span style="font-size:11px;font-weight:600">Leaderboard</span></button>'+
   '<button class="home-nav-btn" data-hnav="referral" style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.15);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1F381;</span><span style="font-size:11px;font-weight:600">Refer &amp; Earn</span></button>'+
@@ -3851,6 +3919,8 @@ function renderTraining(){
   if(trainingTab==='today')renderTrainingToday();
   else if(trainingTab==='history')renderTrainingHistory();
   else renderTrainingInsights();
+  /* Fill in any days a recurring session should have covered. */
+  if(!window._recurSynced){ window._recurSynced=true; aosSyncRecurring().then(function(changed){ if(changed) renderTraining(); }); }
 }
 
 function renderTrainingToday(){
@@ -4015,7 +4085,12 @@ function renderTrainingHistory(){
     if(!sessions.length)return;
     var totalM=sessions.reduce(function(s,x){return s+(parseInt(x.duration)||0)},0);
     html+='<div class="card card-sm"><div style="display:flex;justify-content:space-between;align-items:center"><div style="font-weight:700;font-size:13px">'+date+'</div><span class="badge badge-gold">'+sessions.length+' sessions · '+totalM+'m</span></div>';
-    sessions.forEach(function(s){html+='<div style="font-size:12px;color:var(--white-dim);margin-top:4px">'+escH(s.activity)+(s.secondary?' → '+escH(s.secondary):'')+(s.done?' ✅':' ⬜')+(s.focus?'<div style="font-style:italic;font-size:11px;color:var(--white-dim);margin-top:2px;padding-left:8px">🎯 '+escH(s.focus)+'</div>':'')+'</div>'});
+    sessions.forEach(function(s){html+='<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:6px">'+
+      '<div style="font-size:12px;color:var(--white-dim)">'+escH(s.activity)+(s.secondary?' \u00B7 '+escH(s.secondary):'')+(s.focus?'<div style="font-style:italic;font-size:11px;color:var(--white-dim);margin-top:2px;padding-left:8px">'+escH(s.focus)+'</div>':'')+'</div>'+
+      /* A day you missed can still be ticked off later, and a mistake undone. */
+      '<button onclick="aosToggleSessionDone(\''+date+'\',\''+s.id+'\')" style="flex-shrink:0;border-radius:8px;font-size:11px;font-weight:700;padding:6px 10px;'+
+        (s.done?'background:rgba(46,204,113,0.15);border:1px solid var(--green);color:var(--green)':'background:none;border:1px solid #334;color:#8899aa')+
+      '">'+(s.done?'\u2713 Done':'Mark done')+'</button>'+'</div>'});
     html+='</div>';
   });
   c.innerHTML=html;
@@ -4837,21 +4912,20 @@ function renderTeam(){
           pc2=pc2||[];
 
           if(tab==='challenges'){
-            tb.innerHTML='<div style="font-size:11px;color:#8899aa;margin-bottom:12px">&#127942; Compete with your teammates. Tap any challenge to join.</div>'+
-              chs.map(function(c){
-                var joined=(c.participants||[]).indexOf(me)>=0;
-                var pct=c.progress&&c.target?Math.round(c.progress/c.target*100):0;
-                return '<div class="card" style="margin-bottom:10px">'+
-                  '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'+
-                    '<span style="font-size:28px">'+c.emoji+'</span>'+
-                    '<div style="flex:1"><div style="font-weight:800;color:#F5FAFF">'+escH(c.title)+'</div>'+
-                    '<div style="font-size:11px;color:#8899aa">'+escH(c.desc)+'</div></div>'+
-                    '<span style="font-size:9px;background:rgba(46,204,113,0.12);color:#2ecc71;border-radius:6px;padding:3px 8px;white-space:nowrap">Ends '+c.end+'</span>'+
-                  '</div>'+
-                  (c.progress!==undefined?'<div style="height:6px;background:rgba(255,255,255,0.08);border-radius:3px;margin-bottom:8px"><div style="height:100%;width:'+pct+'%;background:#00E0FF;border-radius:3px"></div></div><div style="font-size:10px;color:#8899aa;margin-bottom:8px">'+c.progress+' / '+c.target+' sessions ('+pct+'%)</div>':'')+
-                  '<button class="btn'+(joined?' btn-primary':'')+' btn-full" style="font-size:12px" onclick="'+(joined?'showToast(&quot;Already joined! &#9989;&quot;)':'aosTmJoin(&quot;'+escH(c.id||c.title)+'&quot;)')+'">'+(joined?'<span style="color:#74b9ff;font-weight:800">&#10003; Joined</span>':'Join Challenge')+'</button>'+
-                '</div>';
-              }).join('') || '<div class="card" style="text-align:center;padding:24px;color:#8899aa;font-size:13px">No active challenges yet. Your coach or captain can post one.</div>';
+            /* The same challenge card as everywhere else, so progress and
+               the log button are here too. This used to be its own
+               rendering that could only say "Already joined". */
+            var _me=(window.AOS_USER||{}).userId||'';
+            var _tdk=getTodayKey();
+            var _st={
+              streak:profile.streak||0,
+              totalSessions:Object.values(training||{}).reduce(function(x,d){return x+(d?d.length:0);},0),
+              recoveryDays:Object.keys(recovery||{}).filter(function(d){var r=recovery[d]||{};return r.readiness||r.sleep;}).length,
+              hydrationToday:Math.round((((hydration||{})[_tdk]||{}).entries||[]).reduce(function(x,e){return x+(e.oz||0);},0))
+            };
+            tb.innerHTML='<div style="font-size:11px;color:#8899aa;margin-bottom:12px">&#127942; Compete with your teammates. Join one, then log your progress.</div>'+
+              (chs.map(function(c){ return challengeCardHTML(c,{me:_me,role:'player',stats:_st}); }).join('')
+               || '<div class="card" style="text-align:center;padding:24px;color:#8899aa;font-size:13px">No active challenges yet. Your coach or captain can post one.</div>');
           }
           else if(tab==='feed'){
             tb.innerHTML='<div style="display:flex;flex-direction:column;gap:8px;margin-bottom:12px">'+
@@ -7827,6 +7901,7 @@ function renderCoach(){
     });
 
     html+='</div>';
+    html+=aosMoreTilesHTML('coach');
     el.innerHTML=html;
   });
 }
@@ -8134,6 +8209,7 @@ function renderOrg(){
     html+=memberTable(parents,'👨‍👩‍👧 PARENTS','#ff88aa');
 
     html+='</div>';
+    html+=aosMoreTilesHTML('org');
     el.innerHTML=html;
   });
 }
@@ -8719,6 +8795,7 @@ function renderParent(){
       });
     }
     html+='</div>';
+    html+=aosMoreTilesHTML('parent');
     el.innerHTML=html;
   });
 }
@@ -9456,6 +9533,7 @@ function renderTrainer(){
     });
 
     html+='</div>';
+     html+=aosMoreTilesHTML('trainer');
     el.innerHTML=html;
   });
 }
