@@ -75,10 +75,10 @@ select option{background:var(--navy-light)}
 .stat-label{font-size:10px;color:var(--white-dim);margin-top:2px}
 .section-title{text-transform:uppercase;letter-spacing:1.5px;font-size:20px;font-weight:900;color:var(--gold);margin-bottom:16px;font-family:Barlow Condensed,sans-serif;letter-spacing:2px;text-transform:uppercase}
 .empty-state{text-align:center;padding:40px 20px;color:var(--white-dim);font-size:14px}
-.section{display:none;padding:calc(72px + max(env(safe-area-inset-top), 0px)) 16px calc(76px + max(env(safe-area-inset-bottom), 0px));min-height:100vh}
+.section{display:none;padding:calc(72px + var(--aos-top-inset, env(safe-area-inset-top, 0px))) 16px calc(76px + var(--aos-bottom-inset, env(safe-area-inset-bottom, 0px)));min-height:100vh}
 .section.active{display:block}
-.top-header{position:fixed;top:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;height:calc(56px + max(env(safe-area-inset-top), 0px));padding-top:max(env(safe-area-inset-top), 0px);box-sizing:border-box;background:var(--navy);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 16px;z-index:100}
-.bottom-nav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;height:calc(60px + env(safe-area-inset-bottom));padding-bottom:env(safe-area-inset-bottom);background:var(--navy);border-top:1px solid var(--border);display:flex;z-index:100}
+.top-header{position:fixed;top:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;height:calc(56px + var(--aos-top-inset, env(safe-area-inset-top, 0px)));box-sizing:border-box;background:var(--navy);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:var(--aos-top-inset, env(safe-area-inset-top, 0px)) 16px 0;z-index:100}
+.bottom-nav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;height:calc(60px + var(--aos-bottom-inset, env(safe-area-inset-bottom, 0px)));padding-bottom:var(--aos-bottom-inset, env(safe-area-inset-bottom, 0px));background:var(--navy);border-top:1px solid var(--border);display:flex;z-index:100}
 .nav-btn{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;border:none;background:transparent;color:var(--white-dim);cursor:pointer;font-size:9px;padding:4px 0}
 .nav-btn .nav-icon{font-size:18px;line-height:1}
 .nav-btn.active{color:var(--gold)}
@@ -740,7 +740,24 @@ function aosAudienceOptions(g,me,role){
     aosStaffOfAthlete(g,me).forEach(function(s){ add(s,aosRoleOf(g,s)||'staff'); });
     aosParentsOf(g,me).forEach(function(q){ add(q,'parent'); });
   } else if(role==='parent'){
-    aosChildrenOf(g,me).forEach(function(k){ add(k,'athlete'); aosStaffOfAthlete(g,k).forEach(function(s){ add(s,aosRoleOf(g,s)||'staff'); }); });
+    /* A parent is part of the team their athlete plays for: they can
+       reach the team, and the other parents on it, not just their own
+       child and that child's staff. Other people's children are not
+       offered as direct messages \u2014 an adult messaging someone else's
+       kid privately is exactly what Safe Sport exists to prevent. */
+    aosChildrenOf(g,me).forEach(function(kid){
+      add(kid,'athlete');
+      aosStaffOfAthlete(g,kid).forEach(function(st){
+        add(st,aosRoleOf(g,st)||'staff');
+        var label=aosRoleOf(g,st)==='org'?('Everyone at '+aosNameOf(g,st)):(aosNameOf(g,st)+'\u2019s team');
+        var recips=aosRoleOf(g,st)==='org'?aosOrgAll(g,st):aosTeam(g,st);
+        if(recips.length>1) opts.push({type:'team',id:st,label:label+' (athletes + parents)',recipients:_aosUniq([me].concat(recips))});
+        /* the other parents on that team, by name */
+        aosAthletesOf(g,st).forEach(function(teammate){
+          aosParentsOf(g,teammate).forEach(function(par){ add(par,'parent'); });
+        });
+      });
+    });
   }
   Object.keys(people).forEach(function(id){
     opts.push({type:'user',id:id,label:aosNameOf(g,id)+' ('+people[id]+')',recipients:[me,id]});
@@ -1417,6 +1434,18 @@ window.aosToggleSessionDone=function(date,sessionId){
    all: their More button opens Messages, and the cards that link to them
    live in the owner-only menu. */
 function aosMoreTilesHTML(role){
+  /* A parent isn't an athlete. They get what follows their child, not a
+     set of empty training screens of their own. */
+  if(role==='parent'){
+    return '<div style="margin:18px 0 8px;font-size:11px;font-weight:700;letter-spacing:1.5px;color:var(--white-dim);text-transform:uppercase">More</div>'+
+      '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px">'+
+      [['chat','\uD83D\uDCAC','Messages'],['requests','\uD83D\uDCE6','Requests'],['calendar','\uD83D\uDCC5','Calendar'],
+       ['subscription','\u2B50','Plan']].map(function(t){
+        return '<button onclick="navigateTo(\''+t[0]+'\')" style="background:rgba(255,136,170,0.08);border:1px solid rgba(255,136,170,0.3);border-radius:10px;'+
+          'padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)">'+
+          '<span style="font-size:22px">'+t[1]+'</span><span style="font-size:11px;font-weight:600">'+t[2]+'</span></button>';
+      }).join('')+'</div>';
+  }
   var tiles=[['requests','\uD83D\uDCE6','Requests'],['challenges','\uD83C\uDFC6','Challenges'],
              ['calendar','\uD83D\uDCC5','Calendar'],['leaderboard','\uD83C\uDFC5','Leaderboard'],
              ['chat','\uD83D\uDCAC','Messages']];
@@ -2419,6 +2448,38 @@ function setMode(mode){
   }
 }
 
+/* iOS reports safe-area insets through env(), but an installed web app
+   with a translucent status bar sometimes reports 0 before first paint,
+   which leaves the header under the clock and the Dynamic Island. So
+   measure it, and if a notched iPhone claims zero, use the real value. */
+function aosApplySafeInsets(){
+  try{
+    var probe=document.createElement('div');
+    probe.style.cssText='position:fixed;top:0;left:0;width:0;visibility:hidden;'+
+      'height:env(safe-area-inset-top, 0px);padding-bottom:env(safe-area-inset-bottom, 0px)';
+    document.body.appendChild(probe);
+    var cs=getComputedStyle(probe);
+    var top=parseFloat(cs.height)||0, bottom=parseFloat(cs.paddingBottom)||0;
+    probe.remove();
+    var iOS=/iPad|iPhone|iPod/.test(navigator.userAgent)||
+            (navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+    var standalone=(window.navigator.standalone===true)||
+            (window.matchMedia&&window.matchMedia('(display-mode: standalone)').matches);
+    if(iOS&&top<1){
+      /* Every notched iPhone is 812pt tall or more; 44 covers the notch,
+         59 the Dynamic Island sizes. Erring larger is only a little space. */
+      var h=Math.max(screen.width,screen.height);
+      top = h>=926 ? 59 : (h>=812 ? 47 : (standalone?20:0));
+    }
+    if(iOS&&bottom<1&&Math.max(screen.width,screen.height)>=812) bottom=34;
+    document.documentElement.style.setProperty('--aos-top-inset',top+'px');
+    document.documentElement.style.setProperty('--aos-bottom-inset',bottom+'px');
+  }catch(e){ /* leave the CSS fallback in place */ }
+}
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',aosApplySafeInsets);
+else aosApplySafeInsets();
+window.addEventListener('orientationchange',function(){ setTimeout(aosApplySafeInsets,250); });
+window.addEventListener('resize',function(){ clearTimeout(window._insetT); window._insetT=setTimeout(aosApplySafeInsets,250); });
 function navigateTo(sec){
   // "Home" is role-aware: Coach/Trainer/Org land on their own dashboard
   // (the thing actually useful to them every day) rather than the
@@ -2431,6 +2492,13 @@ function navigateTo(sec){
     else if(_hu && _hu.role==='trainer') sec='trainer';
     else if(_hu && _hu.role==='org') sec='org';
     else if(_hu && _hu.role==='parent') sec='parent';
+  }
+  /* A parent tapping Training or Game Day means "how is my athlete
+     doing", not "log my own session" — they aren't an athlete. */
+  if((window.AOS_USER||{}).role==='parent'
+     && ['training','gameday','recovery','metrics','goals','tasks','record','hydration','nutrition'].indexOf(sec)>=0){
+    if(!window._parentChild) showToast('Open your athlete from the Parent Portal.');
+    sec='parent';
   }
   document.querySelectorAll('.section').forEach(function(s){s.classList.remove('active')});
   var el=safeGet('sec-'+sec);if(el)el.classList.add('active');
@@ -2448,13 +2516,18 @@ function navigateTo(sec){
   if(!_ghb){
     _ghb=document.createElement('div');
     _ghb.id='global-home-bar';
-    _ghb.style.cssText='position:fixed;top:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;z-index:200;display:none;align-items:center;gap:10px;padding:8px 16px;background:rgba(17,17,17,0.97);border-bottom:1px solid rgba(0,224,255,0.15);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);box-sizing:border-box';
+    /* This bar sits at the very top of the screen, so it has to clear the
+       status bar and Dynamic Island like everything else. Without the
+       inset it printed under the clock. */
+    _ghb.style.cssText='position:fixed;top:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;z-index:200;display:none;align-items:center;gap:10px;padding:calc(8px + var(--aos-top-inset, env(safe-area-inset-top, 0px))) 16px 8px;background:rgba(17,17,17,0.97);border-bottom:1px solid rgba(0,224,255,0.15);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);box-sizing:border-box';
     _ghb.innerHTML='<button onclick="navigateTo(&#39;home&#39;)" style="background:rgba(0,224,255,0.12);border:1px solid rgba(0,224,255,0.25);border-radius:8px;padding:5px 14px;color:var(--gold);font-size:13px;font-weight:700;cursor:pointer;font-family:Inter,sans-serif;flex-shrink:0">&#8962; Home</button>'
       +'<span id="ghb-title" style="font-size:14px;font-weight:700;color:var(--white-dim);font-family:Barlow Condensed,sans-serif;letter-spacing:1px;text-transform:uppercase"></span>';
     document.body.appendChild(_ghb);
     // Offset sections so content isn't hidden under bar
     var _style=document.createElement('style');
-    _style.textContent='.section.active{padding-top:88px!important}';
+    /* …and the offset it forces on screens has to include the inset too,
+       otherwise it undoes the safe-area padding on every screen. */
+    _style.textContent='.section.active{padding-top:calc(88px + var(--aos-top-inset, env(safe-area-inset-top, 0px)))!important}';
     document.head.appendChild(_style);
   }
   if(navHighlight==='home'){
@@ -6839,8 +6912,8 @@ function renderMetricsGarmin(){
 function aosRecoveryVisibilityHTML(){
   return '<div id="rec-visibility" style="background:rgba(0,224,255,0.06);border:1px solid rgba(0,224,255,0.2);border-radius:10px;padding:10px;margin-bottom:12px;font-size:11px;color:#8899aa;line-height:1.6">'+
     '\uD83D\uDC41\uFE0F <b style="color:#00E0FF">Who sees this:</b> your coaches and trainers see your readiness score. '+
-    'A linked parent sees a weekly summary \u2014 how often you checked in, average readiness and sleep. '+
-    'Your mood, sore areas and notes are not shown to parents.</div>';
+    'A parent you are linked to sees your check-ins in full \u2014 readiness, sleep, energy, mood, soreness and notes. '+
+    'Only people you are linked to see any of it.</div>';
 }
 function renderRecovery(){
   var el=safeGet('sec-recovery');if(!el)return;
@@ -7616,8 +7689,9 @@ function aosSeasonsHTML(){
 }
 
 function _recFmtDate(d){ if(!d) return '\u2014'; var t=new Date(d); return isNaN(t)?String(d):t.toLocaleDateString(); }
-function aosCareerStats(){
-  var rec=recovery||{}, tr=training||{}, gl=goals||[];
+function aosCareerStats(){ return aosCareerStatsFrom(recovery,training,goals); }
+function aosCareerStatsFrom(recIn,trIn,glIn){
+  var rec=recIn||{}, tr=trIn||{}, gl=glIn||[];
   var checkIns=Object.keys(rec).filter(function(d){ var r=rec[d]||{}; return r.readiness!==undefined; });
   var sessions=0, minutes=0, firstDate=null;
   Object.keys(tr).forEach(function(d){
@@ -7642,11 +7716,17 @@ function aosCareerStats(){
 }
 /* Best value per metric field, per sport — what you'd actually show someone. */
 function aosPersonalBests(){
+  return aosPersonalBestsFrom(metricsCustom,(typeof metricsPhysical!=='undefined')?metricsPhysical:{},aosMySports());
+}
+function aosPersonalBestsFrom(customIn,physIn,sportsIn){
   var out=[];
-  (aosMySports()||[]).forEach(function(sport){
+  var _entriesFor=function(sport,gid){
+    return (customIn||{})[sport+'|'+gid]||((sportsIn||[])[0]===sport?(customIn||{})[gid]:null)||[];
+  };
+  (sportsIn||[]).forEach(function(sport){
     (aosSportGroups(sport)||[]).forEach(function(g){
       if(!g.fields) return;
-      var entries=aosMetricEntriesFor(sport,g.id);
+      var entries=_entriesFor(sport,g.id);
       if(!entries.length) return;
       g.fields.forEach(function(f){
         if(f.text) return;
@@ -7661,9 +7741,9 @@ function aosPersonalBests(){
       });
     });
   });
-  if(typeof BENCHMARKS!=='undefined'&&typeof metricsPhysical!=='undefined'){
+  if(typeof BENCHMARKS!=='undefined'){
     BENCHMARKS.forEach(function(bm){
-      var entries=(metricsPhysical||{})[bm.key]||[];
+      var entries=(physIn||{})[bm.key]||[];
       if(!entries.length) return;
       var vals=entries.map(function(e){ return {v:Number(e.value),d:e.date}; }).filter(function(x){ return !isNaN(x.v); });
       if(!vals.length) return;
@@ -7674,19 +7754,20 @@ function aosPersonalBests(){
   return out;
 }
 /* Month-by-month, so growth is visible rather than implied. */
-function aosMonthlyTrend(months){
+function aosMonthlyTrend(months){ return aosMonthlyTrendFrom(recovery,training,months); }
+function aosMonthlyTrendFrom(recIn,trIn,months){
   months=months||6;
   var out=[];
   for(var i=months-1;i>=0;i--){
     var d=new Date(); d.setMonth(d.getMonth()-i);
     var key=d.toISOString().slice(0,7);
     var rVals=[], sess=0;
-    Object.keys(recovery||{}).forEach(function(day){
+    Object.keys(recIn||{}).forEach(function(day){
       if(day.indexOf(key)!==0) return;
-      var r=recovery[day]||{};
+      var r=(recIn[day])||{};
       if(r.readiness!==undefined) rVals.push(Number(r.readiness));
     });
-    Object.keys(training||{}).forEach(function(day){ if(day.indexOf(key)===0) sess+=(training[day]||[]).length; });
+    Object.keys(trIn||{}).forEach(function(day){ if(day.indexOf(key)===0) sess+=((trIn[day])||[]).length; });
     out.push({month:key, label:d.toLocaleString('en-US',{month:'short'}),
       readiness:rVals.length?Math.round(rVals.reduce(function(a,c){return a+c;},0)/rVals.length*10)/10:null,
       sessions:sess, checkIns:rVals.length});
@@ -9375,7 +9456,7 @@ function aosBindRolesCard(root){
    logged data, their profile and their directory record. It cannot
    remove the Firebase login itself — that needs a server — so the
    wording says so rather than implying more than it does. */
-var AOS_CHILD_KEYS=['sb_profile','sb_recovery','sb_training','sb_hydration','sb_goals','sb_calendar',
+var AOS_CHILD_KEYS=['sb_profile','sb_recovery','sb_training','sb_hydration','sb_goals','sb_calendar','sb_seasons','sb_self_skills',
   'sb_tasks','sb_metrics_custom','sb_metrics_physical','sb_metrics_batting','sb_metrics_pitching',
   'sb_metrics_fielding','sb_metrics_blast','sb_metrics_radar','sb_metrics_rapsodo','sb_metrics_garmin',
   'aos_parental_consent','aos_consent'];
@@ -9458,10 +9539,12 @@ function renderParentChildHome(){
     aosChildData(cid,'sb_profile'), aosChildData(cid,'sb_recovery'), aosChildData(cid,'sb_training'),
     aosChildData(cid,'sb_hydration'), aosChildData(cid,'sb_goals'), aosChildData(cid,'sb_calendar'),
     aosChildData(cid,'sb_metrics_custom'), aosChildData(cid,'sb_metrics_physical'),
-    aosChildData(cid,'sb_metrics_batting'), aosChildData(cid,'sb_metrics_pitching')
+    aosChildData(cid,'sb_metrics_batting'), aosChildData(cid,'sb_metrics_pitching'),
+    aosChildData(cid,'sb_seasons'), aosChildData(cid,'sb_self_skills')
   ]).then(function(r){
     var prof=r[0]||{}, rec=r[1]||{}, tr=r[2]||[], hyd=r[3]||{}, goals=r[4]||[], cal=r[5]||[];
     var custom=r[6]||{}, phys=r[7]||{}, batting=r[8]||[], pitching=r[9]||[];
+    var seasons=r[10]||[], selfS=r[11]||{};
     var td=(typeof getTodayKey==='function')?getTodayKey():new Date().toISOString().slice(0,10);
     var today=rec[td]||{};
     var water=((hyd[td]||{entries:[]}).entries||[]).reduce(function(s,e){return s+(e.oz||0);},0);
@@ -9480,9 +9563,10 @@ function renderParentChildHome(){
       stat(sessions,'Sessions (7d)')+
       stat(prof.streak||0,'Day streak')+
       stat(openGoals,'Open goals')+'</div>';
-    /* A summary, not the raw log. Sleep and readiness tell a parent what
-       they need; mood, soreness and notes stay between the athlete and
-       their coaching staff, so check-ins stay honest. */
+    /* A linked parent sees the check-ins themselves. Linking is the
+       consent: a parent following their athlete's journey gets the same
+       view the athlete has, not a digest of it. The athlete is told this
+       plainly on the recovery screen. */
     var last7=[], sleeps=[];
     for(var _i=0;_i<7;_i++){
       var _d=new Date(Date.now()-_i*86400000).toISOString().slice(0,10);
@@ -9492,16 +9576,91 @@ function renderParentChildHome(){
     }
     var avgR=last7.length?Math.round(last7.reduce(function(a,c){return a+c;},0)/last7.length*10)/10:null;
     var avgS=sleeps.length?Math.round(sleeps.reduce(function(a,c){return a+c;},0)/sleeps.length*10)/10:null;
-    var trend=last7.length>=4?(last7.slice(0,3).reduce(function(a,c){return a+c;},0)/3)-(last7.slice(3).reduce(function(a,c){return a+c;},0)/last7.slice(3).length):0;
-    html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:6px">Recovery summary</div>'+
-      '<div style="font-size:13px;color:#e8f4fd;line-height:1.9">'+
-        'Checked in: '+last7.length+' of the last 7 days<br>'+
-        'Average readiness: '+(avgR===null?'\u2014':avgR+'/10')+(last7.length>=4?(trend>0.5?' \u2197 improving':trend<-0.5?' \u2198 dipping':' \u2192 steady'):'')+'<br>'+
-        'Average sleep: '+(avgS===null?'\u2014':avgS+'h')+
-      '</div>'+
-      '<div style="font-size:11px;color:var(--white-dim);margin-top:8px">Your athlete\'s own notes \u2014 mood, soreness, how they felt \u2014 stay between them and their coaching staff.</div></div>';
-    if(next) html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">Next event</div>'+
-      '<div style="font-size:13px;color:#e8f4fd">'+escH(next.title||'Event')+' \u00B7 '+escH(next.date||'')+(next.time?' '+escH(next.time):'')+'</div></div>';
+    html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:6px">Check-ins</div>'+
+      '<div style="font-size:12px;color:var(--white-dim);margin-bottom:8px">'+
+        last7.length+' of the last 7 days'+
+        (avgR===null?'':' \u00B7 average readiness '+avgR+'/10')+
+        (avgS===null?'':' \u00B7 average sleep '+avgS+'h')+'</div>';
+    var _recentDays=Object.keys(rec).sort().reverse().slice(0,14);
+    if(!_recentDays.length){
+      html+='<div style="font-size:13px;color:var(--white-dim)">Nothing logged yet.</div>';
+    } else {
+      _recentDays.forEach(function(_day){
+        var e=rec[_day]||{};
+        var sore=Object.keys(e.soreness||{}).filter(function(k){return e.soreness[k];});
+        var rc=e.readiness>=8?'#2ecc71':e.readiness>=5?'var(--gold)':'#e74c3c';
+        html+='<div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+          '<div style="display:flex;justify-content:space-between;align-items:center">'+
+            '<span style="font-size:12px;color:#e8f4fd">'+escH(_day)+'</span>'+
+            '<span style="font-size:13px;font-weight:800;color:'+rc+'">'+(e.readiness===undefined?'\u2014':e.readiness+'/10')+'</span></div>'+
+          '<div style="font-size:11px;color:var(--white-dim);margin-top:3px;line-height:1.6">'+
+            (e.sleep!==undefined?'Sleep '+e.sleep+'h \u00B7 ':'')+
+            (e.energy!==undefined?'Energy '+e.energy+'/10 \u00B7 ':'')+
+            (e.mood?'Mood '+escH(String(e.mood))+' \u00B7 ':'')+
+            (sore.length?'Sore: '+escH(sore.join(', ')):'No soreness reported')+
+            ((e.methods||[]).length?'<br>Recovery: '+escH((e.methods||[]).join(', ')):'')+
+            (e.notes?'<br>Note: '+escH(String(e.notes)):'')+
+          '</div></div>';
+      });
+    }
+    html+='</div>';
+
+    /* The same record the athlete sees: career, growth, bests, seasons,
+       their own self-assessment and their goals. */
+    var _cs=aosCareerStatsFrom(rec,tr,goals);
+    var _sports=(Array.isArray(prof.sports)&&prof.sports.length)?prof.sports:[prof.sport||'Other'];
+    var _pbs=aosPersonalBestsFrom(custom,phys,_sports);
+    var _trend=aosMonthlyTrendFrom(rec,tr,6);
+    html+='<div class="stat-grid">'+
+      '<div class="stat-card"><div class="stat-value">'+_cs.days+'</div><div class="stat-label">Days in AOS</div></div>'+
+      '<div class="stat-card"><div class="stat-value">'+_cs.sessions+'</div><div class="stat-label">Sessions</div></div>'+
+      '<div class="stat-card"><div class="stat-value">'+_cs.hours+'</div><div class="stat-label">Hours trained</div></div>'+
+      '<div class="stat-card"><div class="stat-value">'+_cs.longestStreak+'</div><div class="stat-label">Longest streak</div></div>'+
+      '<div class="stat-card"><div class="stat-value">'+_cs.goalsDone+'</div><div class="stat-label">Goals reached</div></div>'+
+      '<div class="stat-card"><div class="stat-value">'+_cs.checkIns+'</div><div class="stat-label">Check-ins</div></div></div>';
+    var _maxS=Math.max.apply(null,_trend.map(function(x){return x.sessions;}).concat([1]));
+    html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Last 6 months</div>'+
+      '<div style="display:flex;gap:6px;align-items:flex-end;height:90px">'+_trend.map(function(x){
+        var hh=Math.round((x.sessions/_maxS)*70)+3;
+        return '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px">'+
+          '<div style="font-size:10px;color:var(--gold)">'+(x.readiness===null?'':x.readiness)+'</div>'+
+          '<div style="width:100%;height:'+hh+'px;background:linear-gradient(180deg,#00E0FF,#00577a);border-radius:4px"></div>'+
+          '<div style="font-size:10px;color:var(--white-dim)">'+escH(x.label)+'</div></div>';
+      }).join('')+'</div></div>';
+    if(_pbs.length){
+      html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Personal bests</div>'+
+        _pbs.slice(0,15).map(function(bst){
+          return '<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+            '<div><div style="font-size:13px;color:#e8f4fd">'+escH(bst.label)+'</div>'+
+            '<div style="font-size:10px;color:var(--white-dim)">'+escH(bst.sport+' \u00B7 '+bst.group)+'</div></div>'+
+            '<div style="text-align:right"><div style="font-size:15px;font-weight:800;color:var(--gold)">'+escH(String(bst.value))+'</div>'+
+            '<div style="font-size:10px;color:var(--white-dim)">'+_recFmtDate(bst.date)+'</div></div></div>';
+        }).join('')+'</div>';
+    }
+    if((seasons||[]).length){
+      html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Seasons</div>'+
+        seasons.map(function(se){
+          return '<div style="padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+            '<div style="font-size:13px;color:#e8f4fd;font-weight:700">'+escH(se.label||'Season')+'</div>'+
+            '<div style="font-size:11px;color:var(--white-dim)">'+_recFmtDate(se.closedAt)+' \u00B7 '+se.sessions+' sessions \u00B7 '+se.hours+'h</div></div>';
+        }).join('')+'</div>';
+    }
+    if(Object.keys(selfS||{}).length){
+      html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">How they rate themselves</div>'+
+        '<div style="font-size:11px;color:var(--white-dim);margin-bottom:8px">Their own read. Worth a conversation, not a correction.</div>'+
+        Object.keys(selfS).map(function(k){
+          return '<div style="display:flex;justify-content:space-between;padding:5px 0;font-size:12px;color:#e8f4fd">'+
+            '<span>'+escH(k)+'</span><span style="color:var(--gold);font-weight:700">'+((selfS[k]||{}).value||'\u2014')+'/5</span></div>';
+        }).join('')+'</div>';
+    }
+    if((goals||[]).length){
+      html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Their goals</div>'+
+        goals.slice(0,12).map(function(gl){
+          return '<div style="display:flex;justify-content:space-between;padding:5px 0;font-size:12px;color:'+(gl.completed?'#2ecc71':'#e8f4fd')+'">'+
+            '<span>'+(gl.completed?'\u2713 ':'')+escH(gl.title||gl.text||'Goal')+'</span>'+
+            (gl.target?'<span style="color:var(--white-dim)">'+escH(String(gl.target))+'</span>':'')+'</div>';
+        }).join('')+'</div>';
+    }
     html+=aosParentMetricsHTML(prof,custom,phys,batting,pitching);
 
     html+=aosParentDataHTML(cid,cname);
@@ -9510,7 +9669,9 @@ function renderParentChildHome(){
     var sports=(typeof aosSportList==='function')?aosSportList():['Other'];
     var positions=(typeof aosSportPositions==='function')?aosSportPositions(prof.sport||'Other'):['Athlete'];
     function field(id,label,val,type){ return '<div class="form-group"><label>'+label+'</label><input id="pci-'+id+'" type="'+(type||'text')+'" value="'+escH(val||'')+'"></div>'; }
-    html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Athlete information</div>'+
+    html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">Athlete information</div>'+
+      '<div style="font-size:11px;color:var(--white-dim);margin-bottom:8px">You can update their details and log metrics for them. '+
+      'Their check-ins, training, goals and self-assessment are theirs to write \u2014 you see everything, you just don\u2019t edit it.</div>'+
       '<div class="form-row">'+field('firstName','First name',prof.firstName)+field('lastName','Last name',prof.lastName)+'</div>'+
       '<div class="form-row">'+
         '<div class="form-group"><label>Sport</label><select id="pci-sport">'+sports.map(function(s){
