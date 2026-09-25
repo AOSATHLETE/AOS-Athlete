@@ -842,6 +842,198 @@ function _writeMsgKey(key,uid,arr){
 }
 /* ── End messaging ── */
 /* ══════════════════════════════════════════════════════════════════
+   AUDIENCE LISTS — challenges, polls, season events and the coach's
+   communications log. Each was a single shared document, filtered on
+   screen but readable in full by anyone signed in.
+
+   Each item is now its own document carrying the people entitled to
+   see it, exactly like messages: reads ask for "items where I'm a
+   viewer", so the rules can enforce it rather than the interface.
+   Items created before the split keep working; they are visible to
+   their own team once anyone saves the list again.
+   ══════════════════════════════════════════════════════════════════ */
+var _AUD_LISTS={
+  aos_team_challenges:{coll:'challenges', order:'desc'},
+  aos_polls:          {coll:'polls',      order:'desc'},
+  aos_season_events:  {coll:'seasonEvents', order:'asc'},
+  aos_comms_log:      {coll:'comms',      order:'desc'}
+};
+var _audSeen={};
+/* The team roster is a map of athletes, and teammates are meant to see
+   each other — unlike coach notes, which stay with the child they're
+   about. Each athlete owns their own entry and carries its audience. */
+var _rosterSeen='';
+function _readRosterMap(uid){
+  return fbDb.collection('rosterEntries').where('viewers','array-contains',uid).get().then(function(snap){
+    var map={};
+    snap.forEach(function(d){ var v=d.data(); if(v&&v.ownerId) map[v.ownerId]=v.entry; });
+    /* left blank on read: the write path compares entry + audience */
+    return map;
+  }).catch(function(e){ console.warn('AOS roster read failed',e); return {}; });
+}
+function _writeRosterMap(uid,val){
+  val=val||{};
+  var mine=val[uid];
+  if(!mine) return Promise.resolve();
+  var role=(window.AOS_USER&&window.AOS_USER.role)||'player';
+  return aosLoadGraph().then(function(g){
+    var viewers=_aosUniq([uid].concat(aosTeamRecipients(g,uid,role)));
+    /* The audience is part of what can change: joining a team later has
+       to make your entry visible to the teammates you now have. */
+    var cur=JSON.stringify({e:mine,v:viewers});
+    if(cur===_rosterSeen) return null;
+    return fbDb.collection('rosterEntries').doc(uid).set({
+      ownerId:uid, entry:mine, viewers:viewers, updatedAt:Date.now()
+    }).then(function(){ _rosterSeen=cur; });
+  }).catch(function(e){ console.warn('AOS roster write failed',e); });
+}
+function _audViewers(key,item,uid,g){
+  var role=(window.AOS_USER&&window.AOS_USER.role)||'player';
+  if(key==='aos_comms_log'){
+    /* A message to an athlete: the two of them, plus that athlete's parents. */
+    var who=[uid,item.fromId,item.toId].filter(Boolean);
+    if(item.toId) who=who.concat(aosParentsOf(g,item.toId));
+    return _aosUniq(who);
+  }
+  return _aosUniq([uid].concat(aosTeamRecipients(g,uid,role)));
+}
+function _audItemId(key,item){
+  return String(item&&(item.id||item._aid)||('i_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6)));
+}
+function _readAudList(key,uid){
+  var cfg=_AUD_LISTS[key];
+  return fbDb.collection(cfg.coll).where('viewers','array-contains',uid).get().then(function(snap){
+    var items=[], seen={};
+    snap.forEach(function(d){
+      var v=d.data(); if(!v||!v.item) return;
+      var it=v.item; it.id=it.id||d.id;
+      items.push(it); seen[d.id]=JSON.stringify(it);
+    });
+    items.sort(function(a,b){
+      var av=a.ts||a.createdAt||a.date||'', bv=b.ts||b.createdAt||b.date||'';
+      return cfg.order==='asc'?(av>bv?1:av<bv?-1:0):(av<bv?1:av>bv?-1:0);
+    });
+    _audSeen[key]=seen;
+    return items;
+  }).catch(function(e){ console.warn('AOS list read failed',key,e); return []; });
+}
+function _writeAudList(key,uid,val){
+  var cfg=_AUD_LISTS[key], seen=_audSeen[key]||{}, ops=[];
+  if(!Array.isArray(val)) return Promise.resolve();
+  return aosLoadGraph().then(function(g){
+    var now={};
+    val.forEach(function(item){
+      if(!item||typeof item!=='object') return;
+      var docId=_audItemId(key,item);
+      item.id=item.id||docId;
+      now[docId]=item;
+      var cur=JSON.stringify(item);
+      if(seen[docId]===cur) return;
+      /* Only the creator sets the audience. Everyone else is joining,
+         voting or logging progress, which touches the item alone —
+         recomputing viewers from their own team would (rightly) be
+         refused by the rules. */
+      var known=Object.prototype.hasOwnProperty.call(seen,docId);
+      var payload=known
+        ? {item:item, updatedAt:Date.now()}
+        : {key:key, item:item, viewers:_audViewers(key,item,uid,g),
+           creatorId:item.creatorId||item.fromId||item.coachId||uid, updatedAt:Date.now()};
+      ops.push(fbDb.collection(cfg.coll).doc(docId).set(payload,{merge:true}).then(function(){ seen[docId]=cur; })
+        .catch(function(e){ console.warn('AOS list write failed',docId,e); }));
+    });
+    /* Something the caller removed from the list. */
+    Object.keys(seen).forEach(function(docId){
+      if(now[docId]) return;
+      ops.push(fbDb.collection(cfg.coll).doc(docId).delete()
+        .then(function(){ delete seen[docId]; })
+        .catch(function(e){ console.warn('AOS list delete failed',docId,e); }));
+    });
+    _audSeen[key]=seen;
+    return Promise.all(ops).then(function(){});
+  });
+}
+/* ══════════════════════════════════════════════════════════════════
+   COACHING RECORDS — dev plans, skill assessments, assigned training,
+   weekly plans, team targets, game-day notes and dev focus. These were
+   seven shared documents that any signed-in user could read: notes and
+   assessments about individual children, readable by strangers.
+
+   Each is now one document per owner, at records/{key}__{ownerId}:
+     - athlete-owned (dev plans, skills, assigned training): the athlete,
+       their linked staff, and their parents.
+     - staff-owned (weekly plan, targets, game-day note, dev focus): the
+       staff member, their athletes and their connected staff.
+
+   Reads ask only for the owners the reader is entitled to, so the query
+   itself is inside what the rules allow.
+   ══════════════════════════════════════════════════════════════════ */
+var _RECORD_KEYS={
+  aos_dev_plans:'athlete', aos_dev_skills:'athlete', aos_assigned_training:'athlete',
+  aos_weekly_plan:'staff', aos_team_targets:'staff', aos_gameday_note:'staff', aos_dev_focus:'staff',
+  aos_archive:'staff', aos_athlete_history:'athlete'
+};
+var _recSeen={};
+function _recordVisibleOwners(kind,uid,g){
+  var out=[uid];
+  if(kind==='athlete'){
+    /* Athletes I can see records for: my own, the ones I coach, my children. */
+    out=out.concat(aosAthletesOf(g,uid));
+    aosChildrenOf(g,uid).forEach(function(c){ out.push(c); });
+    aosStaffLinksOf(g,uid).forEach(function(s){
+      if(aosRoleOf(g,s)==='org'||aosRoleOf(g,s)==='coach'||aosRoleOf(g,s)==='trainer')
+        out=out.concat(aosAthletesOf(g,s));
+    });
+  } else {
+    /* Staff whose plans apply to me: the ones I'm linked to, plus my own. */
+    out=out.concat(aosStaffOfAthlete(g,uid)).concat(aosStaffLinksOf(g,uid));
+    aosChildrenOf(g,uid).forEach(function(c){ out=out.concat(aosStaffOfAthlete(g,c)); });
+  }
+  return _aosUniq(out);
+}
+function _readRecords(key,uid){
+  var kind=_RECORD_KEYS[key];
+  return aosLoadGraph().then(function(g){
+    var owners=_recordVisibleOwners(kind,uid,g);
+    var chunks=[];
+    for(var i=0;i<owners.length;i+=10) chunks.push(owners.slice(i,i+10));
+    return Promise.all(chunks.map(function(ch){
+      return fbDb.collection('records').where('key','==',key).where('ownerId','in',ch).get()
+        .catch(function(e){ console.warn('AOS record read failed',key,e); return {forEach:function(){}}; });
+    })).then(function(snaps){
+      var map={}, seen={};
+      snaps.forEach(function(sn){ sn.forEach(function(d){
+        var v=d.data();
+        if(!v||!v.ownerId) return;
+        map[v.ownerId]=v.data;
+        seen[d.id]=JSON.stringify(v.data);
+      }); });
+      /* Anything still in the old shared document, until it's migrated. */
+      return fbDb.collection('shared_data').doc(key).get().then(function(sn){
+        var legacy=(sn.exists&&sn.data().value)||{};
+        Object.keys(legacy).forEach(function(o){ if(!(o in map)&&owners.indexOf(o)>=0) map[o]=legacy[o]; });
+      }).catch(function(){}).then(function(){
+        _recSeen[key]=seen;
+        return map;
+      });
+    });
+  });
+}
+function _writeRecords(key,uid,val){
+  var kind=_RECORD_KEYS[key], seen=_recSeen[key]||{}, ops=[];
+  val=val||{};
+  Object.keys(val).forEach(function(ownerId){
+    var cur=JSON.stringify(val[ownerId]);
+    var docId=key+'__'+ownerId;
+    if(seen[docId]===cur) return;
+    ops.push(fbDb.collection('records').doc(docId).set({
+      key:key, ownerId:ownerId, ownerKind:kind, data:val[ownerId], updatedAt:Date.now(), updatedBy:uid
+    }).then(function(){ seen[docId]=cur; })
+      .catch(function(e){ console.warn('AOS record write failed',docId,e); }));
+  });
+  _recSeen[key]=seen;
+  return Promise.all(ops).then(function(){});
+}
+/* ══════════════════════════════════════════════════════════════════
    TEAMS — a coach or trainer can run more than one squad (JV and
    Varsity, or two age groups). Each team is its own document; which
    team an athlete is on lives on the link between them and that
@@ -1009,11 +1201,12 @@ window.aosRenameTeam=function(teamId){
     return AppSDK.setItem('aos_teams',t).then(function(){ showToast('Team renamed.'); _aosRerenderStaff(); });
   });
 };
+var _deletedTeamSnapshot=null;
 window.aosDeleteTeam=function(teamId){
-  if(!confirm('Delete this team? Athletes stay linked to you, just unassigned.'))return;
+  /* No dialog: the team list is restored by undo, and athletes stay linked either way. */
   var u=window.AOS_USER||{};
   AppSDK.getItem('aos_teams').then(function(t){
-    t=t||{}; delete t[teamId];
+    t=t||{}; _deletedTeamSnapshot=t[teamId]; delete t[teamId];
     return AppSDK.setItem('aos_teams',t);
   }).then(function(){
     return AppSDK.getItem('aos_player_links').then(function(l){
@@ -1024,7 +1217,16 @@ window.aosDeleteTeam=function(teamId){
       });
       return changed?AppSDK.setItem('aos_player_links',l):null;
     });
-  }).then(function(){ if(window._staffTeam===teamId) window._staffTeam=''; showToast('Team deleted.'); _aosRerenderStaff(); });
+  }).then(function(){
+    if(window._staffTeam===teamId) window._staffTeam='';
+    aosUndoBar('Team deleted.',function(){
+      return AppSDK.getItem('aos_teams').then(function(t){
+        t=t||{}; t[teamId]=_deletedTeamSnapshot||t[teamId];
+        return AppSDK.setItem('aos_teams',t);
+      }).then(_aosRerenderStaff);
+    });
+    _aosRerenderStaff();
+  });
 };
 /* Change which sport a connection is for (either party may set it). */
 window.aosSetLinkSport=function(playerId,sport){
@@ -1055,6 +1257,103 @@ function aosLinkSportHTML(playerId,link,acc){
 }
 /* A coach names the captains; it used to be a label an athlete picked
    for themselves, which meant Captain Tools were open to everyone. */
+/* ── Archive ────────────────────────────────────────────────────────
+   Athletes graduate or move clubs. Until now they simply vanished from
+   a coach's roster and took their history with them. Removing someone
+   writes a short archive entry — who they were, what team, when they
+   joined and left, and where they finished — so the season still has a
+   record afterwards. The athlete's own data is untouched and stays theirs. */
+function aosArchiveAthlete(playerId,name){
+  var u=window.AOS_USER||{};
+  if(['coach','trainer','org'].indexOf(u.role)<0) return Promise.resolve();
+  return Promise.all([AppSDK.getItem('aos_local_accounts'),AppSDK.getItem('aos_player_links'),
+                      AppSDK.getItem('aos_teams'),AppSDK.getItem('aos_team_members'),
+                      AppSDK.getItem('aos_archive'),AppSDK.getItem('aos_staff_links'),
+                      AppSDK.getItem('aos_athlete_history')])
+    .then(function(r){
+      var accs=r[0]||{}, links=r[1]||{}, teams=r[2]||{}, members=r[3]||{}, arch=r[4]||{},
+          staffLinks=r[5]||{}, hist=r[6]||{};
+      var acc=accs[playerId]||Object.values(accs).find(function(a){return a&&a.userId===playerId;})||{};
+      var link=(links[playerId]||{})[u.userId]||{};
+      var teamNames=Object.keys(members).filter(function(t){ return members[t]&&members[t][playerId]; })
+        .map(function(t){ return (teams[t]||{}).name||''; }).filter(Boolean);
+      var entry={
+        athleteId:playerId, name:name||acc.name||'Athlete', sport:link.sport||acc.sport||'',
+        teams:teamNames, position:acc.position||'', jersey:acc.jersey||'',
+        joined:link.linkedAt||null, left:Date.now(),
+        finalStreak:acc.streak||0, finalReadiness:acc.readiness||0, challengePoints:acc.challengePoints||0,
+        staffId:u.userId, staffName:u.name||'', staffRole:u.role||''
+      };
+      /* Three parties, three records of the same parting:
+         - the coach or trainer keeps their coaching history,
+         - the club keeps its roster history even if that coach leaves,
+         - the athlete keeps a record of who they played for. */
+      var owners=[u.userId];
+      if(u.role!=='org'){
+        Object.keys(staffLinks[u.userId]||{}).forEach(function(other){
+          var role=(staffLinks[u.userId][other]||{}).role||((accs[other]||{}).role);
+          if(role==='org') owners.push(other);
+        });
+      }
+      owners.forEach(function(ownerId){
+        arch[ownerId]=Array.isArray(arch[ownerId])?arch[ownerId]:[];
+        arch[ownerId].unshift(entry);
+        arch[ownerId]=arch[ownerId].slice(0,200);
+      });
+      hist[playerId]=Array.isArray(hist[playerId])?hist[playerId]:[];
+      hist[playerId].unshift({
+        staffId:u.userId, staffName:u.name||'', staffRole:u.role||'',
+        sport:entry.sport, teams:teamNames, position:entry.position, jersey:entry.jersey,
+        joined:entry.joined, left:entry.left
+      });
+      hist[playerId]=hist[playerId].slice(0,200);
+      return Promise.all([
+        AppSDK.setItem('aos_archive',arch),
+        AppSDK.setItem('aos_athlete_history',hist)
+      ]);
+    }).catch(function(e){ console.warn('AOS archive failed',e); });
+}
+/* The athlete's own version: the teams and coaches they've played for. */
+function aosAthleteHistoryHTML(hist,uid){
+  var list=(hist&&hist[uid])||[];
+  if(!list.length) return '';
+  var fmt=function(ts){ return ts?new Date(ts).toLocaleDateString():'\u2014'; };
+  return '<div class="card card-sm" style="margin-bottom:12px">'+
+    '<div style="font-weight:700;font-size:12px;margin-bottom:8px;text-transform:uppercase;letter-spacing:.8px;color:var(--gold)">Where you\'ve played</div>'+
+    list.slice(0,10).map(function(h){
+      return '<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+        '<div><div style="font-size:13px;color:#e8f4fd">'+escH(h.staffName||'Coach')+'</div>'+
+        '<div style="font-size:10px;color:var(--white-dim)">'+escH([h.sport,(h.teams||[]).join(', '),h.position].filter(Boolean).join(' \u00B7 '))+'</div></div>'+
+        '<div style="font-size:10px;color:var(--white-dim);text-align:right">'+fmt(h.joined)+' \u2013 '+fmt(h.left)+'</div></div>';
+    }).join('')+'</div>';
+}
+/* Past athletes, for the bottom of a staff dashboard. */
+function aosArchiveHTML(archive,uid){
+  var list=(archive&&archive[uid])||[];
+  if(!list.length) return '';
+  var fmt=function(ts){ return ts?new Date(ts).toLocaleDateString():'\u2014'; };
+  return '<div style="margin:18px 0 8px;font-size:11px;font-weight:700;letter-spacing:1.5px;color:var(--white-dim);text-transform:uppercase">Past athletes</div>'+
+    '<div class="card card-sm">'+list.slice(0,8).map(function(a){
+      return '<div style="display:flex;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+        '<div><div style="font-size:13px;color:#e8f4fd">'+escH(a.name)+'</div>'+
+        '<div style="font-size:10px;color:var(--white-dim)">'+escH([a.sport,(a.teams||[]).join(', '),a.position].filter(Boolean).join(' \u00B7 '))+'</div></div>'+
+        '<div style="text-align:right;font-size:10px;color:var(--white-dim)">'+fmt(a.joined)+' \u2013 '+fmt(a.left)+
+        '<div style="color:var(--gold)">'+a.challengePoints+' pts \u00B7 '+a.finalStreak+'d streak</div></div></div>';
+    }).join('')+'</div>';
+}
+/* Roster removal writes the link map, so undo is a restore of it. */
+window.aosUndoableUnlink=function(playerId,name,cb){
+  /* Archive first: the athlete's own history record is written through
+     the link, so it has to land before the link goes. */
+  return aosArchiveAthlete(playerId,name).then(function(){
+  return aosDoWithUndo('aos_player_links','Removed '+(name||'athlete')+' from your roster.',function(l){
+    var u=window.AOS_USER||{};
+    l=l||{};
+    if(l[playerId]) delete l[playerId][u.userId];
+    return l;
+  }).then(function(){ if(cb)cb(); _aosRerenderStaff(); });
+  });
+};
 window.aosSetCaptain=function(playerId,on){
   var u=window.AOS_USER||{};
   AppSDK.getItem('aos_player_links').then(function(l){
@@ -1167,6 +1466,39 @@ window.aosSetGlobalLeaderboard=function(on){
     if(typeof renderLeaderboard==='function') renderLeaderboard();
   });
 };
+/* ── Undo ───────────────────────────────────────────────────────────
+   Confirm dialogs train people to tap through them, and on a phone they
+   are tapped by accident anyway. Destructive actions now happen at once
+   and offer an undo for a few seconds, which is both quicker and safer:
+   the mistake is recoverable rather than merely double-checked. */
+function aosUndoBar(message,undoFn,seconds){
+  var old=document.getElementById('aos-undo'); if(old) old.remove();
+  var bar=document.createElement('div');
+  bar.id='aos-undo';
+  bar.style.cssText='position:fixed;left:50%;transform:translateX(-50%);bottom:calc(76px + env(safe-area-inset-bottom));'+
+    'z-index:900;background:#0A1A2F;border:1px solid rgba(0,224,255,0.45);border-radius:12px;padding:10px 14px;'+
+    'display:flex;align-items:center;gap:12px;max-width:92vw;box-shadow:0 6px 24px rgba(0,0,0,.45)';
+  bar.innerHTML='<span style="font-size:12px;color:#e8f4fd">'+escH(message)+'</span>'+
+    '<button id="aos-undo-btn" style="background:rgba(0,224,255,0.15);border:1px solid #00E0FF;color:#00E0FF;'+
+    'border-radius:8px;padding:8px 12px;font-size:12px;font-weight:700">Undo</button>';
+  document.body.appendChild(bar);
+  var timer=setTimeout(function(){ if(bar.parentNode) bar.remove(); },(seconds||7)*1000);
+  document.getElementById('aos-undo-btn').onclick=function(){
+    clearTimeout(timer); bar.remove();
+    Promise.resolve(undoFn()).then(function(){ showToast('Restored.'); });
+  };
+}
+/* Snapshot a key, change it, and offer to put it back. */
+function aosDoWithUndo(key,message,mutate){
+  return AppSDK.getItem(key).then(function(before){
+    var snapshot=JSON.parse(JSON.stringify(before||(Array.isArray(before)?[]:{})));
+    return Promise.resolve(mutate(before)).then(function(next){
+      return AppSDK.setItem(key,next===undefined?before:next);
+    }).then(function(){
+      aosUndoBar(message,function(){ return AppSDK.setItem(key,snapshot).then(function(){ _aosRerenderStaff(); }); });
+    });
+  });
+}
 window.aosPickTeam=function(teamId){ window._staffTeam=teamId||''; _aosRerenderStaff(); };
 window.aosNewTeamPrompt=function(){
   var name=prompt('New team name (e.g. Varsity, JV, 14U):','');
@@ -1242,7 +1574,7 @@ function aosFilterRosterByTeam(players,links,staffId,members){
    visible to everyone rather than vanishing; clear them out once
    testing is done.
    ══════════════════════════════════════════════════════════════════ */
-var _SCOPED_LISTS={aos_team_challenges:1,aos_polls:1,aos_comms_log:1};
+var _SCOPED_LISTS={};   /* replaced by per-item audience documents */
 var _scopedHidden={}, _scopedSeen={};
 function _myHubIds(g,me,role){
   if(role==='coach'||role==='trainer'||role==='org') return _aosUniq([me].concat(aosStaffLinksOf(g,me)));
@@ -1471,6 +1803,9 @@ window.AppSDK = {
       if(_MSG_KEYS[key]) return uid ? _readMsgKey(key,uid) : [];
       if(_SCOPED_LISTS[key] && uid) return _readScopedList(key,uid);
       if(_LINK_KEYS[key] && uid) return _readLinks(key,uid);
+      if(_RECORD_KEYS[key] && uid) return _readRecords(key,uid);
+      if(_AUD_LISTS[key] && uid) return _readAudList(key,uid);
+      if(key==='aos_team_roster' && uid) return _readRosterMap(uid);
       if(key===_TEAMS_KEY && uid) return _readTeams();
       if(key===_TM_KEY && uid) return _readTeamMembers();
       if(key===_REQ_KEY && uid) return _readRequests(uid);
@@ -1497,6 +1832,9 @@ window.AppSDK = {
       if(_MSG_KEYS[key]) return _writeMsgKey(key,uid,val);
       if(_SCOPED_LISTS[key] && uid) return _writeScopedList(key,uid,val);
       if(_LINK_KEYS[key] && uid) return _writeLinks(key,uid,val);
+      if(_RECORD_KEYS[key] && uid) return _writeRecords(key,uid,val);
+      if(_AUD_LISTS[key] && uid) return _writeAudList(key,uid,val);
+      if(key==='aos_team_roster' && uid) return _writeRosterMap(uid,val);
       if(key===_TEAMS_KEY && uid) return _writeTeams(uid,val);
       if(key===_TM_KEY && uid) return _writeTeamMembers(uid,val);
       if(key===_REQ_KEY && uid) return _writeRequests(uid,val);
@@ -1607,6 +1945,10 @@ window.AppSDK = {
         <label>Org / Team Code <span style="color:var(--white-dim);font-weight:400">(optional)</span></label>
         <input type="text" id="reg-orgcode" placeholder="e.g. ORG-0001" style="width:100%;text-transform:uppercase">
       </div>
+      <label style="display:flex;align-items:flex-start;gap:10px;margin:12px 0 4px;cursor:pointer">
+        <input type="checkbox" id="reg-consent" style="margin-top:3px;width:20px;height:20px;flex-shrink:0">
+        <span style="font-size:11px;color:var(--white-dim);line-height:1.6">I agree to how AOS handles data: coaches and trainers see readiness and training; a linked parent sees a weekly summary; messages between staff and minors are logged and visible to parents; under-13 accounts need a parent's consent. Data is never sold.</span>
+      </label>
       <div class="auth-error" id="signup-error"></div>
       <button class="btn btn-primary" style="width:100%;margin-top:8px" id="local-signup-btn">&#9989; Create My Account</button>
 
@@ -1672,6 +2014,7 @@ window.AppSDK = {
 <div data-id="26" id="sec-calendar" class="section"></div>
 <div data-id="27" id="sec-analytics" class="section"></div>
 <div data-id="28" id="sec-requests" class="section"></div>
+<div id="sec-record" class="section"></div>
 <div data-id="29" id="sec-reports" class="section"></div>
 <div data-id="30" id="sec-nutrition" class="section"></div>
 <div data-id="31" id="sec-tasks" class="section"></div>
@@ -2097,7 +2440,7 @@ function navigateTo(sec){
   if(nb)nb.classList.add('active');
   window.scrollTo(0,0);
   if(sec==='team') window._teamScopeReady=false;
-  var renders={home:renderHome,gameday:renderGameday,training:renderTraining,team:renderTeam,player:renderPlayer,goals:renderGoals,metrics:renderMetrics,recovery:renderRecovery,timer:renderTimer,hydration:renderHydration,calendar:renderCalendar,analytics:renderAnalytics,requests:renderRequests,reports:renderReports,nutrition:renderNutrition,tasks:renderTasks,coach:renderCoach,org:renderOrg,admin:renderAdmin,profile:renderProfile,trainer:renderTrainer,leaderboard:renderLeaderboard,referral:renderReferral,subscription:renderSubscription,parent:renderParent,challenges:renderChallenges,chat:renderChatHub};
+  var renders={home:renderHome,record:renderRecord,gameday:renderGameday,training:renderTraining,team:renderTeam,player:renderPlayer,goals:renderGoals,metrics:renderMetrics,recovery:renderRecovery,timer:renderTimer,hydration:renderHydration,calendar:renderCalendar,analytics:renderAnalytics,requests:renderRequests,reports:renderReports,nutrition:renderNutrition,tasks:renderTasks,coach:renderCoach,org:renderOrg,admin:renderAdmin,profile:renderProfile,trainer:renderTrainer,leaderboard:renderLeaderboard,referral:renderReferral,subscription:renderSubscription,parent:renderParent,challenges:renderChallenges,chat:renderChatHub};
   if(renders[sec])renders[sec]();
   // Persistent home bar — lives outside sections so re-renders can't wipe it
   if(typeof aosRenderRoleSwitcher==='function') aosRenderRoleSwitcher();
@@ -3415,6 +3758,9 @@ async function initApp(){
     metricsRapsodo=await AppSDK.getItem('sb_metrics_rapsodo')||[];
     metricsGarmin=await AppSDK.getItem('sb_metrics_garmin')||[];
     metricsCustom=await AppSDK.getItem('sb_metrics_custom')||{};
+    window._athHistory=await AppSDK.getItem('aos_athlete_history')||{};
+    seasonSnapshots=await AppSDK.getItem('sb_seasons')||[];
+    selfSkills=await AppSDK.getItem('sb_self_skills')||{};
     await aosLoadSportConfigs();
     recovery=await AppSDK.getItem('sb_recovery')||{};
     hydration=await AppSDK.getItem('sb_hydration')||{};
@@ -3901,6 +4247,8 @@ function renderHome(){
      could find the screen at all. */
   '<button class="home-nav-btn" data-hnav="requests"  style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.15);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1F4E6;</span><span style="font-size:11px;font-weight:600">Requests</span></button>'+
   '<button class="home-nav-btn" data-hnav="challenges" style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.15);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1F3C6;</span><span style="font-size:11px;font-weight:600">Challenges</span></button>'+
+  /* The athlete's own career record — theirs, and portable. */
+  '<button class="home-nav-btn" data-hnav="record" style="background:rgba(255,215,0,0.09);border:1px solid rgba(255,215,0,0.3);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1F4D6;</span><span style="font-size:11px;font-weight:600">My Record</span></button>'+
   '<button class="home-nav-btn" data-hnav="profile"   style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.15);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1F464;</span><span style="font-size:11px;font-weight:600">Profile</span></button>'+
   '<button class="home-nav-btn" data-hnav="leaderboard" style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.15);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1F3C6;</span><span style="font-size:11px;font-weight:600">Leaderboard</span></button>'+
   '<button class="home-nav-btn" data-hnav="referral" style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.15);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1F381;</span><span style="font-size:11px;font-weight:600">Refer &amp; Earn</span></button>'+
@@ -5231,7 +5579,7 @@ function aosTmJoin(id){
 }
 
 function deleteChallenge(id){
-  if(!confirm('Delete this challenge?'))return;
+  /* undoable */
   AppSDK.getItem('aos_team_challenges').then(function(chs){
     chs=Array.isArray(chs)?chs:Object.values(chs||{});
     chs=chs.filter(function(c){return c.id!==id;});
@@ -5673,7 +6021,7 @@ window.removeOrgTraining=function(id){
 };
 
 window.removeOrgTrainingSeries=function(recurringId){
-  if(!confirm('Remove all sessions in this recurring training, including everyone\u2019s signups?'))return;
+  /* undoable */
   AppSDK.getItem('aos_org_trainings').then(function(all){
     all=(all||[]).filter(function(t){return t.recurringId!==recurringId;});
     return AppSDK.setItem('aos_org_trainings',all);
@@ -6170,6 +6518,19 @@ function aosBindSportsCard(root){
 var metricsCustom={};
 function aosMySport(){ return aosActiveSport(); }
 function aosMetricEntries(groupId){ return aosMetricEntriesFor(aosActiveSport(),groupId); }
+/* A parent and an athlete both logging Saturday's game used to create
+   two entries, and the totals quietly doubled. Entries for the same
+   group and date are treated as the same game: you're asked whether to
+   replace it or keep both, rather than silently adding. */
+function aosFindSameDayEntry(entries,date){
+  return (entries||[]).find(function(e){ return e && e.date===date; });
+}
+function aosEntrySummary(e,fields){
+  return (fields||[]).map(function(f){
+    var v=(e.values||{})[f.id];
+    return (v===''||v===undefined)?'':f.label+': '+v;
+  }).filter(Boolean).join(' \u00B7 ');
+}
 function renderMetricsGroup(group){
   var c=safeGet('metrics-content'); if(!c||!group) return;
   var fields=group.fields||[];
@@ -6201,6 +6562,7 @@ function renderMetricsGroup(group){
     html+='</div>';
   }
   html+='<div class="form-group"><label>Date</label><input type="date" id="mg-date" value="'+todayStr()+'"></div>'+
+        '<div id="mg-dup" style="margin-bottom:8px"></div>'+
         '<button class="btn btn-primary btn-full btn-sm" id="mg-save">Log '+escH(group.label)+'</button></div>';
   if(entries.length){
     html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Recent</div>';
@@ -6226,6 +6588,29 @@ function renderMetricsGroup(group){
       var el=safeGet('mg-'+f.id); if(!el) return;
       vals[f.id]=f.text?el.value.trim():(parseFloat(el.value)||0);
     });
+    var _date=safeVal('mg-date')||todayStr();
+    var _dup=aosFindSameDayEntry(aosMetricEntriesFor(aosActiveSport(),group.id),_date);
+    if(_dup && !window._mgAllowDup){
+      var warn=safeGet('mg-dup');
+      if(warn){
+        warn.innerHTML='<div style="background:rgba(243,156,18,0.1);border:1px solid rgba(243,156,18,0.4);border-radius:10px;padding:10px;font-size:12px;color:#f39c12">'+
+          '<b>Already logged for '+escH(_date)+'</b>'+
+          (aosEntrySummary(_dup,fields)?'<div style="color:#c9d6e2;margin-top:4px">'+escH(aosEntrySummary(_dup,fields))+'</div>':'')+
+          (_dup.loggedByParent?'<div style="font-size:11px;margin-top:2px">logged by '+escH(_dup.loggedByParent)+'</div>':'')+
+          '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">'+
+            '<button class="btn btn-sm" id="mg-replace" style="font-size:11px">Replace it</button>'+
+            '<button class="btn btn-sm" id="mg-both" style="font-size:11px">Keep both</button>'+
+          '</div></div>';
+        var rb=safeGet('mg-replace'), bb=safeGet('mg-both');
+        if(rb) rb.onclick=function(){
+          var k=aosMetricKey(aosActiveSport(),group.id);
+          metricsCustom[k]=aosMetricEntriesFor(aosActiveSport(),group.id).filter(function(x){return x!==_dup;});
+          window._mgAllowDup=true; save.click(); window._mgAllowDup=false;
+        };
+        if(bb) bb.onclick=function(){ window._mgAllowDup=true; save.click(); window._mgAllowDup=false; };
+      }
+      return;
+    }
     var _k=aosMetricKey(aosActiveSport(),group.id);
     metricsCustom[_k]=aosMetricEntriesFor(aosActiveSport(),group.id).slice();
     metricsCustom[_k].push({id:uid(),date:safeVal('mg-date')||todayStr(),values:vals,sport:aosActiveSport()});
@@ -7063,6 +7448,347 @@ function aosRequestLines(m){
   if(L.dateNeeded) bits.push('needed '+escH(L.dateNeeded));
   return bits.join(' \u00B7 ');
 }
+/* ══════════════════════════════════════════════════════════════════
+   MY RECORD — the athlete's own career view, and the one screen that
+   answers "what have I actually done since I started?"
+
+   Everything here is built from the athlete's own data: their check-ins,
+   sessions, metrics, goals and the coaches they've played for. Coaches
+   and orgs get the tools; what those tools produce belongs to the
+   athlete and leaves with them. The download button is the point — a
+   record you can hand to anyone, without asking a club for it.
+   ══════════════════════════════════════════════════════════════════ */
+var seasonSnapshots=[], selfSkills={};
+/* ══════════════════════════════════════════════════════════════════
+   THE ATHLETE'S SIDE — four things that make the record theirs:
+     1. a summary they can paste to anyone, not just a file
+     2. seasons frozen when they end, so 2026 still reads as 2026
+     3. their own rating of themselves, beside the coach's
+     4. progress measured against their own past, not their teammates
+   ══════════════════════════════════════════════════════════════════ */
+
+/* 1. Something you can paste into an email to a recruiter. */
+window.aosCopyMyRecord=function(){
+  var u=window.AOS_USER||{}, s=aosCareerStats(), pbs=aosPersonalBests();
+  var hist=((window._athHistory||{})[u.userId])||[];
+  var lines=[];
+  lines.push((u.name||'Athlete')+' \u2014 '+(aosMySports().join(', '))+(profile.position?' \u00B7 '+profile.position:''));
+  if(profile.school||profile.gradYear) lines.push([profile.school,profile.gradYear&&('Class of '+profile.gradYear)].filter(Boolean).join(' \u00B7 '));
+  lines.push('');
+  lines.push('Training record since '+_recFmtDate(s.since)+':');
+  lines.push('  '+s.sessions+' sessions \u00B7 '+s.hours+' hours \u00B7 '+s.checkIns+' daily check-ins');
+  if(s.avgReadiness!==null) lines.push('  average readiness '+s.avgReadiness+'/10 \u00B7 longest streak '+s.longestStreak+' days');
+  lines.push('  '+s.goalsDone+' goals reached');
+  if(pbs.length){
+    lines.push('');
+    lines.push('Personal bests:');
+    pbs.slice(0,10).forEach(function(b){ lines.push('  '+b.label+': '+b.value+' ('+_recFmtDate(b.date)+')'); });
+  }
+  if(hist.length){
+    lines.push('');
+    lines.push('Teams and coaches:');
+    hist.forEach(function(h){ lines.push('  '+(h.staffName||'Coach')+' \u00B7 '+[h.sport,(h.teams||[]).join(', ')].filter(Boolean).join(' \u00B7 ')+' \u00B7 '+_recFmtDate(h.joined)+'\u2013'+_recFmtDate(h.left)); });
+  }
+  lines.push('');
+  lines.push('Kept by the athlete in AOS.');
+  var text=lines.join('\n');
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).then(function(){ showToast('Summary copied \u2014 paste it anywhere.'); },
+      function(){ aosShowTextFallback(text); });
+  } else aosShowTextFallback(text);
+  return text;
+};
+function aosShowTextFallback(text){
+  var ta=document.createElement('textarea');
+  ta.value=text;
+  ta.style.cssText='position:fixed;inset:10% 5%;z-index:9999;width:90%;height:70%;background:#0A1A2F;color:#e8f4fd;border:1px solid #00E0FF;border-radius:12px;padding:12px;font-size:12px';
+  document.body.appendChild(ta); ta.select();
+  ta.addEventListener('blur',function(){ ta.remove(); });
+  showToast('Select and copy.');
+}
+
+/* 2. A season, frozen. Live totals keep moving; a season shouldn't. */
+window.aosCloseSeason=function(){
+  var u=window.AOS_USER||{};
+  var label=prompt('Name this season (e.g. "2026 Spring \u2014 14U Gold"):','');
+  if(!label) return;
+  var s=aosCareerStats();
+  var snap={
+    label:label.trim(), closedAt:Date.now(),
+    sports:aosMySports(), teams:((window._athHistory||{})[u.userId]||[]).slice(0,1).map(function(h){return (h.teams||[]).join(', ');}).filter(Boolean),
+    sessions:s.sessions, hours:s.hours, checkIns:s.checkIns, longestStreak:s.longestStreak,
+    avgReadiness:s.avgReadiness, goalsDone:s.goalsDone,
+    personalBests:aosPersonalBests().map(function(b){ return {label:b.label,value:b.value,date:b.date,sport:b.sport}; })
+  };
+  var seasons=(typeof seasonSnapshots!=='undefined'&&Array.isArray(seasonSnapshots))?seasonSnapshots:[];
+  seasons.unshift(snap);
+  seasonSnapshots=seasons;
+  return saveItem('sb_seasons',seasons).then(function(){
+    showToast('Season saved \u2014 these numbers are fixed now.');
+    renderRecord();
+  });
+};
+
+/* 3. Your own read on your skills, kept beside the coach's. */
+var AOS_SELF_SKILLS=['Effort','Consistency','Skill','Game IQ','Leadership','Coachability'];
+window.aosSetSelfSkill=function(name,value){
+  selfSkills=selfSkills||{};
+  selfSkills[name]={value:Number(value),ts:Date.now()};
+  saveItem('sb_self_skills',selfSkills);
+  renderRecord();
+};
+function aosSelfAssessHTML(coachSkills){
+  var mine=selfSkills||{};
+  return '<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">How you rate yourself</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin-bottom:10px">Your read, kept beside your coach\u2019s. Neither replaces the other.</div>'+
+    AOS_SELF_SKILLS.map(function(k){
+      var mv=(mine[k]||{}).value||0;
+      var cv=(coachSkills&&(coachSkills[k]||coachSkills[k.toLowerCase()]))||0;
+      return '<div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+        '<div style="display:flex;justify-content:space-between;font-size:12px;color:#e8f4fd">'+
+          '<span>'+escH(k)+'</span>'+
+          '<span style="color:var(--white-dim);font-size:11px">'+(cv?('coach: '+cv+'/5'):'coach: \u2014')+'</span></div>'+
+        '<div style="display:flex;gap:6px;margin-top:5px">'+[1,2,3,4,5].map(function(n){
+          return '<button onclick="aosSetSelfSkill(\''+k+'\','+n+')" style="flex:1;min-width:0;padding:8px 0;border-radius:8px;font-size:12px;font-weight:700;'+
+            (mv>=n?'background:rgba(0,224,255,0.2);border:1px solid #00E0FF;color:#00E0FF':'background:none;border:1px solid #334;color:#8899aa')+'">'+n+'</button>';
+        }).join('')+'</div></div>';
+    }).join('')+'</div>';
+}
+
+/* 4. You against your own last month, not against your teammates. */
+function aosSelfComparison(){
+  function window30(start,end){
+    var r=[], sess=0, mins=0;
+    Object.keys(recovery||{}).forEach(function(d){
+      var t=new Date(d).getTime();
+      if(t>=start&&t<end&&recovery[d].readiness!==undefined) r.push(Number(recovery[d].readiness));
+    });
+    Object.keys(training||{}).forEach(function(d){
+      var t=new Date(d).getTime();
+      if(t>=start&&t<end){ (training[d]||[]).forEach(function(s){ sess++; mins+=Number(s.duration)||0; }); }
+    });
+    return {checkIns:r.length, readiness:r.length?Math.round(r.reduce(function(a,c){return a+c;},0)/r.length*10)/10:null,
+            sessions:sess, hours:Math.round(mins/60*10)/10};
+  }
+  var now=Date.now(), d30=30*86400000;
+  return {now:window30(now-d30,now+1), prev:window30(now-2*d30,now-d30)};
+}
+function aosSelfComparisonHTML(){
+  var c=aosSelfComparison();
+  function row(label,a,b,unit){
+    if(a===null&&b===null) return '';
+    var delta=(a===null||b===null)?null:Math.round((a-b)*10)/10;
+    var arrow=delta===null?'':delta>0?'\u2197':delta<0?'\u2198':'\u2192';
+    var col=delta===null?'#8899aa':delta>0?'#2ecc71':delta<0?'#e74c3c':'#8899aa';
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+      '<span style="font-size:12px;color:#e8f4fd">'+escH(label)+'</span>'+
+      '<span style="font-size:12px"><b style="color:#e8f4fd">'+(a===null?'\u2014':a)+(unit||'')+'</b>'+
+      '<span style="color:'+col+';margin-left:8px">'+arrow+' '+(delta===null?'':(delta>0?'+':'')+delta)+'</span>'+
+      '<span style="color:#8899aa;font-size:10px;margin-left:6px">vs '+(b===null?'\u2014':b)+(unit||'')+'</span></span></div>';
+  }
+  return '<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">You vs you</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin-bottom:8px">Last 30 days against the 30 before. The only comparison that means anything.</div>'+
+    row('Sessions',c.now.sessions,c.prev.sessions)+
+    row('Hours',c.now.hours,c.prev.hours,'h')+
+    row('Check-ins',c.now.checkIns,c.prev.checkIns)+
+    row('Average readiness',c.now.readiness,c.prev.readiness)+
+    '</div>';
+}
+function aosSeasonsHTML(){
+  var seasons=(typeof seasonSnapshots!=='undefined'&&Array.isArray(seasonSnapshots))?seasonSnapshots:[];
+  var h='<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'+
+    '<div style="font-weight:700;font-size:13px">Seasons</div>'+
+    '<button class="btn btn-sm" id="rec-close-season" style="font-size:11px">Close a season</button></div>';
+  if(!seasons.length){
+    h+='<div style="font-size:11px;color:var(--white-dim)">Closing a season freezes your numbers as they are that day, so a year from now it still reads as this year.</div>';
+  } else {
+    h+=seasons.map(function(s){
+      return '<div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+        '<div style="font-size:13px;color:#e8f4fd;font-weight:700">'+escH(s.label)+'</div>'+
+        '<div style="font-size:11px;color:var(--white-dim)">'+_recFmtDate(s.closedAt)+' \u00B7 '+s.sessions+' sessions \u00B7 '+s.hours+'h \u00B7 '+
+          (s.avgReadiness===null?'':'readiness '+s.avgReadiness+'/10 \u00B7 ')+s.goalsDone+' goals</div>'+
+        ((s.personalBests||[]).length?'<div style="font-size:11px;color:var(--gold);margin-top:2px">'+
+          escH(s.personalBests.slice(0,3).map(function(b){return b.label+' '+b.value;}).join(' \u00B7 '))+'</div>':'')+
+      '</div>';
+    }).join('');
+  }
+  return h+'</div>';
+}
+
+function _recFmtDate(d){ if(!d) return '\u2014'; var t=new Date(d); return isNaN(t)?String(d):t.toLocaleDateString(); }
+function aosCareerStats(){
+  var rec=recovery||{}, tr=training||{}, gl=goals||[];
+  var checkIns=Object.keys(rec).filter(function(d){ var r=rec[d]||{}; return r.readiness!==undefined; });
+  var sessions=0, minutes=0, firstDate=null;
+  Object.keys(tr).forEach(function(d){
+    (tr[d]||[]).forEach(function(s){ sessions++; minutes+=Number(s.duration)||0; });
+    if(!firstDate||d<firstDate) firstDate=d;
+  });
+  checkIns.forEach(function(d){ if(!firstDate||d<firstDate) firstDate=d; });
+  var readinessVals=checkIns.map(function(d){ return Number(rec[d].readiness); }).filter(function(v){ return !isNaN(v); });
+  var avgReadiness=readinessVals.length?Math.round(readinessVals.reduce(function(a,c){return a+c;},0)/readinessVals.length*10)/10:null;
+  /* Longest run of consecutive days with a check-in. */
+  var days=checkIns.slice().sort(), longest=0, run=0, prev=null;
+  days.forEach(function(d){
+    if(prev && (new Date(d)-new Date(prev))===86400000) run++; else run=1;
+    if(run>longest) longest=run; prev=d;
+  });
+  return {
+    since:firstDate, days:firstDate?Math.max(1,Math.round((Date.now()-new Date(firstDate))/86400000)):0,
+    checkIns:checkIns.length, sessions:sessions, hours:Math.round(minutes/60*10)/10,
+    avgReadiness:avgReadiness, longestStreak:longest,
+    goalsDone:(gl||[]).filter(function(g){return g.completed;}).length, goalsOpen:(gl||[]).filter(function(g){return !g.completed;}).length
+  };
+}
+/* Best value per metric field, per sport — what you'd actually show someone. */
+function aosPersonalBests(){
+  var out=[];
+  (aosMySports()||[]).forEach(function(sport){
+    (aosSportGroups(sport)||[]).forEach(function(g){
+      if(!g.fields) return;
+      var entries=aosMetricEntriesFor(sport,g.id);
+      if(!entries.length) return;
+      g.fields.forEach(function(f){
+        if(f.text) return;
+        var vals=entries.map(function(e){ return {v:Number((e.values||{})[f.id]), d:e.date}; })
+          .filter(function(x){ return !isNaN(x.v)&&x.v!==0; });
+        if(!vals.length) return;
+        var best=f.agg==='best'
+          ? vals.reduce(function(a,c){ return c.v<a.v?c:a; })
+          : vals.reduce(function(a,c){ return c.v>a.v?c:a; });
+        out.push({sport:sport,group:g.label,label:f.label,value:best.v,date:best.d,
+                  note:f.agg==='best'?'best (lowest)':'best'});
+      });
+    });
+  });
+  if(typeof BENCHMARKS!=='undefined'&&typeof metricsPhysical!=='undefined'){
+    BENCHMARKS.forEach(function(bm){
+      var entries=(metricsPhysical||{})[bm.key]||[];
+      if(!entries.length) return;
+      var vals=entries.map(function(e){ return {v:Number(e.value),d:e.date}; }).filter(function(x){ return !isNaN(x.v); });
+      if(!vals.length) return;
+      var best=bm.lower?vals.reduce(function(a,c){return c.v<a.v?c:a;}):vals.reduce(function(a,c){return c.v>a.v?c:a;});
+      out.push({sport:'Physical',group:'Benchmarks',label:bm.label,value:best.v,date:best.d,note:'best'});
+    });
+  }
+  return out;
+}
+/* Month-by-month, so growth is visible rather than implied. */
+function aosMonthlyTrend(months){
+  months=months||6;
+  var out=[];
+  for(var i=months-1;i>=0;i--){
+    var d=new Date(); d.setMonth(d.getMonth()-i);
+    var key=d.toISOString().slice(0,7);
+    var rVals=[], sess=0;
+    Object.keys(recovery||{}).forEach(function(day){
+      if(day.indexOf(key)!==0) return;
+      var r=recovery[day]||{};
+      if(r.readiness!==undefined) rVals.push(Number(r.readiness));
+    });
+    Object.keys(training||{}).forEach(function(day){ if(day.indexOf(key)===0) sess+=(training[day]||[]).length; });
+    out.push({month:key, label:d.toLocaleString('en-US',{month:'short'}),
+      readiness:rVals.length?Math.round(rVals.reduce(function(a,c){return a+c;},0)/rVals.length*10)/10:null,
+      sessions:sess, checkIns:rVals.length});
+  }
+  return out;
+}
+window.aosExportMyRecord=function(){
+  var u=window.AOS_USER||{};
+  var stats=aosCareerStats();
+  var out={
+    exportedAt:new Date().toISOString(),
+    athlete:{name:u.name||'', sports:aosMySports(), position:profile.position||'', jersey:profile.jersey||'',
+             school:profile.school||'', gradYear:profile.gradYear||''},
+    career:stats,
+    personalBests:aosPersonalBests(),
+    monthly:aosMonthlyTrend(24),
+    whereIPlayed:((window._athHistory||{})[u.userId])||[],
+    goals:goals||[],
+    metrics:metricsCustom||{},
+    physical:(typeof metricsPhysical!=='undefined')?metricsPhysical:{},
+    training:training||{},
+    checkIns:recovery||{}
+  };
+  var blob=new Blob([JSON.stringify(out,null,2)],{type:'application/json'});
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='AOS-my-record-'+(new Date().toISOString().slice(0,10))+'.json';
+  document.body.appendChild(a); a.click();
+  setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); },1000);
+  showToast('Your record is yours \u2014 downloaded.');
+};
+function renderRecord(){
+  var el=safeGet('sec-record'); if(!el) return;
+  var u=window.AOS_USER||{};
+  var s=aosCareerStats(), pbs=aosPersonalBests(), trend=aosMonthlyTrend(6);
+  var hist=((window._athHistory||{})[u.userId])||[];
+  var html='<div class="section-title">\uD83D\uDCD6 My Record</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin:-6px 0 12px">Everything you\u2019ve done since '+
+      _recFmtDate(s.since)+'. This is yours \u2014 it stays with you when coaches or clubs change.</div>';
+  html+='<div class="stat-grid">'+
+    '<div class="stat-card"><div class="stat-value">'+s.days+'</div><div class="stat-label">Days in AOS</div></div>'+
+    '<div class="stat-card"><div class="stat-value">'+s.sessions+'</div><div class="stat-label">Sessions</div></div>'+
+    '<div class="stat-card"><div class="stat-value">'+s.hours+'</div><div class="stat-label">Hours trained</div></div>'+
+    '<div class="stat-card"><div class="stat-value">'+s.checkIns+'</div><div class="stat-label">Check-ins</div></div>'+
+    '<div class="stat-card"><div class="stat-value">'+s.longestStreak+'</div><div class="stat-label">Longest streak</div></div>'+
+    '<div class="stat-card"><div class="stat-value">'+s.goalsDone+'</div><div class="stat-label">Goals reached</div></div>'+
+  '</div>';
+  /* Growth, month by month */
+  var maxSess=Math.max.apply(null,trend.map(function(t){return t.sessions;}).concat([1]));
+  html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Last 6 months</div>'+
+    '<div style="display:flex;gap:6px;align-items:flex-end;height:90px">'+
+    trend.map(function(t){
+      var h=Math.round((t.sessions/maxSess)*70)+3;
+      return '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px">'+
+        '<div style="font-size:10px;color:var(--gold)">'+(t.readiness===null?'':t.readiness)+'</div>'+
+        '<div style="width:100%;height:'+h+'px;background:linear-gradient(180deg,#00E0FF,#00577a);border-radius:4px"></div>'+
+        '<div style="font-size:10px;color:var(--white-dim)">'+escH(t.label)+'</div></div>';
+    }).join('')+'</div>'+
+    '<div style="font-size:10px;color:var(--white-dim);margin-top:6px">Bars are sessions logged; the number above each is your average readiness that month.</div></div>';
+  html+=aosSelfComparisonHTML();
+  if(pbs.length){
+    html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Personal bests</div>'+
+      pbs.slice(0,20).map(function(b){
+        return '<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+          '<div><div style="font-size:13px;color:#e8f4fd">'+escH(b.label)+'</div>'+
+          '<div style="font-size:10px;color:var(--white-dim)">'+escH(b.sport+' \u00B7 '+b.group)+'</div></div>'+
+          '<div style="text-align:right"><div style="font-size:15px;font-weight:800;color:var(--gold)">'+escH(String(b.value))+'</div>'+
+          '<div style="font-size:10px;color:var(--white-dim)">'+_recFmtDate(b.date)+'</div></div></div>';
+      }).join('')+'</div>';
+  } else {
+    html+='<div class="card" style="font-size:12px;color:var(--white-dim)">Log a few metrics and your personal bests will appear here.</div>';
+  }
+  if(hist.length){
+    html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Where you\u2019ve played</div>'+
+      hist.map(function(h){
+        return '<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+          '<div><div style="font-size:13px;color:#e8f4fd">'+escH(h.staffName||'Coach')+'</div>'+
+          '<div style="font-size:10px;color:var(--white-dim)">'+escH([h.sport,(h.teams||[]).join(', ')].filter(Boolean).join(' \u00B7 '))+'</div></div>'+
+          '<div style="font-size:10px;color:var(--white-dim);text-align:right">'+_recFmtDate(h.joined)+' \u2013 '+_recFmtDate(h.left)+'</div></div>';
+      }).join('')+'</div>';
+  }
+  html+=aosSeasonsHTML();
+  html+=aosSelfAssessHTML((typeof window._coachSkillsForMe!=='undefined')?window._coachSkillsForMe:null);
+  html+='<div class="card" style="text-align:center">'+
+    '<div style="font-size:12px;color:var(--white-dim);margin-bottom:10px">Take a copy whenever you like. No one has to approve it.</div>'+
+    '<button class="btn btn-primary btn-full" id="rec-export" style="margin-bottom:8px">\u2b07\ufe0f Download my record</button>'+
+    '<button class="btn btn-full" id="rec-copy">\uD83D\uDCCB Copy a summary to paste</button></div>';
+  el.innerHTML=html;
+  var ex=safeGet('rec-export'); if(ex) ex.addEventListener('click',aosExportMyRecord);
+  var cp=safeGet('rec-copy'); if(cp) cp.addEventListener('click',aosCopyMyRecord);
+  var cs=safeGet('rec-close-season'); if(cs) cs.addEventListener('click',aosCloseSeason);
+  /* the coach's ratings, if any, so the two sit side by side */
+  if(window._coachSkillsForMe===undefined){
+    window._coachSkillsForMe=null;
+    AppSDK.getItem('aos_dev_skills').then(function(all){
+      var me=(window.AOS_USER||{}).userId;
+      window._coachSkillsForMe=(all&&all[me])||null;
+      if(window._coachSkillsForMe) renderRecord();
+    });
+  }
+}
+
 function renderRequests(){
   var el=safeGet('sec-requests');if(!el)return;
   var u=window.AOS_USER||{}, me=u.userId||'';
@@ -7590,6 +8316,7 @@ function removePlayerLink(linkerId,name){
       if(typeof renderProfile==='function') renderProfile();
       if(typeof _renderConnectionSystem==='function') _renderConnectionSystem();
       if(typeof aosBindRolesCard==='function') aosBindRolesCard(document);
+
       if(typeof aosBindSportsCard==='function') aosBindSportsCard(document);
     });
   });
@@ -7714,12 +8441,12 @@ window.logChallengeProgress=function(id){
 };
 
 window.deleteChallenge=function(id){
-  if(!confirm('Remove this challenge for everyone?'))return;
-  AppSDK.getItem('aos_team_challenges').then(function(chs){
+  var title='';
+  aosDoWithUndo('aos_team_challenges','Challenge removed.',function(chs){
     chs=Array.isArray(chs)?chs:[];
-    return AppSDK.setItem('aos_team_challenges',chs.filter(function(c){return c&&c.id!==id;}));
+    var c=chs.find(function(x){return x&&x.id===id;}); title=(c&&c.title)||'';
+    return chs.filter(function(x){return x&&x.id!==id;});
   }).then(function(){
-    showToast('Challenge removed.');
     if(typeof renderChallenges==='function')renderChallenges();
     if(typeof renderTeamHubForStaff==='function'&&(window.AOS_USER||{}).role!=='player')renderTeamHubForStaff();
   });
@@ -7774,7 +8501,8 @@ function renderCoach(){
     AppSDK.getItem('aos_dev_focus'),
     AppSDK.getItem('aos_dev_skills'),
     AppSDK.getItem('aos_teams'),
-    AppSDK.getItem('aos_team_members')
+    AppSDK.getItem('aos_team_members'),
+    AppSDK.getItem('aos_archive')
   ]).then(function(res){
     var roster=res[0]||{}, accs=res[1]||{}, tasks=res[2]||[], devPlans=res[3]||{}, targets=res[4]||{}, myProf=res[5]||{}, links=res[6]||{};
     var allWeeklyPlans=res[7]||{}, allSeasonEvents=res[8]||[];
@@ -8034,6 +8762,7 @@ function renderCoach(){
     });
 
     html+='</div>';
+    html+=aosArchiveHTML(res[13]||{},u.userId);
     html+=aosMoreTilesHTML('coach');
     el.innerHTML=html;
   });
@@ -8046,16 +8775,8 @@ window.coachMessagePlayer=function(playerId){
 };
 
 window.coachUnlinkPlayer=function(playerId,name){
-  if(!confirm('Remove '+name+' from your roster? They can be re-linked later with their code.'))return;
-  var u=window.AOS_USER||{};
-  AppSDK.getItem('aos_player_links').then(function(links){
-    links=links||{};
-    if(links[playerId]) delete links[playerId][u.userId];
-    return AppSDK.setItem('aos_player_links',links);
-  }).then(function(){
-    showToast(name+' removed from roster.');
-    renderCoach();
-  });
+  /* No dialog: the removal happens at once and can be undone. */
+  aosUndoableUnlink(playerId,name,function(){ renderCoach(); });
 };
 
 window.saveCoachTargets=function(){
@@ -8215,7 +8936,8 @@ function renderOrg(){
     AppSDK.getItem('aos_player_links'),
     AppSDK.getItem('aos_staff_links'),
     AppSDK.getItem('aos_teams'),
-    AppSDK.getItem('aos_team_members')
+    AppSDK.getItem('aos_team_members'),
+    AppSDK.getItem('aos_archive')
   ]).then(function(res){
     var accs=res[0]||{}, roster=res[1]||{}, orgTasks=res[2]||[], links=res[3]||{}, staffLinks=res[4]||{};
     var _allTeams=res[5]||{}, _teamMembers=res[6]||{};
@@ -8342,6 +9064,7 @@ function renderOrg(){
     html+=memberTable(parents,'👨‍👩‍👧 PARENTS','#ff88aa');
 
     html+='</div>';
+    html+=aosArchiveHTML(res[7]||{},u.userId);
     html+=aosMoreTilesHTML('org');
     el.innerHTML=html;
   });
@@ -8509,6 +9232,9 @@ function aosBindParentMetrics(cid,prof,custom,phys,refresh){
         });
         var _sp=(window._pcSport)||((Array.isArray(prof.sports)&&prof.sports[0])||prof.sport||'Other');
         var _ck=_sp+'|'+gid;
+        var _existing=(custom[_ck]||custom[gid]||[]);
+        var _same=_existing.find(function(e){return e&&e.date===(safeVal('pmf-date')||todayStr());});
+        if(_same&&!confirm('Your athlete already logged '+(g.label||'this')+' for that date.\n\nAdd a second entry anyway?')) return;
         custom[_ck]=(custom[_ck]||(custom[gid]||[])).slice();
         custom[_ck].push({id:'e_'+Date.now().toString(36),date:safeVal('pmf-date')||todayStr(),values:vals,sport:_sp,
           loggedByParent:(window.AOS_USER||{}).name||'parent'});
@@ -8639,6 +9365,69 @@ function aosBindRolesCard(root){
   });
 }
 
+/* ── A parent's right to review and delete ──────────────────────────
+   COPPA gives a parent the right to see what's held about their child
+   and to have it deleted. Until now the only delete button lived on the
+   athlete's own screen, and a parent could see a summary but never take
+   a copy. Both now sit in the Parent Portal.
+
+   Export gathers what the child's account holds. Delete removes their
+   logged data, their profile and their directory record. It cannot
+   remove the Firebase login itself — that needs a server — so the
+   wording says so rather than implying more than it does. */
+var AOS_CHILD_KEYS=['sb_profile','sb_recovery','sb_training','sb_hydration','sb_goals','sb_calendar',
+  'sb_tasks','sb_metrics_custom','sb_metrics_physical','sb_metrics_batting','sb_metrics_pitching',
+  'sb_metrics_fielding','sb_metrics_blast','sb_metrics_radar','sb_metrics_rapsodo','sb_metrics_garmin',
+  'aos_parental_consent','aos_consent'];
+function aosExportChildData(childId,childName){
+  showToast('Gathering data\u2026');
+  return Promise.all(AOS_CHILD_KEYS.map(function(k){
+    return aosChildData(childId,k).then(function(v){ return [k,v]; });
+  })).then(function(pairs){
+    return fbDb.collection('accounts').doc(childId).get().then(function(snap){
+      var out={ exportedAt:new Date().toISOString(), exportedBy:(window.AOS_USER||{}).name||'parent',
+        athlete:childName||'', accountRecord:snap.exists?snap.data():null, data:{} };
+      pairs.forEach(function(p){ if(p[1]!==null&&p[1]!==undefined) out.data[p[0]]=p[1]; });
+      var blob=new Blob([JSON.stringify(out,null,2)],{type:'application/json'});
+      var a=document.createElement('a');
+      a.href=URL.createObjectURL(blob);
+      a.download='AOS-'+(childName||'athlete').replace(/[^a-z0-9]+/gi,'-').toLowerCase()+'-data.json';
+      document.body.appendChild(a); a.click();
+      setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); },1000);
+      showToast('Downloaded.');
+      return out;
+    });
+  }).catch(function(e){ console.warn('AOS export failed',e); showToast('Could not export.'); });
+}
+function aosDeleteChildData(childId,childName){
+  var typed=prompt('This permanently deletes '+(childName||'your athlete')+'\u2019s logged data, profile and directory entry.\n\nIt cannot be undone. Type DELETE to confirm.');
+  if((typed||'').trim().toUpperCase()!=='DELETE'){ showToast('Cancelled.'); return Promise.resolve(false); }
+  var ref=fbDb.collection('users').doc(childId).collection('appdata');
+  return Promise.all(AOS_CHILD_KEYS.map(function(k){
+    return ref.doc(k).delete().catch(function(){});
+  })).then(function(){
+    return fbDb.collection('accounts').doc(childId).collection('private').doc('info').delete().catch(function(){});
+  }).then(function(){
+    return fbDb.collection('accounts').doc(childId).delete().catch(function(){});
+  }).then(function(){
+    showToast('Deleted.');
+    window._parentChild=null;
+    if(typeof renderParent==='function') renderParent();
+    return true;
+  }).catch(function(e){ console.warn('AOS child delete failed',e); showToast('Could not delete everything \u2014 see console.'); return false; });
+}
+function aosParentDataHTML(childId,childName){
+  return '<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:6px">Data &amp; privacy</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);line-height:1.6;margin-bottom:10px">'+
+      'As '+escH(childName||'your athlete')+'\u2019s parent or guardian you can take a copy of everything AOS holds about them, '+
+      'or have it deleted. Deleting removes their logged data, profile and directory entry. '+
+      'Their sign-in itself has to be removed by us \u2014 email support and we\u2019ll do it.</div>'+
+    '<div style="display:flex;gap:8px;flex-wrap:wrap">'+
+      '<button class="btn btn-sm" id="pc-export" style="font-size:12px">\u2b07\ufe0f Download their data</button>'+
+      '<button class="btn btn-sm" id="pc-delete" style="font-size:12px;color:#e74c3c;border:1px solid rgba(231,76,60,.5)">\ud83d\uddd1\ufe0f Delete their data</button>'+
+    '</div></div>';
+}
+
 /* ── Parent view of an athlete ──────────────────────────────────────
    A linked parent can open their child's Home screen — today's check-in,
    training, hydration, streak, goals and next event — and edit the
@@ -8715,6 +9504,8 @@ function renderParentChildHome(){
       '<div style="font-size:13px;color:#e8f4fd">'+escH(next.title||'Event')+' \u00B7 '+escH(next.date||'')+(next.time?' '+escH(next.time):'')+'</div></div>';
     html+=aosParentMetricsHTML(prof,custom,phys,batting,pitching);
 
+    html+=aosParentDataHTML(cid,cname);
+
     /* Editable athlete information */
     var sports=(typeof aosSportList==='function')?aosSportList():['Other'];
     var positions=(typeof aosSportPositions==='function')?aosSportPositions(prof.sport||'Other'):['Athlete'];
@@ -8736,6 +9527,8 @@ function renderParentChildHome(){
     var body=safeGet('pch-body'); if(!body) return;
     body.innerHTML=html;
     aosBindParentMetrics(cid,prof,custom,phys,renderParentChildHome);
+    var ex=safeGet('pc-export'); if(ex) ex.addEventListener('click',function(){ aosExportChildData(cid,cname); });
+    var del=safeGet('pc-delete'); if(del) del.addEventListener('click',function(){ aosDeleteChildData(cid,cname); });
     var sp=safeGet('pci-sport');
     if(sp) sp.addEventListener('change',function(){
       var pos=aosSportPositions(this.value), sel=safeGet('pci-position');
@@ -9086,6 +9879,7 @@ function renderProfile() {
   +'<div class="card card-sm" id="avail-card" style="margin-bottom:12px"></div>'
   +aosRolesCardHTML()
   +aosSportsCardHTML()
+  +((window._athHistory&&aosAthleteHistoryHTML(window._athHistory,(window.AOS_USER||{}).userId))||'')
   +'<div class="card card-sm" style="margin-bottom:12px">'
   +'<div style="font-weight:700;font-size:12px;margin-bottom:8px;text-transform:uppercase;letter-spacing:.8px;color:var(--gold)">Sport &amp; Team Role</div>'
   +'<div class="form-row">'
@@ -9396,7 +10190,8 @@ function renderTrainer(){
     AppSDK.getItem('aos_dev_focus'),
     AppSDK.getItem('aos_dev_skills'),
     AppSDK.getItem('aos_teams'),
-    AppSDK.getItem('aos_team_members')
+    AppSDK.getItem('aos_team_members'),
+    AppSDK.getItem('aos_archive')
   ]).then(function(res){
     var accs=res[0]||{}, tasks=res[1]||[], devPlans=res[2]||{}, targets=res[3]||{}, links=res[4]||{};
     var allWeeklyPlans=res[5]||{}, allSeasonEvents=res[6]||[], allDevFocus=res[7]||{}, allDevSkills=res[8]||{};
@@ -9666,7 +10461,8 @@ function renderTrainer(){
     });
 
     html+='</div>';
-     html+=aosMoreTilesHTML('trainer');
+     html+=aosArchiveHTML(res[11]||{},u.userId);
+    html+=aosMoreTilesHTML('trainer');
     el.innerHTML=html;
   });
 }
@@ -9678,16 +10474,8 @@ window.trainerMessagePlayer=function(playerId){
 };
 
 window.trainerUnlinkPlayer=function(playerId,name){
-  if(!confirm('Remove '+name+' from your roster? They can be re-linked later with their code.'))return;
-  var u=window.AOS_USER||{};
-  AppSDK.getItem('aos_player_links').then(function(links){
-    links=links||{};
-    if(links[playerId]) delete links[playerId][u.userId];
-    return AppSDK.setItem('aos_player_links',links);
-  }).then(function(){
-    showToast(name+' removed from roster.');
-    renderTrainer();
-  });
+  /* No dialog: the removal happens at once and can be undone. */
+  aosUndoableUnlink(playerId,name,function(){ renderTrainer(); });
 };
 
 window.saveTrainerTargets=function(){
@@ -10397,6 +11185,13 @@ var AOS_AUTH = {
     email = email.trim().toLowerCase();
     first = first.trim(); last = last.trim();
 
+    /* Consent is asked for before the account is created, not after
+       (the old gate ran post-signup and in fact was never called). */
+    var consentEl=document.getElementById('reg-consent');
+    if(consentEl&&!consentEl.checked){ if(errEl){errEl.textContent='Please agree to how AOS handles data to continue.';errEl.classList.add('show');} return; }
+    /* Recorded here, before the account exists: held in memory and
+       written into the new account's own data the moment it's created. */
+    AppSDK.setItem('aos_consent',{given:true,ts:Date.now(),dob:dob,version:1});
     if(!first){ if(errEl){errEl.textContent='Please enter your first name.';errEl.classList.add('show');} return; }
     if(!email||!email.includes('@')){ if(errEl){errEl.textContent='Please enter a valid email.';errEl.classList.add('show');} return; }
     if(!pass||pass.length<6){ if(errEl){errEl.textContent='Password must be at least 6 characters.';errEl.classList.add('show');} return; }
