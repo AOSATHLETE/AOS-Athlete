@@ -942,7 +942,7 @@ function aosStaffEventsHTML(teamId){
   var mine=(scheduledEvents||[]).filter(function(ev){ return ev.hostId===u.userId&&!ev.cancelled; });
   var h='<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'+
     '<div style="font-weight:700;font-size:13px">Schedule</div>'+
-    '<button class="btn btn-sm" id="se-new" style="font-size:11px">+ Post a session</button></div>'+
+    '<button class="btn btn-sm" id="se-new" onclick="aosOpenEventForm(window._staffTeam||\'\')" style="font-size:11px">+ Post a session</button></div>'+
     '<div id="se-form" style="display:none;margin-bottom:10px"></div>';
   if(!mine.length){
     h+='<div style="font-size:11px;color:var(--white-dim)">Post practice, a game or an open session. It lands on every athlete\u2019s calendar and their parents\u2019 \u2014 they answer, you see who\u2019s coming.</div>';
@@ -4570,7 +4570,7 @@ async function initApp(){
         _myOrgTr.forEach(function(t){
           var already=calEvents.some(function(e){return e.orgTrainingId===t.id;});
           if(!already){
-            calEvents.push({id:uid(),title:t.title+(t.location?' @ '+t.location:''),date:t.date,type:'Org Training',personal:false,invitedTeam:true,orgTrainingId:t.id});
+            calEvents.push({id:uid(),title:t.title+(t.location?' @ '+t.location:''),date:t.date,start:t.start||t.time||'',end:t.end||'',allDay:!(t.start||t.time),type:'Org Training',personal:false,invitedTeam:true,orgTrainingId:t.id});
             _calChanged=true;
           }
         });
@@ -6239,7 +6239,7 @@ function renderTeam(){
             return '<div class="card" style="margin-bottom:8px">'+
               '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'+
                 '<span style="font-size:14px">'+(ec[ev.type]||'&#128197;')+'</span>'+
-                '<div style="flex:1"><div style="font-size:13px;color:#F5FAFF;font-weight:600">'+escH(ev.title)+'</div><div style="font-size:11px;color:#8899aa">'+escH(ev.date)+'</div></div>'+
+                '<div style="flex:1"><div style="font-size:13px;color:#F5FAFF;font-weight:600">'+escH(ev.title)+'</div><div style="font-size:11px;color:#8899aa">'+escH(ev.date)+' \u00B7 '+escH(aosEventTimeLabel(ev))+'</div></div>'+
                 '<span style="font-size:9px;background:rgba(0,224,255,0.12);color:#00E0FF;border-radius:4px;padding:2px 6px;font-weight:700;text-transform:uppercase">'+ev.type+'</span>'+
               '</div>'+
               '<div style="display:flex;gap:6px">'+
@@ -6552,8 +6552,9 @@ function renderTeamHubForStaff(){
       html+='<div class="form-group"><label>Title</label><input id="ot-title" placeholder="e.g. Fall Skills Clinic"></div>';
       html+='<div style="display:flex;gap:8px;margin-bottom:10px">';
       html+='<div style="flex:1"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Date</div><input type="date" id="ot-date" style="width:100%;padding:8px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px;box-sizing:border-box"></div>';
-      html+='<div style="flex:1"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Time</div><input type="time" id="ot-time" style="width:100%;padding:8px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px;box-sizing:border-box"></div>';
+      html+='<div style="flex:1"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Start</div><input type="time" id="ot-time" style="width:100%;padding:8px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px;box-sizing:border-box"></div>';
       html+='</div>';
+      html+='<div style="flex:1"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">End</div><input type="time" id="ot-end" style="width:100%;padding:8px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#e8f4fd"></div>';
       html+='<div class="form-group"><label>Location</label><input id="ot-location" placeholder="e.g. Main Field"></div>';
       html+='<div style="display:flex;gap:8px;margin-bottom:10px">';
       html+='<div style="flex:1"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Capacity (spots)</div><input type="number" id="ot-capacity" value="12" min="1" style="width:100%;padding:8px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:14px;box-sizing:border-box"></div>';
@@ -6850,6 +6851,7 @@ window.createOrgTraining=function(){
   var title=document.getElementById('ot-title').value.trim();
   var date=document.getElementById('ot-date').value;
   var time=document.getElementById('ot-time').value;
+  var endTime=(document.getElementById('ot-end')||{}).value||'';
   var location=document.getElementById('ot-location').value.trim();
   var capacity=parseInt(document.getElementById('ot-capacity').value)||1;
   var desc=document.getElementById('ot-desc').value.trim();
@@ -6866,10 +6868,10 @@ window.createOrgTraining=function(){
       if(!dates.length){showToast('No matching dates in that range.');return Promise.reject('novalidate');}
       var rid=uid();
       dates.forEach(function(d){
-        all.push({id:uid(),recurringId:rid,orgId:u.userId,orgName:u.name||'Org',title:title,date:d,time:time,location:location,description:desc,capacity:capacity,registrations:[],createdAt:Date.now()});
+        all.push({id:uid(),recurringId:rid,orgId:u.userId,orgName:u.name||'Org',title:title,date:d,time:time,start:time,end:endTime,location:location,description:desc,capacity:capacity,registrations:[],createdAt:Date.now()});
       });
     } else {
-      all.push({id:uid(),orgId:u.userId,orgName:u.name||'Org',title:title,date:date,time:time,location:location,description:desc,capacity:capacity,registrations:[],createdAt:Date.now()});
+      all.push({id:uid(),orgId:u.userId,orgName:u.name||'Org',title:title,date:date,time:time,start:time,end:endTime,location:location,description:desc,capacity:capacity,registrations:[],createdAt:Date.now()});
     }
     return AppSDK.setItem('aos_org_trainings',all);
   }).then(function(){
@@ -8157,7 +8159,9 @@ function renderCalendar(){
     upcomingHTML='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:6px">\uD83D\uDCC6 Upcoming 14 Days</div>'
       +upEvents.map(function(e){
         return '<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04)">'
-          +'<div><span style="font-weight:600">'+escH(e.title)+'</span>'+(e.personal?'<span style="font-size:10px;color:var(--cyan);margin-left:5px">Personal</span>':'')
+          +'<div><span style="font-weight:600">'+escH(e.title)+'</span>'
+          +'<span style="font-size:10px;color:#8899aa;margin-left:6px">'+escH(aosEventTimeLabel(e))+'</span>'
+          +(e.personal?'<span style="font-size:10px;color:var(--cyan);margin-left:5px">Personal</span>':'')
           +(e.invitedTeam?'<span style="font-size:10px;color:var(--gold);margin-left:5px">\uD83D\uDC65 Team</span>':'')
           +(e.type?'<span style="font-size:10px;color:var(--white-dim);margin-left:5px">'+escH(e.type)+'</span>':'')+'</div>'
           +'<div style="display:flex;align-items:center;gap:6px">'
@@ -8174,6 +8178,8 @@ function renderCalendar(){
   +'<div class="form-group"><label>Title*</label><input id="ce-title" placeholder="Event name"></div>'
   +'<div class="form-row">'
   +'<div class="form-group"><label>Date</label><input type="date" id="ce-date" value="'+todayStr()+'"></div>'
+  +'<div class="form-group"><label>Start</label><input type="time" id="ce-start"></div>'
+  +'<div class="form-group"><label>End</label><input type="time" id="ce-end"></div>'
   +'<div class="form-group"><label>Type</label><select id="ce-type"><option>Game</option><option>Practice</option><option>Showcase</option><option>Camp</option><option>Meeting</option><option>Personal</option><option>Other</option></select></div>'
   +'</div>'
   +'<div class="form-group" style="display:flex;align-items:center;gap:10px">'
@@ -8199,8 +8205,9 @@ function renderCalendar(){
     var title=safeVal('ce-title').trim();if(!title){showToast('Enter event title');return}
     var isPersonal=safeGet('ce-personal')&&safeGet('ce-personal').checked;
     var inviteTeam=isPersonal&&safeGet('ce-invite')&&safeGet('ce-invite').checked;
+    var _st=safeVal('ce-start'), _en=safeVal('ce-end');
     var evt={id:uid(),title:title,date:safeVal('ce-date')||todayStr(),type:safeVal('ce-type'),
-      personal:isPersonal,invitedTeam:inviteTeam};
+      start:_st,end:_en,allDay:!_st,personal:isPersonal,invitedTeam:inviteTeam};
     calEvents.push(evt);
     saveItem('sb_calendar',calEvents);
     if(inviteTeam){
@@ -8229,7 +8236,8 @@ function renderCalendar(){
     h+=shared||'';
     mine.forEach(function(e){
       h+='<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
-        '<span style="font-size:12px;color:#e8f4fd">'+escH(e.title)+'</span>'+
+        '<div><div style="font-size:12px;color:#e8f4fd">'+escH(e.title)+'</div>'+
+        '<div style="font-size:10px;color:var(--white-dim)">'+escH(aosEventTimeLabel(e))+'</div></div>'+
         '<span style="font-size:10px;color:var(--white-dim)">'+escH(e.type||(e.personal?'Personal':'Team'))+'</span></div>';
     });
     panel.innerHTML=h+'</div>';
@@ -9903,6 +9911,8 @@ function renderCoach(){
     html+='<div style="display:flex;gap:8px;margin-bottom:8px">';
     html+='<input id="coach-ev-title" placeholder="Event title" style="flex:2;padding:9px 12px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px">';
     html+='<input id="coach-ev-date" type="date" style="flex:1;padding:9px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px">';
+    html+='<input id="coach-ev-start" type="time" title="Start" style="flex:1;padding:9px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px">';
+    html+='<input id="coach-ev-end" type="time" title="End" style="flex:1;padding:9px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px">';
     html+='</div>';
     html+='<select id="coach-ev-type" style="width:100%;padding:9px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px;margin-bottom:8px">';
     html+='<option value="practice">Practice</option><option value="game">Game</option><option value="eval">Evaluation</option><option value="milestone">Milestone</option><option value="event">Event</option>';
@@ -10148,6 +10158,8 @@ window.addCoachSeasonEvent=function(){
   var u=window.AOS_USER||{};
   var title=document.getElementById('coach-ev-title').value.trim();
   var date=document.getElementById('coach-ev-date').value;
+  var evStart=(document.getElementById('coach-ev-start')||{}).value||'';
+  var evEnd=(document.getElementById('coach-ev-end')||{}).value||'';
   var type=document.getElementById('coach-ev-type').value;
   if(!title||!date){showToast('Enter a title and date.');return;}
   var isRecurring=document.getElementById('coach-ev-recurring').checked;
@@ -10162,10 +10174,12 @@ window.addCoachSeasonEvent=function(){
       if(!dates.length){showToast('No matching dates in that range.');return Promise.reject('novalidate');}
       var rid=uid();
       dates.forEach(function(d){
-        evs.push({id:uid(),recurringId:rid,coachId:u.userId,coachName:u.name||'Coach',title:title,date:d,type:type,days:days,createdAt:Date.now()});
+        evs.push({id:uid(),recurringId:rid,coachId:u.userId,coachName:u.name||'Coach',title:title,date:d,
+          start:evStart,end:evEnd,allDay:!evStart,type:type,days:days,createdAt:Date.now()});
       });
     } else {
-      evs.push({id:uid(),coachId:u.userId,coachName:u.name||'Coach',title:title,date:date,type:type,createdAt:Date.now()});
+      evs.push({id:uid(),coachId:u.userId,coachName:u.name||'Coach',title:title,date:date,
+        start:evStart,end:evEnd,allDay:!evStart,type:type,createdAt:Date.now()});
     }
     return AppSDK.setItem('aos_season_events',evs);
   }).then(function(){
@@ -10805,7 +10819,8 @@ function aosParentSnapshotHTML(d){
   if(!next.length) h+='<div style="font-size:12px;color:var(--white-dim)">Nothing on the calendar.</div>';
   else next.forEach(function(e){
     h+='<div style="display:flex;justify-content:space-between;padding:5px 0;font-size:13px;color:#e8f4fd">'+
-      '<span>'+escH(e.title||'Event')+'</span><span style="color:var(--white-dim);font-size:11px">'+escH(e.date||'')+(e.time?' '+escH(e.time):'')+'</span></div>';
+      '<span>'+escH(e.title||'Event')+'</span><span style="color:var(--white-dim);font-size:11px">'+escH(e.date||'')+
+      ' \u00B7 '+escH(aosEventTimeLabel(e))+'</span></div>';
   });
   return h+'</div>';
 }
