@@ -8229,6 +8229,24 @@ function renderCalendar(){
       window._calAthletes=aosChildrenOf(g,u.userId)||[];
       window._calAthleteNames={};
       (window._calAthletes||[]).forEach(function(k){ window._calAthleteNames[k]=aosNameOf(g,k); });
+      /* Their athlete's own entries — lessons, appointments, anything
+         they added themselves. A parent seeing a different calendar
+         from their athlete is worse than no calendar. */
+      Promise.all((window._calAthletes||[]).map(function(kid){
+        return aosChildData(kid,'sb_calendar').then(function(list){
+          return {kid:kid,list:Array.isArray(list)?list:[]};
+        }).catch(function(){ return {kid:kid,list:[]}; });
+      })).then(function(sets){
+        var merged=[];
+        sets.forEach(function(sx){
+          sx.list.forEach(function(e){
+            merged.push(Object.assign({},e,{_theirs:true,_athlete:window._calAthleteNames[sx.kid]||''}));
+          });
+        });
+        window._calChildEvents=merged;
+        var secC=document.getElementById('sec-calendar');
+        if(merged.length&&secC&&secC.classList.contains('active')) renderCalendar();
+      });
       var sec=document.getElementById('sec-calendar');
       if(window._calAthletes.length&&sec&&sec.classList.contains('active')) renderCalendar();
     }).catch(function(){});
@@ -8245,9 +8263,10 @@ function renderCalendar(){
   for(var d=1;d<=daysInMonth;d++){
     var ds=calYear+'-'+String(calMonth+1).padStart(2,'0')+'-'+String(d).padStart(2,'0');
     var isToday=d===todayD&&calMonth===todayM&&calYear===todayY;
-    var evts=calEvents.filter(function(e){return e.date===ds});
-    var myEvts=calEvents.filter(function(e){return e.date===ds&&e.personal});
-    var teamEvts=calEvents.filter(function(e){return e.date===ds&&!e.personal});
+    var _all=calEvents.concat(window._calChildEvents||[]);
+    var evts=_all.filter(function(e){return e.date===ds});
+    var myEvts=_all.filter(function(e){return e.date===ds&&e.personal});
+    var teamEvts=_all.filter(function(e){return e.date===ds&&!e.personal});
     /* Events posted by a coach, trainer or club — one source, so a dot
        here means the same thing as the row below. */
     var shared=(scheduledEvents||[]).filter(function(ev){ return !ev.cancelled&&ev.date===ds; });
@@ -8270,14 +8289,16 @@ function renderCalendar(){
   // Upcoming 14 days
   var upcomingHTML='';
   var u14=[];for(var i=0;i<14;i++){var dt=new Date();dt.setDate(dt.getDate()+i);u14.push(aosDateKey(dt))}
-  var upEvents=calEvents.filter(function(e){return u14.indexOf(e.date)>-1}).sort(function(a,b){return a.date.localeCompare(b.date)});
+  /* A parent's list includes their athlete's own entries, so both
+     calendars read the same. */
+  var upEvents=calEvents.concat(window._calChildEvents||[]).filter(function(e){return u14.indexOf(e.date)>-1}).sort(function(a,b){return a.date.localeCompare(b.date)});
   if(upEvents.length){
     upcomingHTML='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:6px">\uD83D\uDCC6 Upcoming 14 Days</div>'
       +upEvents.map(function(e){
         return '<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04)">'
           +'<div><span style="font-weight:600">'+escH(e.title)+'</span>'
           +'<span style="font-size:10px;color:#8899aa;margin-left:6px">'+escH(aosEventTimeLabel(e))+
-            (e.location?' \u00B7 '+escH(e.location):'')+'</span>'
+            (e.location?' \u00B7 '+escH(e.location):'')+(e._theirs&&e._athlete?' \u00B7 '+escH(e._athlete):'')+'</span>'
           +(e.personal?'<span style="font-size:10px;color:var(--cyan);margin-left:5px">Personal</span>':'')
           +(e.invitedTeam?'<span style="font-size:10px;color:var(--gold);margin-left:5px">\uD83D\uDC65 Team</span>':'')
           +(e.type?'<span style="font-size:10px;color:var(--white-dim);margin-left:5px">'+escH(e.type)+'</span>':'')+'</div>'
@@ -8355,7 +8376,7 @@ function renderCalendar(){
     var panel=document.getElementById('cal-day-panel');
     if(!panel){ panel=document.createElement('div'); panel.id='cal-day-panel'; el.appendChild(panel); }
     var shared=aosDayEventsHTML(ds,ids,window._calAthleteNames||{});
-    var mine=calEvents.filter(function(e){return e.date===ds;});
+    var mine=calEvents.concat(window._calChildEvents||[]).filter(function(e){return e.date===ds;});
     var h='<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'+
       '<div style="font-weight:700;font-size:13px">'+escH(ds)+'</div>'+
       '<button class="btn btn-sm" onclick="document.getElementById(\'cal-day-panel\').innerHTML=\'\'" style="font-size:11px">Close</button></div>';
@@ -8366,7 +8387,9 @@ function renderCalendar(){
         '<div><div style="font-size:12px;color:#e8f4fd">'+escH(e.title)+'</div>'+
         '<div style="font-size:10px;color:var(--white-dim)">'+escH(aosEventTimeLabel(e))+
           (e.location?' \u00B7 '+escH(e.location):'')+'</div></div>'+
-        '<span style="font-size:10px;color:var(--white-dim)">'+escH(e.type||(e.personal?'Personal':'Team'))+'</span></div>';
+        '<span style="font-size:10px;color:var(--white-dim)">'+escH(e.type||(e.personal?'Personal':'Team'))+
+        (e.addedBy?'<div style="font-size:9px;color:#ff88aa">added by '+escH(e.addedBy)+'</div>':'')+
+        (e._theirs?'<div style="font-size:9px;color:#ff88aa">'+escH(e._athlete||'theirs')+'</div>':'')+'</span></div>';
     });
     panel.innerHTML=h+'</div>';
     panel.scrollIntoView({behavior:'smooth',block:'nearest'});
@@ -11721,6 +11744,46 @@ function aosCostHTML(childId,childName,hoursTrained,sessions){
   }
   return h+'</div>';
 }
+/* A parent books the lesson, so a parent can put it on the calendar.
+   Entries carry who added them, so an athlete opening their week can
+   see what was arranged for them rather than finding it unexplained. */
+window.aosAddToChildCalendar=function(childId,childName,cb){
+  var title=(safeVal('pc-ev-title')||'').trim();
+  if(!title){ showToast('Give it a name.'); return; }
+  var st=safeVal('pc-ev-start'), en=safeVal('pc-ev-end');
+  var dates=aosRepeatDates(safeVal('pc-ev-date')||todayStr(),safeVal('pc-ev-repeat'),safeVal('pc-ev-until'));
+  var series=dates.length>1?('cs_'+Date.now().toString(36)):'';
+  aosChildData(childId,'sb_calendar').then(function(list){
+    list=Array.isArray(list)?list:[];
+    dates.forEach(function(d){
+      list.push({id:'ev_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
+        title:title,date:d,start:st,end:en,allDay:!st,location:(safeVal('pc-ev-loc')||'').trim(),
+        type:safeVal('pc-ev-type')||'Practice',personal:true,seriesId:series,
+        addedBy:(window.AOS_USER||{}).name||'Parent',addedByRole:'parent'});
+    });
+    return fbDb.collection('users').doc(childId).collection('appdata').doc('sb_calendar').set({value:list});
+  }).then(function(){
+    showToast(dates.length>1?(dates.length+' added to '+(childName||'their')+' calendar.'):'Added to '+(childName||'their')+' calendar.');
+    var t=safeGet('pc-ev-title'); if(t) t.value='';
+    if(cb) cb();
+  }).catch(function(e){ console.warn('AOS parent calendar add failed',e); showToast('Could not add that.'); });
+};
+function aosParentAddEventHTML(childId,childName){
+  return '<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">Add to '+escH(childName||'their')+' calendar</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin-bottom:8px">Lessons, appointments, anything you booked. They’ll see it with your name on it.</div>'+
+    '<div class="form-group"><label>What</label><input id="pc-ev-title" placeholder="Hitting lesson"></div>'+
+    '<div class="form-row">'+
+      '<div class="form-group"><label>Date</label><input type="date" id="pc-ev-date" value="'+todayStr()+'"></div>'+
+      '<div class="form-group"><label>Type</label><select id="pc-ev-type"><option>Practice</option><option>Lesson</option><option>Game</option><option>Camp</option><option>Appointment</option><option>Other</option></select></div></div>'+
+    '<div class="form-row">'+
+      '<div class="form-group"><label>Start</label><input type="time" id="pc-ev-start"></div>'+
+      '<div class="form-group"><label>End</label><input type="time" id="pc-ev-end"></div></div>'+
+    '<div class="form-group"><label>Where</label><input id="pc-ev-loc" placeholder="Facility or field"></div>'+
+    '<div class="form-row">'+
+      '<div class="form-group"><label>Repeat</label><select id="pc-ev-repeat"><option value="">Just once</option><option value="weekly">Every week</option><option value="daily">Every day</option></select></div>'+
+      '<div class="form-group"><label>Until</label><input type="date" id="pc-ev-until"></div></div>'+
+    '<button class="btn btn-primary btn-full btn-sm" onclick="aosAddToChildCalendar(\''+escH(childId)+'\',\''+escH((childName||'').replace(/'/g,"")) +'\',renderParentChildHome)">Add it</button></div>';
+}
 /* ── Logistics ───────────────────────────────────────────────────── */
 window.aosSetRide=function(eventId,athleteId,who,cb){
   var ev=scheduledEvents.find(function(e){ return e.id===eventId; });
@@ -11773,6 +11836,90 @@ function aosParentsOfChildHTML(g,childId){
     '</div>';
 }
 
+/* ══════════════════════════════════════════════════════════════════
+   THE PARENT'S REPORT
+
+   A parent asked to see reports so they can help with the gaps. This
+   is the same picture the athlete's own report gives — training done,
+   readiness, attendance, where the numbers sit, what's still open —
+   built from their athlete's data and shareable as a file.
+   ══════════════════════════════════════════════════════════════════ */
+function aosChildReport(d){
+  var stats=aosCareerStatsFrom(d.recovery,d.training,d.goals);
+  var adh30=aosAdherence(d.training,30);
+  var att=aosAttendance(d.events,d.childId,30);
+  var trend=aosMonthlyTrendFrom(d.recovery,d.training,3);
+  var openGoals=(d.goals||[]).filter(function(g){ return !g.completed; });
+  var openInj=(d.injuries||[]).filter(function(i){ return i.status!=='cleared'; });
+  return {stats:stats,adherence:adh30,attendance:att,trend:trend,openGoals:openGoals,openInjuries:openInj};
+}
+function aosParentReportHTML(name,rep,bests){
+  function row(k,v,sub){
+    return '<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+      '<span style="font-size:12px;color:var(--white-dim)">'+escH(k)+'</span>'+
+      '<span style="font-size:13px;color:#e8f4fd">'+escH(String(v))+
+      (sub?'<span style="font-size:10px;color:var(--white-dim)"> '+escH(sub)+'</span>':'')+'</span></div>';
+  }
+  var s=rep.stats, a=rep.adherence, at=rep.attendance;
+  var h='<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'+
+      '<div style="font-weight:700;font-size:13px">'+escH(name||'Their')+' report</div>'+
+      '<button class="btn btn-sm" id="pr-share" style="font-size:11px">Save a copy</button></div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin-bottom:8px">Last 30 days, and where things stand. The gaps are the point.</div>';
+  h+=row('Sessions logged',s.sessions,'('+s.planned+' still to tick off)');
+  h+=row('Hours trained',s.hours);
+  h+=row('Check-ins',s.checkIns,s.avgReadiness!==null?('avg '+s.avgReadiness+'/10'):'');
+  if(a.scheduled) h+=row('Did what was planned',a.done+' of '+a.scheduled,'('+a.pct+'%)');
+  if(at.invited) h+=row('Team attendance',at.attended+' of '+at.invited,'('+at.pct+'%)');
+  h+=row('Goals reached',s.goalsDone,rep.openGoals.length+' open');
+  if(rep.openInjuries.length) h+=row('Carrying','\u26A0\uFE0F '+rep.openInjuries.map(function(i){return i.part;}).join(', '));
+  /* the three-month shape, so a drop-off is visible rather than implied */
+  var maxS=Math.max.apply(null,rep.trend.map(function(t){return t.sessions;}).concat([1]));
+  h+='<div style="margin-top:10px"><div style="font-size:11px;color:var(--white-dim);margin-bottom:4px">Last three months</div>'+
+    '<div style="display:flex;gap:8px;align-items:flex-end;height:60px">'+rep.trend.map(function(t){
+      return '<div style="flex:1;text-align:center">'+
+        '<div style="height:'+(Math.round(t.sessions/maxS*44)+4)+'px;border-radius:4px;background:#00E0FF"></div>'+
+        '<div style="font-size:10px;color:var(--white-dim);margin-top:3px">'+escH(t.label)+' \u00B7 '+t.sessions+'</div></div>';
+    }).join('')+'</div></div>';
+  if(rep.openGoals.length){
+    h+='<div style="margin-top:10px"><div style="font-size:11px;color:var(--white-dim);margin-bottom:4px">Still open</div>'+
+      rep.openGoals.slice(0,6).map(function(g){
+        return '<div style="font-size:12px;color:#e8f4fd;padding:3px 0">\u2022 '+escH(g.title||g.text||'Goal')+'</div>';
+      }).join('')+'</div>';
+  }
+  if((bests||[]).length){
+    h+='<div style="margin-top:10px"><div style="font-size:11px;color:var(--white-dim);margin-bottom:4px">Where the numbers are</div>'+
+      bests.slice(0,8).map(function(b){
+        return '<div style="display:flex;justify-content:space-between;font-size:12px;color:#e8f4fd;padding:3px 0">'+
+          '<span>'+escH(b.label)+'</span><span style="color:var(--gold)">'+escH(String(b.value))+'</span></div>';
+      }).join('')+'</div>';
+  }
+  return h+'</div>';
+}
+window.aosSaveChildReport=function(name,rep,bests){
+  var lines=[];
+  lines.push((name||'Athlete')+' \u2014 report '+todayStr());
+  lines.push('');
+  lines.push('Sessions logged: '+rep.stats.sessions+' ('+rep.stats.planned+' still to tick off)');
+  lines.push('Hours trained: '+rep.stats.hours);
+  lines.push('Check-ins: '+rep.stats.checkIns+(rep.stats.avgReadiness!==null?(' \u00B7 avg readiness '+rep.stats.avgReadiness+'/10'):''));
+  if(rep.adherence.scheduled) lines.push('Planned vs done: '+rep.adherence.done+' of '+rep.adherence.scheduled+' ('+rep.adherence.pct+'%)');
+  if(rep.attendance.invited) lines.push('Team attendance: '+rep.attendance.attended+' of '+rep.attendance.invited+' ('+rep.attendance.pct+'%)');
+  lines.push('Goals reached: '+rep.stats.goalsDone+' \u00B7 open: '+rep.openGoals.length);
+  if(rep.openInjuries.length) lines.push('Currently carrying: '+rep.openInjuries.map(function(i){return i.part+' ('+i.status+')';}).join(', '));
+  if((bests||[]).length){
+    lines.push('');
+    lines.push('Numbers:');
+    bests.slice(0,12).forEach(function(b){ lines.push('  '+b.label+': '+b.value+(b.date?(' ('+b.date+')'):'')); });
+  }
+  var blob=new Blob([lines.join('\n')],{type:'text/plain'});
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='AOS-'+(name||'athlete').replace(/[^a-z0-9]+/gi,'-').toLowerCase()+'-report-'+todayStr()+'.txt';
+  document.body.appendChild(a); a.click();
+  setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); },1000);
+  showToast('Saved.');
+};
+
 /* ── Parent view of an athlete ──────────────────────────────────────
    A linked parent can open their child's Home screen — today's check-in,
    training, hydration, streak, goals and next event — and edit the
@@ -11795,7 +11942,7 @@ window.aosCloseChildHome=function(){ window._parentChild=null; renderParent(); }
 function renderParentChildHome(){
   var el=safeGet('sec-parent'); if(!el||!window._parentChild) return;
   var cid=window._parentChild.id, cname=window._parentChild.name;
-  var tabs=[['now','Now'],['assist','Assist'],['team','Team'],['record','Record'],['data','Data']];
+  var tabs=[['now','Now'],['assist','Assist'],['team','Team'],['record','Record'],['report','Report'],['data','Data']];
   var tab=window._pcTab||'now';
   /* Tapping tabs quickly starts several loads; only the newest may
      write, or a slow earlier one lands on top of it. */
@@ -11901,6 +12048,7 @@ function renderParentChildHome(){
         aosAdherenceHTML(tr)+
         aosInjurySummaryHTML(childInjuries,cname)+
         aosLogisticsHTML(scheduledEvents,[cid],{})+
+        aosParentAddEventHTML(cid,cname)+
         aosParentTasksHTML(childTasks,assignedTasks.filter(function(t){ return t.toPlayerId===cid; }))+
         aosParentEffortHTML(_cmp);
     } else if(tab==='assist'){
@@ -11923,6 +12071,14 @@ function renderParentChildHome(){
         aosInjurySummaryHTML(childInjuries,cname)+
         aosParentTeamHTML({childId:cid,staff:_staff,teammates:_teammates,teamReadiness:_teamReadiness,
         events:_myEvents,challenges:_myChallenges,skills:_skills,selfSkills:selfS,devPlan:_plan,focus:_focus});
+    }
+    if(tab==='report'){
+      var _rep=aosChildReport({recovery:rec,training:tr,goals:goals,events:scheduledEvents,
+        childId:cid,injuries:childInjuries});
+      var _sportsR=(Array.isArray(prof.sports)&&prof.sports.length)?prof.sports:[prof.sport||'Other'];
+      var _bestsR=aosPersonalBestsFrom(custom,phys,_sportsR);
+      html+=aosParentReportHTML(cname,_rep,_bestsR);
+      window._pcReport={name:cname,rep:_rep,bests:_bestsR};
     }
     if(tab==='record'||tab==='data'){
     /* A linked parent sees the check-ins themselves. Linking is the
@@ -12054,6 +12210,10 @@ function renderParentChildHome(){
     if(_renderToken!==window._pcRenderToken) return;   /* a newer tab won */
     body.innerHTML=html;
     aosBindParentMetrics(cid,prof,custom,phys,renderParentChildHome);
+    var pr=safeGet('pr-share');
+    if(pr) pr.addEventListener('click',function(){
+      var r=window._pcReport||{}; aosSaveChildReport(r.name,r.rep,r.bests);
+    });
     var sg=safeGet('psug-open'); if(sg) sg.addEventListener('click',function(){ aosSuggestTraining(cid,cname); });
     var ex=safeGet('pc-export'); if(ex) ex.addEventListener('click',function(){ aosExportChildData(cid,cname); });
     var del=safeGet('pc-delete'); if(del) del.addEventListener('click',function(){ aosDeleteChildData(cid,cname); });
