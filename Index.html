@@ -414,6 +414,12 @@ function _acctPrivateField(rec,k){
 }
 function _acctSplit(rec){
   var pub={},priv={};
+  /* The exact age stays private, but whether an account may be
+     followed has to be enforceable by anyone: "can this be followed,
+     and does it need approval" is the least that can be public. */
+  if(rec&&rec.ageMode){
+    pub.followPolicy = rec.ageMode==='youth' ? 'none' : (rec.ageMode==='teen' ? 'approve' : 'open');
+  }
   Object.keys(rec||{}).forEach(function(k){
     if(rec[k]===undefined) return;
     (_acctPrivateField(rec,k)?priv:pub)[k]=rec[k];
@@ -858,6 +864,140 @@ function _writeMsgKey(key,uid,arr){
   return Promise.all(ops).then(function(){}).catch(function(e){ console.warn('AOS message write failed',key,e); });
 }
 /* ── End messaging ── */
+/* ══════════════════════════════════════════════════════════════════
+   FOLLOWS AND FEED
+
+   Follows change what you see; connections change who can reach you.
+   They are deliberately separate systems: a follow is read-only, has
+   no message button, and never creates a channel. Messaging stays
+   with connected accounts, where it is logged and parent-visible.
+
+   Rules that follow from that:
+     - under 13 cannot be followed at all
+     - following a minor (13–17) needs their approval; they can see
+       and remove followers
+     - following an adult or a team, coach or club is open
+     - nothing auto-publishes: an athlete shares a post at a time
+     - a minor's post carries no school, home town, or upcoming
+       time-and-place — past results are fine
+     - a parent sees their minor's posts and followers
+   ══════════════════════════════════════════════════════════════════ */
+var myFollows=[], myFollowers=[], feedPosts=[];
+function _fid(a,b){ return a+'__'+b; }
+function aosIsMinorAccount(acc){
+  var m=(acc&&acc.ageMode)||'';
+  return m==='youth'||m==='teen';
+}
+function aosFollowableState(acc){
+  if(!acc) return {ok:false,why:'Not found'};
+  var policy=acc.followPolicy||
+    ((acc.ageMode==='youth')?'none':(acc.ageMode==='teen')?'approve':
+     (acc.role&&['coach','trainer','org'].indexOf(acc.role)>=0)?'open':'approve');
+  if(policy==='none') return {ok:false,why:'Athletes under 13 can\u2019t be followed.'};
+  return {ok:true,approval:policy==='approve'};
+}
+window.aosFollow=function(targetId,cb){
+  var u=window.AOS_USER||{};
+  if(targetId===u.userId) return;
+  AppSDK.getItem('aos_local_accounts').then(function(accs){
+    var acc=(accs||{})[targetId]||Object.values(accs||{}).find(function(a){return a&&a.userId===targetId;});
+    var st=aosFollowableState(acc);
+    if(!st.ok){ showToast(st.why); return null; }
+    var rec={id:_fid(u.userId,targetId),followerId:u.userId,followerName:u.name||'',
+      targetId:targetId,targetName:(acc&&acc.name)||'',targetKind:(acc&&acc.role)||'player',
+      status:st.approval?'pending':'active',parties:[u.userId,targetId],createdAt:Date.now()};
+    return fbDb.collection('follows').doc(rec.id).set(rec).then(function(){
+      myFollows.push(rec);
+      showToast(st.approval?'Request sent \u2014 they decide.':'Following.');
+      if(cb) cb(rec);
+    });
+  }).catch(function(e){ console.warn('AOS follow failed',e); showToast('Could not follow.'); });
+};
+window.aosUnfollow=function(targetId,cb){
+  var u=window.AOS_USER||{};
+  fbDb.collection('follows').doc(_fid(u.userId,targetId)).delete().then(function(){
+    myFollows=myFollows.filter(function(f){ return f.targetId!==targetId; });
+    showToast('Unfollowed.');
+    if(cb) cb();
+  }).catch(function(e){ console.warn('AOS unfollow failed',e); });
+};
+/* The person being followed decides, and can change their mind later. */
+window.aosAnswerFollower=function(followerId,accept,cb){
+  var u=window.AOS_USER||{};
+  var id=_fid(followerId,u.userId);
+  var op=accept?fbDb.collection('follows').doc(id).update({status:'active',answeredAt:Date.now()})
+                :fbDb.collection('follows').doc(id).delete();
+  op.then(function(){
+    if(accept){ myFollowers.forEach(function(f){ if(f.followerId===followerId) f.status='active'; }); }
+    else myFollowers=myFollowers.filter(function(f){ return f.followerId!==followerId; });
+    showToast(accept?'They can see your posts now.':'Removed.');
+    if(cb) cb();
+  }).catch(function(e){ console.warn('AOS follower answer failed',e); });
+};
+function aosLoadFollows(){
+  var u=window.AOS_USER||{};
+  if(!u.userId) return Promise.resolve();
+  return Promise.all([
+    fbDb.collection('follows').where('followerId','==',u.userId).get(),
+    fbDb.collection('follows').where('targetId','==',u.userId).get()
+  ]).then(function(r){
+    myFollows=[]; myFollowers=[];
+    r[0].forEach(function(d){ myFollows.push(d.data()); });
+    r[1].forEach(function(d){ myFollowers.push(d.data()); });
+  }).catch(function(e){ console.warn('AOS follows load failed',e); });
+}
+/* ── Posting ──────────────────────────────────────────────────────
+   Nothing publishes itself. Each post is a decision, and a minor's
+   post is checked for the things that turn a number into a location. */
+var AOS_POST_BLOCK=/(\b\d{1,5}\s+[A-Z][a-z]+\s+(St|Street|Ave|Avenue|Rd|Road|Dr|Drive|Ln|Lane|Blvd)\b)|(\btomorrow\b|\btonight\b|\bthis (morning|afternoon|evening)\b)/i;
+function aosPostWarning(text,isMinor){
+  if(!isMinor) return '';
+  if(AOS_POST_BLOCK.test(text||'')) return 'Leave out where you\u2019ll be and when \u2014 post what you did, not where you\u2019re going.';
+  return '';
+}
+window.aosCreatePost=function(fields,cb){
+  var u=window.AOS_USER||{};
+  var isMinor=(function(){
+    var mode=(profile&&profile.ageMode)||u.ageMode||'';
+    if(mode) return mode==='youth'||mode==='teen';
+    /* fall back to the public policy flag if the mode isn't loaded */
+    return (u.followPolicy==='approve'||u.followPolicy==='none');
+  })();
+  var warn=aosPostWarning(fields.text,isMinor);
+  if(warn){ showToast(warn); if(cb) cb(null); return; }
+  var post={id:'po_'+Date.now().toString(36)+Math.random().toString(36).slice(2,5),
+    authorId:u.userId, authorName:u.name||'', authorRole:u.role||'player',
+    authorMinor:isMinor, kind:fields.kind||'update', text:(fields.text||'').trim(),
+    metric:fields.metric||'', value:fields.value||'', createdAt:Date.now()};
+  fbDb.collection('posts').doc(post.id).set(post).then(function(){
+    feedPosts.unshift(post);
+    showToast('Posted to your followers.');
+    if(cb) cb(post);
+  }).catch(function(e){ console.warn('AOS post failed',e); showToast('Could not post.'); });
+};
+window.aosDeletePost=function(id,cb){
+  fbDb.collection('posts').doc(id).delete().then(function(){
+    feedPosts=feedPosts.filter(function(p){ return p.id!==id; });
+    if(cb) cb(); if(typeof renderFeed==='function') renderFeed();
+  }).catch(function(){});
+};
+function aosLoadFeed(){
+  var u=window.AOS_USER||{};
+  var ids=myFollows.filter(function(f){ return f.status==='active'; }).map(function(f){ return f.targetId; });
+  ids.push(u.userId);
+  var chunks=[];
+  for(var i=0;i<ids.length;i+=10) chunks.push(ids.slice(i,i+10));
+  if(!chunks.length) return Promise.resolve([]);
+  return Promise.all(chunks.map(function(c){
+    return fbDb.collection('posts').where('authorId','in',c).get().catch(function(){ return {forEach:function(){}}; });
+  })).then(function(snaps){
+    var out=[];
+    snaps.forEach(function(sn){ sn.forEach(function(d){ out.push(d.data()); }); });
+    out.sort(function(a,b){ return (b.createdAt||0)-(a.createdAt||0); });
+    feedPosts=out;
+    return out;
+  });
+}
 /* ── What's on this week, where people actually look ──────────────── */
 function aosWeekStripHTML(events,athleteIds,names){
   var w=aosWeekAhead(events,athleteIds,7);
@@ -974,6 +1114,11 @@ window.aosOpenEventForm=function(teamId){
     '<div class="form-row"><div class="form-group"><label>Start</label><input type="time" id="se-start" value="17:00"></div>'+
     '<div class="form-group"><label>End</label><input type="time" id="se-end" value="19:00"></div></div>'+
     '<div class="form-group"><label>Where</label><input id="se-loc" placeholder="Dome, field 2"></div>'+
+    '<div class="form-row">'+
+      '<div class="form-group"><label>Repeat</label><select id="se-repeat">'+
+        '<option value="">Just once</option><option value="weekly">Every week</option>'+
+        '<option value="daily">Every day</option></select></div>'+
+      '<div class="form-group"><label>Until</label><input type="date" id="se-until"></div></div>'+
     '<div class="form-row"><div class="form-group"><label>Who answers how?</label><select id="se-kind">'+
       '<option value="attendance">Everyone expected \u2014 going / can\'t</option>'+
       '<option value="signup">Optional \u2014 sign up</option></select></div>'+
@@ -983,10 +1128,19 @@ window.aosOpenEventForm=function(teamId){
   document.getElementById('se-save').onclick=function(){
     var t=safeVal('se-title').trim();
     if(!t){ showToast('Give it a name.'); return; }
-    aosCreateEvent({kind:safeVal('se-kind'),title:t,date:safeVal('se-date'),start:safeVal('se-start'),
-      end:safeVal('se-end'),location:safeVal('se-loc'),type:safeVal('se-type'),
-      capacity:safeVal('se-cap'),teamId:teamId||window._staffTeam||''},function(){
-      box.style.display='none'; aosRefreshEventViews();
+    /* A repeating session is a series of real events: each one has its
+       own responses, so cancelling next Tuesday doesn't erase who said
+       yes to the Tuesday after. */
+    var base={kind:safeVal('se-kind'),title:t,start:safeVal('se-start'),end:safeVal('se-end'),
+      location:safeVal('se-loc'),type:safeVal('se-type'),capacity:safeVal('se-cap'),
+      teamId:teamId||window._staffTeam||''};
+    var dates=aosRepeatDates(safeVal('se-date'),safeVal('se-repeat'),safeVal('se-until'));
+    var seriesId=dates.length>1?('sr_'+Date.now().toString(36)):'';
+    var made=0;
+    dates.forEach(function(d){
+      aosCreateEvent(Object.assign({},base,{date:d,seriesId:seriesId}),function(){
+        if(++made===dates.length){ box.style.display='none'; aosRefreshEventViews(); }
+      });
     });
   };
 };
@@ -1036,6 +1190,19 @@ function aosEventAudience(g,me,role,teamId){
   }
   return _aosUniq(out);
 }
+/* The dates a repeat covers: same weekday each week, or every day,
+   up to the end date — capped so a mistyped year can't create years
+   of sessions. */
+function aosRepeatDates(startDate,mode,untilDate){
+  var first=startDate||todayStr();
+  if(!mode) return [first];
+  var out=[], cur=new Date(first+'T12:00:00');
+  var until=untilDate?new Date(untilDate+'T12:00:00'):new Date(new Date(first+'T12:00:00').getTime()+84*86400000);
+  var step=mode==='daily'?1:7;
+  var guard=0;
+  while(cur<=until&&guard<200){ out.push(aosDateKey(cur)); cur=new Date(cur.getTime()+step*86400000); guard++; }
+  return out.length?out:[first];
+}
 window.aosCreateEvent=function(fields,cb){
   var u=window.AOS_USER||{};
   aosLoadGraph().then(function(g){
@@ -1044,6 +1211,7 @@ window.aosCreateEvent=function(fields,cb){
       date:fields.date||todayStr(), start:fields.start||'', end:fields.end||'',
       allDay:!fields.start, location:fields.location||'', notes:fields.notes||'',
       type:fields.type||'Practice', capacity:Number(fields.capacity)||0,
+      seriesId:fields.seriesId||'',
       teamId:fields.teamId||'', hostId:u.userId, hostName:u.name||'', hostRole:u.role||'',
       createdAt:Date.now(), cancelled:false,
       viewers:aosEventAudience(g,u.userId,u.role||'coach',fields.teamId),
@@ -1867,7 +2035,7 @@ function aosMoreTilesHTML(role){
     return '<div style="margin:18px 0 8px;font-size:11px;font-weight:700;letter-spacing:1.5px;color:var(--white-dim);text-transform:uppercase">More</div>'+
       '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px">'+
       [['chat','\uD83D\uDCAC','Messages'],['requests','\uD83D\uDCE6','Requests'],['calendar','\uD83D\uDCC5','Calendar'],
-       ['subscription','\u2B50','Plan']].map(function(t){
+       ['notes','\uD83D\uDCDD','My Notes'],['subscription','\u2B50','Plan']].map(function(t){
         return '<button onclick="navigateTo(\''+t[0]+'\')" style="background:rgba(255,136,170,0.08);border:1px solid rgba(255,136,170,0.3);border-radius:10px;'+
           'padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)">'+
           '<span style="font-size:22px">'+t[1]+'</span><span style="font-size:11px;font-weight:600">'+t[2]+'</span></button>';
@@ -2460,7 +2628,7 @@ window.AppSDK = {
 <div data-id="17" id="sec-home" class="section active"></div>
 <div data-id="18" id="sec-gameday" class="section"></div>
 <div data-id="19" id="sec-training" class="section"></div>
-<div id="sec-player" class="section"></div>
+
 <div data-id="20" id="sec-team" class="section"></div>
 <div data-id="21" id="sec-goals" class="section"></div>
 <div data-id="22" id="sec-metrics" class="section"></div>
@@ -2471,6 +2639,9 @@ window.AppSDK = {
 <div data-id="27" id="sec-analytics" class="section"></div>
 <div data-id="28" id="sec-requests" class="section"></div>
 <div id="sec-record" class="section"></div>
+<div id="sec-notes" class="section"></div>
+<div id="sec-feed" class="section"></div>
+<div id="sec-injury" class="section"></div>
 <div data-id="29" id="sec-reports" class="section"></div>
 <div data-id="30" id="sec-nutrition" class="section"></div>
 <div data-id="31" id="sec-tasks" class="section"></div>
@@ -3169,7 +3340,7 @@ function navigateTo(sec){
   if(nb)nb.classList.add('active');
   window.scrollTo(0,0);
   if(sec==='team') window._teamScopeReady=false;
-  var renders={home:renderHome,record:renderRecord,gameday:renderGameday,training:renderTraining,team:renderTeam,player:renderPlayer,goals:renderGoals,metrics:renderMetrics,recovery:renderRecovery,timer:renderTimer,hydration:renderHydration,calendar:renderCalendar,analytics:renderAnalytics,requests:renderRequests,reports:renderReports,nutrition:renderNutrition,tasks:renderTasks,coach:renderCoach,org:renderOrg,admin:renderAdmin,profile:renderProfile,trainer:renderTrainer,leaderboard:renderLeaderboard,referral:renderReferral,subscription:renderSubscription,parent:renderParent,challenges:renderChallenges,chat:renderChatHub};
+  var renders={home:renderHome,record:renderRecord,notes:renderParentNotes,feed:renderFeed,injury:renderInjuries,gameday:renderGameday,training:renderTraining,team:renderTeam,goals:renderGoals,metrics:renderMetrics,recovery:renderRecovery,timer:renderTimer,hydration:renderHydration,calendar:renderCalendar,analytics:renderAnalytics,requests:renderRequests,reports:renderReports,nutrition:renderNutrition,tasks:renderTasks,coach:renderCoach,org:renderOrg,admin:renderAdmin,profile:renderProfile,trainer:renderTrainer,leaderboard:renderLeaderboard,referral:renderReferral,subscription:renderSubscription,parent:renderParent,challenges:renderChallenges,chat:renderChatHub};
   if(renders[sec])renders[sec]();
   // Persistent home bar — lives outside sections so re-renders can't wipe it
   if(typeof aosRenderRoleSwitcher==='function') aosRenderRoleSwitcher();
@@ -4499,6 +4670,25 @@ async function initApp(){
     window._athHistory=await AppSDK.getItem('aos_athlete_history')||{};
     seasonSnapshots=await AppSDK.getItem('sb_seasons')||[];
     recruitPath=await AppSDK.getItem('sb_recruit_path')||{};
+    parentNotes=await AppSDK.getItem('sb_parent_notes')||[];
+    injuries=await AppSDK.getItem('sb_injuries')||[];
+    athleteCosts=await AppSDK.getItem('sb_costs')||[];
+    /* The age bracket lives in the private half of the account and is
+       lost when a session is restored. Without it a returning minor
+       looks like an adult to every safety check, so fetch it back. */
+    if(!(window.AOS_USER||{}).ageMode){
+      try{
+        var _pi=await fbDb.collection('accounts').doc(window.AOS_USER.userId)
+                  .collection('private').doc('info').get();
+        var _pv=_pi.exists?_pi.data():null;
+        if(_pv&&_pv.ageMode){
+          window.AOS_USER.ageMode=_pv.ageMode;
+          if(profile&&!profile.ageMode) profile.ageMode=_pv.ageMode;
+        }
+      }catch(e){ /* stays unknown; the follow policy flag still applies */ }
+    }
+    await aosLoadFollows();
+    aosLoadFeed();
     await aosLoadEvents();
     aosScheduleMidnightRoll();
     trainingSuggestions=await AppSDK.getItem('sb_suggestions')||[];
@@ -5023,6 +5213,8 @@ function renderHome(){
   '<button class="home-nav-btn" data-hnav="challenges" style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.15);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1F3C6;</span><span style="font-size:11px;font-weight:600">Challenges</span></button>'+
   /* The athlete's own career record — theirs, and portable. */
   '<button class="home-nav-btn" data-hnav="record" style="background:rgba(255,215,0,0.09);border:1px solid rgba(255,215,0,0.3);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1F4D6;</span><span style="font-size:11px;font-weight:600">My Record</span></button>'+
+  '<button class="home-nav-btn" data-hnav="injury" style="background:rgba(231,76,60,0.07);border:1px solid rgba(231,76,60,0.2);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1FA79;</span><span style="font-size:11px;font-weight:600">Injuries</span></button>'+
+  '<button class="home-nav-btn" data-hnav="feed" style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.15);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1F4E1;</span><span style="font-size:11px;font-weight:600">Feed</span></button>'+
   '<button class="home-nav-btn" data-hnav="profile"   style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.15);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1F464;</span><span style="font-size:11px;font-weight:600">Profile</span></button>'+
   '<button class="home-nav-btn" data-hnav="leaderboard" style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.15);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1F3C6;</span><span style="font-size:11px;font-weight:600">Leaderboard</span></button>'+
   '<button class="home-nav-btn" data-hnav="referral" style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.15);border-radius:10px;padding:14px 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;color:var(--white)"><span style="font-size:22px">&#x1F381;</span><span style="font-size:11px;font-weight:600">Refer &amp; Earn</span></button>'+
@@ -7043,86 +7235,9 @@ function renderTeamCoachView(){
 /* ========== GOALS ========== */
 
 /* ========== PLAYER DASHBOARD ========== */
-function renderPlayer(){
-  var el=safeGet('sec-player');if(!el)return;
-  var activeGoals=(goals||[]).filter(function(g){return !g.completed;});
-  var assignedTasks=(tasks||[]).filter(function(t){return !t.done;});
-  el.innerHTML=
-    '<div class="section-title">&#9918; Player Dashboard</div>'+
-
-    // Quick stats row
-    '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px">'+
-      '<div class="card card-sm" style="text-align:center">'+
-        '<div style="font-size:22px;font-weight:800;color:var(--gold)">'+activeGoals.length+'</div>'+
-        '<div style="font-size:10px;color:var(--white-dim);margin-top:2px">Active Goals</div>'+
-      '</div>'+
-      '<div class="card card-sm" style="text-align:center">'+
-        '<div style="font-size:22px;font-weight:800;color:var(--warning)">'+assignedTasks.length+'</div>'+
-        '<div style="font-size:10px;color:var(--white-dim);margin-top:2px">Open Tasks</div>'+
-      '</div>'+
-      '<div class="card card-sm" style="text-align:center">'+
-        '<div style="font-size:22px;font-weight:800;color:var(--green)">'+(hydration||0)+' oz</div>'+
-        '<div style="font-size:10px;color:var(--white-dim);margin-top:2px">Hydration</div>'+
-      '</div>'+
-    '</div>'+
-
-    // Goals preview
-    '<div class="card card-sm" style="margin-bottom:8px">'+
-      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">'+
-        '<div style="font-weight:700;font-size:13px;color:var(--gold)">&#127919; My Goals</div>'+
-        '<button class="btn btn-primary" style="padding:5px 12px;font-size:11px" onclick="navigateTo(&#39;goals&#39;)">View All</button>'+
-      '</div>'+
-      (activeGoals.length?
-        activeGoals.slice(0,3).map(function(g){
-          var pct=g.target?Math.min(100,Math.round((g.progress||0)/g.target*100)):0;
-          return '<div style="margin-bottom:8px">'+
-            '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">'+
-              '<span>'+g.title+'</span><span style="color:var(--gold)">'+pct+'%</span>'+
-            '</div>'+
-            '<div style="height:4px;background:rgba(255,255,255,0.1);border-radius:2px">'+
-              '<div style="height:4px;background:var(--gold);border-radius:2px;width:'+pct+'%"></div>'+
-            '</div></div>';
-        }).join(''):
-        '<div style="font-size:12px;color:var(--white-dim)">No active goals. Tap View All to create one.</div>'
-      )+
-    '</div>'+
-
-    // Assigned items
-    (assignedTasks.length?
-      '<div class="card card-sm" style="margin-bottom:8px">'+
-        '<div style="font-weight:700;font-size:13px;margin-bottom:8px;color:var(--warning)">&#128236; Assigned to Me</div>'+
-        assignedTasks.slice(0,3).map(function(t){
-          return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">'+
-            '<span style="font-size:16px">'+({coach:'&#128104;&#8205;&#127979;',trainer:'&#127947;&#65039;',org:'&#127962;',parent:'&#128104;&#8205;&#128105;&#8205;&#128103;'}[t.assignedBy]||'&#128100;')+'</span>'+
-            '<div style="flex:1"><div style="font-size:12px;font-weight:600">'+t.title+'</div>'+
-            '<div style="font-size:10px;color:var(--white-dim)">from '+(t.assignedBy||'Team')+'</div></div>'+
-          '</div>';
-        }).join('')+
-      '</div>':'')+
-
-    // Tool grid
-    '<div style="font-weight:700;font-size:12px;color:var(--white-dim);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">My Tools</div>'+
-    '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">'+
-      [
-        {icon:'&#127919;',label:'Goals',key:'goals'},
-        {icon:'&#128203;',label:'Tasks',key:'tasks'},
-        {icon:'&#128202;',label:'Metrics',key:'metrics'},
-        {icon:'&#128154;',label:'Recovery',key:'recovery'},
-        {icon:'&#129367;',label:'Nutrition',key:'nutrition'},
-        {icon:'&#9201;&#65039;',label:'Timer',key:'timer'},
-        {icon:'&#128167;',label:'Hydration',key:'hydration'},
-        {icon:'&#128197;',label:'Calendar',key:'calendar'},
-        {icon:'&#128196;',label:'Reports',key:'reports'},
-      ].map(function(t){
-        return '<button class="more-card" onclick="navigateTo(&#39;+t.key+&#39;)">'+
-          '<div class="mc-icon">'+t.icon+'</div>'+
-          '<div class="mc-label">'+t.label+'</div>'+
-        '</button>';
-      }).join('')+
-    '</div>';
-}
-
-
+/* renderPlayer removed: a dead duplicate of Home, reachable only from
+   the owner menu, with a card that had been rendering "[object Object] oz".
+   Nothing linked to it. */
 function showAthleteArc(goal) {
   // Remove any existing arc overlay
   var existing = document.getElementById('athlete-arc-overlay');
@@ -7608,7 +7723,7 @@ function renderMetricsPhysical(){
   var c=safeGet('metrics-content');if(!c)return;
   var el=safeGet('sec-metrics');
   var physKeys=BENCHMARKS.map(function(b){return b.key});
-  var html='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Log Physical Metric</div><div class="form-row"><div class="form-group"><label>Metric</label><select id="mp-key">'+BENCHMARKS.map(function(b){return '<option value="'+b.key+'">'+escH(b.m)+'</option>'}).join('')+'</select></div><div class="form-group"><label>Value</label><input type="number" step="0.01" id="mp-val" placeholder="Value"></div></div><div class="form-group"><label>Date</label><input type="date" id="mp-date" value="'+todayStr()+'"></div><button class="btn btn-primary btn-full btn-sm" id="mp-save">+ Log Metric</button></div>';
+  var html='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Log Physical Metric</div><div class="form-row"><div class="form-group"><label>Metric</label><select id="mp-key">'+BENCHMARKS.map(function(b){return '<option value="'+b.key+'">'+escH(b.m)+'</option>'}).join('')+'</select></div><div class="form-group"><label>Value</label><input type="number" step="0.01" id="mp-val" placeholder="Value"></div></div><div class="form-group"><label>Date</label><input type="date" id="mp-date" value="'+todayStr()+'"></div>'+aosContextFieldsHTML('mp')+'<button class="btn btn-primary btn-full btn-sm" id="mp-save">+ Log Metric</button></div>';
   // PB display with entries
   var pbHTML='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Personal Bests & Entries</div>';
   BENCHMARKS.forEach(function(b){
@@ -7654,7 +7769,8 @@ function renderMetricsPhysical(){
     var key=safeVal('mp-key'),val=parseFloat(safeVal('mp-val')),date=safeVal('mp-date');
     if(isNaN(val)){showToast('Enter value');return}
     if(!metricsPhysical[key])metricsPhysical[key]=[];
-    metricsPhysical[key].push({id:uid(),value:val,date:date||todayStr()});
+    var _ctx=aosContextValues('mp');
+    metricsPhysical[key].push(Object.assign({id:uid(),value:val,date:date||todayStr()},_ctx));
     saveItem('sb_metrics_physical',metricsPhysical);showToast('Logged!');logAdmin('Metric logged: '+key);renderMetricsPhysical();
   });
   c.querySelectorAll('.pm-del').forEach(function(b){b.addEventListener('click',function(){
@@ -8160,7 +8276,8 @@ function renderCalendar(){
       +upEvents.map(function(e){
         return '<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.04)">'
           +'<div><span style="font-weight:600">'+escH(e.title)+'</span>'
-          +'<span style="font-size:10px;color:#8899aa;margin-left:6px">'+escH(aosEventTimeLabel(e))+'</span>'
+          +'<span style="font-size:10px;color:#8899aa;margin-left:6px">'+escH(aosEventTimeLabel(e))+
+            (e.location?' \u00B7 '+escH(e.location):'')+'</span>'
           +(e.personal?'<span style="font-size:10px;color:var(--cyan);margin-left:5px">Personal</span>':'')
           +(e.invitedTeam?'<span style="font-size:10px;color:var(--gold);margin-left:5px">\uD83D\uDC65 Team</span>':'')
           +(e.type?'<span style="font-size:10px;color:var(--white-dim);margin-left:5px">'+escH(e.type)+'</span>':'')+'</div>'
@@ -8180,6 +8297,9 @@ function renderCalendar(){
   +'<div class="form-group"><label>Date</label><input type="date" id="ce-date" value="'+todayStr()+'"></div>'
   +'<div class="form-group"><label>Start</label><input type="time" id="ce-start"></div>'
   +'<div class="form-group"><label>End</label><input type="time" id="ce-end"></div>'
+  +'<div class="form-group"><label>Where</label><input id="ce-loc" placeholder="Field, gym, address"></div>'
+  +'<div class="form-group"><label>Repeat</label><select id="ce-repeat"><option value="">Just once</option><option value="weekly">Every week</option><option value="daily">Every day</option></select></div>'
+  +'<div class="form-group"><label>Until</label><input type="date" id="ce-until"></div>'
   +'<div class="form-group"><label>Type</label><select id="ce-type"><option>Game</option><option>Practice</option><option>Showcase</option><option>Camp</option><option>Meeting</option><option>Personal</option><option>Other</option></select></div>'
   +'</div>'
   +'<div class="form-group" style="display:flex;align-items:center;gap:10px">'
@@ -8205,10 +8325,17 @@ function renderCalendar(){
     var title=safeVal('ce-title').trim();if(!title){showToast('Enter event title');return}
     var isPersonal=safeGet('ce-personal')&&safeGet('ce-personal').checked;
     var inviteTeam=isPersonal&&safeGet('ce-invite')&&safeGet('ce-invite').checked;
-    var _st=safeVal('ce-start'), _en=safeVal('ce-end');
-    var evt={id:uid(),title:title,date:safeVal('ce-date')||todayStr(),type:safeVal('ce-type'),
-      start:_st,end:_en,allDay:!_st,personal:isPersonal,invitedTeam:inviteTeam};
-    calEvents.push(evt);
+    var _st=safeVal('ce-start'), _en=safeVal('ce-end'), _loc=safeVal('ce-loc');
+    var _dates=aosRepeatDates(safeVal('ce-date')||todayStr(),safeVal('ce-repeat'),safeVal('ce-until'));
+    var _series=_dates.length>1?('cs_'+Date.now().toString(36)):'';
+    var evt=null;
+    _dates.forEach(function(_d){
+      evt={id:uid(),title:title,date:_d,type:safeVal('ce-type'),
+        start:_st,end:_en,allDay:!_st,location:_loc,seriesId:_series,
+        personal:isPersonal,invitedTeam:inviteTeam};
+      calEvents.push(evt);
+    });
+    if(_dates.length>1) showToast(_dates.length+' added, through '+_dates[_dates.length-1]);
     saveItem('sb_calendar',calEvents);
     if(inviteTeam){
       // Add to team season board
@@ -8237,7 +8364,8 @@ function renderCalendar(){
     mine.forEach(function(e){
       h+='<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
         '<div><div style="font-size:12px;color:#e8f4fd">'+escH(e.title)+'</div>'+
-        '<div style="font-size:10px;color:var(--white-dim)">'+escH(aosEventTimeLabel(e))+'</div></div>'+
+        '<div style="font-size:10px;color:var(--white-dim)">'+escH(aosEventTimeLabel(e))+
+          (e.location?' \u00B7 '+escH(e.location):'')+'</div></div>'+
         '<span style="font-size:10px;color:var(--white-dim)">'+escH(e.type||(e.personal?'Personal':'Team'))+'</span></div>';
     });
     panel.innerHTML=h+'</div>';
@@ -8632,6 +8760,106 @@ function aosSeasonsHTML(){
   return h+'</div>';
 }
 
+/* ══════════════════════════════════════════════════════════════════
+   MEASUREMENT CONTEXT, RANGE AND GROWTH
+
+   A 54 at a tryout and a 71 in a session are not the same kind of
+   number, and neither is a verdict. Every reading now records where
+   it came from, the record shows a typical range beside the best, and
+   growth is stated as movement over time rather than distance from a
+   personal best. One bad day at a tryout stops reading as a ceiling.
+   ══════════════════════════════════════════════════════════════════ */
+var AOS_SETTINGS=[
+  ['training','Training / own session'],
+  ['team','Team testing'],
+  ['tryout','Tryout'],
+  ['showcase','Showcase / camp'],
+  ['game','Game'],
+  ['lesson','Private lesson'],
+  ['other','Other']
+];
+function aosSettingLabel(k){
+  var f=AOS_SETTINGS.find(function(s){ return s[0]===k; });
+  return f?f[1]:'';
+}
+/* Readings are comparable only within a setting: a tryout number sits
+   beside other tryout numbers, not beside a good day in the cage. */
+function aosReadingStats(entries,field,lowerIsBetter){
+  var vals=(entries||[]).map(function(e){
+      return {v:Number(field?(e.values||{})[field]:e.value), d:e.date||'',
+              setting:e.setting||'', by:e.measuredBy||'', device:e.device||'', where:e.where||''};
+    }).filter(function(x){ return !isNaN(x.v); })
+    .sort(function(a,b){ return (a.d||'').localeCompare(b.d||''); });
+  if(!vals.length) return null;
+  var nums=vals.map(function(x){ return x.v; }).slice().sort(function(a,b){ return a-b; });
+  var q=function(p){ var i=(nums.length-1)*p; var lo=Math.floor(i), hi=Math.ceil(i);
+    return Math.round((nums[lo]+(nums[hi]-nums[lo])*(i-lo))*100)/100; };
+  var best=lowerIsBetter?nums[0]:nums[nums.length-1];
+  var bestEntry=vals.find(function(x){ return x.v===best; })||vals[vals.length-1];
+  var latest=vals[vals.length-1];
+  /* Growth measured from the earliest reading in the last year — or
+     from the first reading there is. Comparing only against a recent
+     window said nothing when every reading was months old. */
+  var yearAgo=aosDayOffset(365);
+  var inYear=vals.filter(function(x){ return x.d>=yearAgo; });
+  var from=(inYear.length>1?inYear[0]:vals[0]);
+  var change=(from&&latest&&from!==latest)?Math.round((latest.v-from.v)*100)/100:null;
+  var bySetting={};
+  vals.forEach(function(x){ var k=x.setting||'unknown'; (bySetting[k]=bySetting[k]||[]).push(x.v); });
+  return {
+    count:vals.length, best:best, bestDate:bestEntry.d, bestSetting:bestEntry.setting,
+    typicalLow:q(0.25), typicalHigh:q(0.75), latest:latest.v, latestDate:latest.d,
+    latestSetting:latest.setting, change:change, changeFrom:from?from.d:'', changeBetter:
+      (change===null)?null:(lowerIsBetter?change<0:change>0),
+    settings:Object.keys(bySetting).map(function(k){
+      var a=bySetting[k];
+      return {setting:k,n:a.length,avg:Math.round(a.reduce(function(x,y){return x+y;},0)/a.length*10)/10};
+    })
+  };
+}
+function aosReadingSummaryHTML(label,st,unit){
+  if(!st) return '';
+  unit=unit?(' '+unit):'';
+  var growth='';
+  if(st.change!==null){
+    var col=st.changeBetter?'#2ecc71':'#e74c3c';
+    growth='<div style="font-size:12px;color:'+col+'">'+(st.change>0?'+':'')+st.change+unit+
+      ' since '+escH(st.changeFrom)+'</div>';
+  }
+  var range=(st.count>2&&st.typicalLow!==st.typicalHigh)
+    ? '<div style="font-size:11px;color:var(--white-dim)">typically '+st.typicalLow+'\u2013'+st.typicalHigh+unit+
+      ' over '+st.count+' readings</div>' : '';
+  var settings=st.settings.length>1
+    ? '<div style="font-size:10px;color:var(--white-dim);margin-top:2px">'+
+      st.settings.map(function(x){ return escH(aosSettingLabel(x.setting)||'unrecorded')+' '+x.avg+' ('+x.n+')'; }).join(' \u00B7 ')+'</div>' : '';
+  return '<div style="padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+    '<div style="display:flex;justify-content:space-between">'+
+      '<span style="font-size:13px;color:#e8f4fd">'+escH(label)+'</span>'+
+      '<span style="font-size:15px;font-weight:800;color:var(--gold)">'+st.best+unit+'</span></div>'+
+    '<div style="display:flex;justify-content:space-between;align-items:flex-end">'+
+      '<div>'+range+settings+'</div>'+
+      '<div style="text-align:right">'+growth+
+        '<div style="font-size:10px;color:var(--white-dim)">best '+escH(st.bestDate)+
+        (st.bestSetting?' \u00B7 '+escH(aosSettingLabel(st.bestSetting)):'')+'</div></div>'+
+    '</div></div>';
+}
+/* The fields that turn a number into evidence. */
+function aosContextFieldsHTML(prefix){
+  return '<div class="form-row">'+
+      '<div class="form-group"><label>Setting</label><select id="'+prefix+'-setting">'+
+        AOS_SETTINGS.map(function(x){ return '<option value="'+x[0]+'">'+x[1]+'</option>'; }).join('')+'</select></div>'+
+      '<div class="form-group"><label>Measured by</label><input id="'+prefix+'-by" placeholder="Who ran it"></div>'+
+    '</div>'+
+    '<div class="form-row">'+
+      '<div class="form-group"><label>Where</label><input id="'+prefix+'-where" placeholder="Facility or field"></div>'+
+      '<div class="form-group"><label>Device / setup</label><input id="'+prefix+'-device" placeholder="Radar, tee, ball"></div>'+
+    '</div>';
+}
+function aosContextValues(prefix){
+  return {setting:safeVal(prefix+'-setting')||'', measuredBy:(safeVal(prefix+'-by')||'').trim(),
+          where:(safeVal(prefix+'-where')||'').trim(), device:(safeVal(prefix+'-device')||'').trim()};
+}
+
 function _recFmtDate(d){ if(!d) return '\u2014'; var t=new Date(d); return isNaN(t)?String(d):t.toLocaleDateString(); }
 /* ── Scheduled vs done ─────────────────────────────────────────────
    "Scheduled 5, did 3" is the number that means something: it's the
@@ -8650,6 +8878,31 @@ function aosAdherence(trIn,days){
   return {days:days,scheduled:sched,done:done,missed:Math.max(0,sched-done),
           pct:sched?Math.round(done/sched*100):null,
           hoursPlanned:Math.round(minsPlanned/60*10)/10,hoursDone:Math.round(minsDone/60*10)/10};
+}
+/* Practices attended, counted from the events they said yes to. Kept
+   separate from sessions they logged: an athlete who never opens the
+   app still has a record, and neither number pretends to be the other. */
+function aosAttendance(events,athleteId,days){
+  days=days||30;
+  var from=aosDayOffset(days), today=todayStr(), went=0, missed=0, invited=0;
+  (events||[]).forEach(function(ev){
+    if(ev.cancelled||ev.date<from||ev.date>today) return;
+    var st=((ev.responses||{})[athleteId]||{}).status||'';
+    if(!st) return;
+    invited++;
+    if(st==='in') went++; else if(st==='out') missed++;
+  });
+  return {days:days,invited:invited,attended:went,missed:missed,
+          pct:invited?Math.round(went/invited*100):null};
+}
+function aosAttendanceHTML(events,athleteId){
+  var a=aosAttendance(events,athleteId,30);
+  if(!a.invited) return '';
+  return '<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">Team attendance</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin-bottom:6px">Sessions your coach or club scheduled, last 30 days. Counted separately from what you log yourself.</div>'+
+    '<div style="display:flex;justify-content:space-between;font-size:13px;color:#e8f4fd">'+
+      '<span>Attended</span><span><b style="color:'+(a.pct>=80?'#2ecc71':a.pct>=50?'var(--gold)':'#e74c3c')+'">'+a.attended+'</b> of '+a.invited+
+      ' <span style="color:var(--white-dim)">('+a.pct+'%)</span></span></div></div>';
 }
 function aosAdherenceHTML(trIn){
   var w=aosAdherence(trIn,7), m=aosAdherence(trIn,30);
@@ -8880,6 +9133,22 @@ function aosDivisionRead(){
   } else next=out[out.length-1];
   return {rows:out,measured:measured,confidence:confidence,level:level,next:next};
 }
+/* A benchmark cleared in 7th grade is a different fact from the same
+   number in 11th. The read says which. */
+var AOS_GRADE_ORDER=['7th','8th','9th (Freshman)','10th (Sophomore)','11th (Junior)','12th (Senior)'];
+function aosGradePaceHTML(levelName){
+  var g=(typeof profile!=='undefined'&&profile&&profile.grade)||'';
+  var idx=AOS_GRADE_ORDER.indexOf(g);
+  if(idx<0||!levelName) return '';
+  /* Roughly: clearing a level before 10th grade is ahead of pace,
+     in 10th–11th is on pace, and in 12th is late to be starting. */
+  var word,col;
+  if(idx<=1){ word='well ahead of pace'; col='#2ecc71'; }
+  else if(idx<=3){ word='ahead of pace'; col='#2ecc71'; }
+  else if(idx===4){ word='on pace'; col='var(--gold)'; }
+  else { word='late in the window \u2014 coaches are deciding now'; col='#f39c12'; }
+  return '<div style="font-size:12px;color:'+col+';margin:6px 0">Clearing '+escH(levelName)+' in '+escH(g)+' grade is '+word+'.</div>';
+}
 function aosDivisionReadHTML(){
   var r=aosDivisionRead();
   if(!r.measured) return '<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">Where your numbers put you</div>'+
@@ -8893,7 +9162,8 @@ function aosDivisionReadHTML(){
   if(r.level){
     h+='<div style="font-size:15px;color:#e8f4fd;margin-bottom:8px">Your numbers clear <b style="color:#2ecc71">'+escH(r.level.name)+
       '</b> ('+r.level.cleared+' of '+r.level.measured+')'+
-      (r.next?'. Next up is <b style="color:var(--gold)">'+escH(r.next.name)+'</b> at '+r.next.cleared+' of '+r.next.measured+'.':'.')+'</div>';
+      (r.next?'. Next up is <b style="color:var(--gold)">'+escH(r.next.name)+'</b> at '+r.next.cleared+' of '+r.next.measured+'.':'.')+'</div>'+
+      aosGradePaceHTML(r.level.name);
   } else {
     h+='<div style="font-size:14px;color:#e8f4fd;margin-bottom:8px">Not clearing a level yet \u2014 closest is '+
       escH(r.next?r.next.name:'NAIA')+' at '+(r.next?r.next.cleared+' of '+r.next.measured:'0')+'.</div>';
@@ -9036,7 +9306,19 @@ function renderRecord(){
   html+=aosDivisionReadHTML();
   html+=aosPathHTML();
   html+=aosAdherenceHTML(training);
+  html+=aosAttendanceHTML(scheduledEvents,(window.AOS_USER||{}).userId);
   html+=aosSelfComparisonHTML();
+  /* Best, typical range, growth and where each came from. */
+  var _phys=(typeof metricsPhysical!=='undefined')?metricsPhysical:{};
+  var _ctxRows=(typeof BENCHMARKS!=='undefined')?BENCHMARKS.map(function(bm){
+    var st=aosReadingStats(_phys[bm.key]||[],null,bm.hb===false);
+    return st?aosReadingSummaryHTML((bm.m||bm.key),st,bm.u||''):'';
+  }).filter(Boolean):[];
+  if(_ctxRows.length){
+    html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">Physical numbers</div>'+
+      '<div style="font-size:11px;color:var(--white-dim);margin-bottom:6px">Best, your typical range, and how far you\u2019ve moved. One reading is never the whole picture.</div>'+
+      _ctxRows.join('')+'</div>';
+  }
   if(pbs.length){
     html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Personal bests</div>'+
       pbs.slice(0,20).map(function(b){
@@ -9045,7 +9327,9 @@ function renderRecord(){
           '<div style="font-size:10px;color:var(--white-dim)">'+escH(b.sport+' \u00B7 '+b.group)+'</div></div>'+
           '<div style="text-align:right"><div style="font-size:15px;font-weight:800;color:var(--gold)">'+escH(String(b.value))+'</div>'+
           '<div style="font-size:10px;color:var(--white-dim)">'+_recFmtDate(b.date)+'</div>'+
-          (aosTrendChipHTML(b.trend)?'<div>'+aosTrendChipHTML(b.trend)+'</div>':'')+'</div></div>';
+          (aosTrendChipHTML(b.trend)?'<div>'+aosTrendChipHTML(b.trend)+'</div>':'')+
+          '<button class="btn btn-sm" onclick="aosSharePB(\''+escH(b.label).replace(/'/g,"")+'\',\''+escH(String(b.value))+'\')" style="font-size:10px;margin-top:3px">Share</button>'+
+          '</div></div>';
       }).join('')+'</div>';
   } else {
     html+='<div class="card" style="font-size:12px;color:var(--white-dim)">Log a few metrics and your personal bests will appear here.</div>';
@@ -9913,6 +10197,7 @@ function renderCoach(){
     html+='<input id="coach-ev-date" type="date" style="flex:1;padding:9px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px">';
     html+='<input id="coach-ev-start" type="time" title="Start" style="flex:1;padding:9px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px">';
     html+='<input id="coach-ev-end" type="time" title="End" style="flex:1;padding:9px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px">';
+    html+='<input id="coach-ev-loc" placeholder="Where" style="flex:2;padding:9px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px">';
     html+='</div>';
     html+='<select id="coach-ev-type" style="width:100%;padding:9px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px;margin-bottom:8px">';
     html+='<option value="practice">Practice</option><option value="game">Game</option><option value="eval">Evaluation</option><option value="milestone">Milestone</option><option value="event">Event</option>';
@@ -10159,6 +10444,7 @@ window.addCoachSeasonEvent=function(){
   var title=document.getElementById('coach-ev-title').value.trim();
   var date=document.getElementById('coach-ev-date').value;
   var evStart=(document.getElementById('coach-ev-start')||{}).value||'';
+  var evLoc=((document.getElementById('coach-ev-loc')||{}).value||'').trim();
   var evEnd=(document.getElementById('coach-ev-end')||{}).value||'';
   var type=document.getElementById('coach-ev-type').value;
   if(!title||!date){showToast('Enter a title and date.');return;}
@@ -10175,11 +10461,11 @@ window.addCoachSeasonEvent=function(){
       var rid=uid();
       dates.forEach(function(d){
         evs.push({id:uid(),recurringId:rid,coachId:u.userId,coachName:u.name||'Coach',title:title,date:d,
-          start:evStart,end:evEnd,allDay:!evStart,type:type,days:days,createdAt:Date.now()});
+          start:evStart,end:evEnd,allDay:!evStart,location:evLoc,type:type,days:days,createdAt:Date.now()});
       });
     } else {
       evs.push({id:uid(),coachId:u.userId,coachName:u.name||'Coach',title:title,date:date,
-        start:evStart,end:evEnd,allDay:!evStart,type:type,createdAt:Date.now()});
+        start:evStart,end:evEnd,allDay:!evStart,location:evLoc,type:type,createdAt:Date.now()});
     }
     return AppSDK.setItem('aos_season_events',evs);
   }).then(function(){
@@ -10508,6 +10794,7 @@ function aosParentMetricsHTML(prof,custom,phys,batting,pitching){
     h+='<div class="form-row" style="margin-top:6px">'+
       '<div class="form-group"><label>Metric</label><select id="pm-key">'+BENCHMARKS.map(function(bm){
          return '<option value="'+escH(bm.key)+'">'+escH(bm.m||bm.key)+(bm.u?' ('+escH(bm.u)+')':'')+'</option>';}).join('')+'</select></div>'+
+      aosContextFieldsHTML('pm')+
       '<div class="form-group"><label>Value</label><input type="number" step="0.01" id="pm-val"></div></div>'+
       '<button class="btn btn-sm" id="pm-save" style="font-size:11px">+ Log physical metric</button>'+
       '<div id="pm-msg" style="font-size:11px;margin-top:6px;min-height:14px"></div></div>';
@@ -11090,6 +11377,402 @@ function aosParentEffortHTML(cmp){
   return h+'<div style="font-size:10px;color:var(--white-dim);margin-top:6px">Averages only \u2014 no other athlete is named.</div></div>';
 }
 
+/* ══════════════════════════════════════════════════════════════════
+   PARENT NOTES — the parent's own record, and nobody else's.
+
+   Free-standing: not attached to the athlete, not part of their record,
+   not in their export. A parent needs somewhere to put "the club never
+   tested her between December and April" without it landing in their
+   kid's feed. Stored in the parent's own private data, which only they
+   can read.
+   ══════════════════════════════════════════════════════════════════ */
+var parentNotes=[];
+var AOS_NOTE_TAGS=['General','Club','Coach','Trainer','Money','Health','Recruiting','Decision'];
+window.aosAddParentNote=function(){
+  var text=(safeVal('pn-text')||'').trim();
+  if(!text){ showToast('Write something first.'); return; }
+  parentNotes.unshift({id:'pn_'+Date.now().toString(36),text:text,tag:safeVal('pn-tag')||'General',
+    date:safeVal('pn-date')||todayStr(),ts:Date.now()});
+  saveItem('sb_parent_notes',parentNotes);
+  var t=safeGet('pn-text'); if(t) t.value='';
+  showToast('Noted \u2014 only you can see this.');
+  renderParentNotes();
+};
+window.aosDeleteParentNote=function(id){
+  var gone=parentNotes.find(function(n){ return n.id===id; });
+  parentNotes=parentNotes.filter(function(n){ return n.id!==id; });
+  saveItem('sb_parent_notes',parentNotes);
+  renderParentNotes();
+  aosUndoBar('Note deleted.',function(){
+    if(gone){ parentNotes.unshift(gone); parentNotes.sort(function(a,b){return b.ts-a.ts;}); }
+    return Promise.resolve(saveItem('sb_parent_notes',parentNotes)).then(renderParentNotes);
+  });
+};
+function renderParentNotes(){
+  var el=safeGet('sec-notes'); if(!el) return;
+  var filter=window._pnFilter||'';
+  var list=filter?parentNotes.filter(function(n){ return n.tag===filter; }):parentNotes;
+  var html='<div class="section-title">\uD83D\uDCDD My Notes</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin:-6px 0 12px">Private to you. Not on your athlete\u2019s record, not in their export, not visible to any coach or club.</div>'+
+    '<div class="card">'+
+      '<textarea id="pn-text" rows="3" placeholder="What happened, what was said, what you noticed\u2026" style="width:100%;padding:10px;border-radius:10px;border:1px solid #334;background:#0A1A2F;color:#e8f4fd;font-size:13px"></textarea>'+
+      '<div class="form-row" style="margin-top:8px">'+
+        '<div class="form-group"><label>Tag</label><select id="pn-tag">'+
+          AOS_NOTE_TAGS.map(function(t){ return '<option>'+t+'</option>'; }).join('')+'</select></div>'+
+        '<div class="form-group"><label>Date</label><input type="date" id="pn-date" value="'+todayStr()+'"></div>'+
+      '</div>'+
+      '<button class="btn btn-primary btn-full btn-sm" onclick="aosAddParentNote()">Save note</button>'+
+    '</div>';
+  if(parentNotes.length){
+    html+='<div class="tab-pills" style="margin:12px 0">'+
+      '<button class="tab-pill'+(filter?'':' active')+'" onclick="window._pnFilter=\'\';renderParentNotes()">All</button>'+
+      AOS_NOTE_TAGS.filter(function(t){ return parentNotes.some(function(n){ return n.tag===t; }); })
+        .map(function(t){ return '<button class="tab-pill'+(filter===t?' active':'')+'" onclick="window._pnFilter=\''+t+'\';renderParentNotes()">'+t+'</button>'; }).join('')+
+      '</div>';
+  }
+  if(!list.length){
+    html+='<div class="card" style="font-size:12px;color:var(--white-dim)">'+
+      (parentNotes.length?'Nothing tagged that way yet.':'No notes yet. Things worth writing down: what a coach said, what you saw at a game, what you paid for and what it bought.')+'</div>';
+  }
+  list.forEach(function(n){
+    html+='<div class="card card-sm" style="margin-bottom:8px">'+
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">'+
+        '<span style="font-size:10px;color:var(--gold);text-transform:uppercase;letter-spacing:.6px">'+escH(n.tag)+' \u00B7 '+escH(n.date)+'</span>'+
+        '<button class="btn btn-sm" onclick="aosDeleteParentNote(\''+n.id+'\')" style="font-size:10px">Delete</button>'+
+      '</div>'+
+      '<div style="font-size:13px;color:#e8f4fd;line-height:1.6;white-space:pre-wrap">'+escH(n.text)+'</div></div>';
+  });
+  el.innerHTML=html;
+}
+
+/* ── The feed, and who can see you ───────────────────────────────── */
+function renderFeed(){
+  var el=safeGet('sec-feed'); if(!el) return;
+  var u=window.AOS_USER||{};
+  var pending=myFollowers.filter(function(f){ return f.status==='pending'; });
+  var active=myFollowers.filter(function(f){ return f.status==='active'; });
+  var html='<div class="section-title">\uD83D\uDCE1 Feed</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin:-6px 0 12px">What the people you follow have posted. Following is one-way and read-only \u2014 messages stay with your connected accounts.</div>';
+  /* say something, on purpose */
+  html+='<div class="card">'+
+    '<textarea id="fd-text" rows="2" placeholder="Post an update to your followers\u2026" style="width:100%;padding:10px;border-radius:10px;border:1px solid #334;background:#0A1A2F;color:#e8f4fd;font-size:13px"></textarea>'+
+    '<div style="display:flex;gap:8px;margin-top:8px;align-items:center">'+
+      '<button class="btn btn-primary btn-sm" onclick="aosPostFromFeed()" style="font-size:12px">Post</button>'+
+      '<span style="font-size:10px;color:var(--white-dim)">'+active.length+' follower'+(active.length===1?'':'s')+'</span>'+
+    '</div></div>';
+  if(pending.length){
+    html+='<div class="card" style="border-color:rgba(243,156,18,0.5)">'+
+      '<div style="font-weight:700;font-size:13px;color:#f39c12;margin-bottom:6px">Wants to follow you</div>'+
+      pending.map(function(f){
+        return '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+          '<span style="font-size:13px;color:#e8f4fd">'+escH(f.followerName||'Someone')+'</span>'+
+          '<span style="display:flex;gap:6px">'+
+            '<button class="btn btn-sm" onclick="aosAnswerFollower(\''+f.followerId+'\',true,renderFeed)" style="font-size:11px;background:rgba(46,204,113,0.15);border:1px solid var(--green);color:var(--green)">Allow</button>'+
+            '<button class="btn btn-sm" onclick="aosAnswerFollower(\''+f.followerId+'\',false,renderFeed)" style="font-size:11px">No</button>'+
+          '</span></div>';
+      }).join('')+'</div>';
+  }
+  if(!feedPosts.length){
+    html+='<div class="card" style="font-size:12px;color:var(--white-dim)">Nothing yet. Follow a teammate, a coach or your club and their posts land here.</div>';
+  }
+  feedPosts.slice(0,40).forEach(function(p){
+    var mine=p.authorId===u.userId;
+    html+='<div class="card card-sm" style="margin-bottom:8px">'+
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">'+
+        '<span style="font-size:12px;font-weight:700;color:#00E0FF">'+escH(p.authorName||'Athlete')+
+          '<span style="color:var(--white-dim);font-weight:400"> \u00B7 '+escH(p.authorRole||'')+'</span></span>'+
+        (mine?'<button class="btn btn-sm" onclick="aosDeletePost(\''+p.id+'\')" style="font-size:10px">Delete</button>':'')+
+      '</div>'+
+      (p.metric?'<div style="font-size:15px;font-weight:800;color:var(--gold)">'+escH(p.metric)+': '+escH(String(p.value))+'</div>':'')+
+      (p.text?'<div style="font-size:13px;color:#e8f4fd;line-height:1.6">'+escH(p.text)+'</div>':'')+
+      '<div style="font-size:10px;color:var(--white-dim);margin-top:4px">'+escH(aosDateKey(new Date(p.createdAt||Date.now())))+'</div>'+
+    '</div>';
+  });
+  if(active.length){
+    html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:6px">Who follows you</div>'+
+      active.map(function(f){
+        return '<div style="display:flex;justify-content:space-between;padding:5px 0;font-size:12px;color:#e8f4fd">'+
+          '<span>'+escH(f.followerName||'Someone')+'</span>'+
+          '<button class="btn btn-sm" onclick="aosAnswerFollower(\''+f.followerId+'\',false,renderFeed)" style="font-size:10px">Remove</button></div>';
+      }).join('')+'</div>';
+  }
+  if(myFollows.length){
+    html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:6px">You follow</div>'+
+      myFollows.map(function(f){
+        return '<div style="display:flex;justify-content:space-between;padding:5px 0;font-size:12px;color:#e8f4fd">'+
+          '<span>'+escH(f.targetName||'Account')+(f.status==='pending'?'<span style="color:var(--warning);font-size:10px"> \u00B7 waiting</span>':'')+'</span>'+
+          '<button class="btn btn-sm" onclick="aosUnfollow(\''+f.targetId+'\',renderFeed)" style="font-size:10px">Unfollow</button></div>';
+      }).join('')+'</div>';
+  }
+  el.innerHTML=html;
+}
+window.aosPostFromFeed=function(){
+  var t=(safeVal('fd-text')||'').trim();
+  if(!t){ showToast('Write something first.'); return; }
+  aosCreatePost({kind:'update',text:t},function(p){ if(p){ var b=safeGet('fd-text'); if(b) b.value=''; renderFeed(); } });
+};
+/* Share a best from the record — one at a time, never automatic. */
+window.aosSharePB=function(label,value){
+  aosCreatePost({kind:'pb',metric:label,value:value,text:''},function(p){ if(p) showToast('Shared with your followers.'); });
+};
+function aosFollowButtonHTML(targetId,acc){
+  var u=window.AOS_USER||{};
+  if(!targetId||targetId===u.userId) return '';
+  var st=aosFollowableState(acc);
+  if(!st.ok) return '';
+  var mine=myFollows.find(function(f){ return f.targetId===targetId; });
+  if(mine) return '<button class="btn btn-sm" onclick="aosUnfollow(\''+targetId+'\',function(){_aosRerenderStaff&&_aosRerenderStaff();})" style="font-size:11px">'+
+    (mine.status==='pending'?'Requested':'Following')+'</button>';
+  return '<button class="btn btn-sm" onclick="aosFollow(\''+targetId+'\')" style="font-size:11px">+ Follow</button>';
+}
+/* A parent sees what their athlete has posted, and who follows them. */
+function aosParentFeedHTML(childId,childName,posts,followers){
+  var h='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:6px">'+escH(childName||'Their')+' posts and followers</div>';
+  if(!posts.length) h+='<div style="font-size:12px;color:var(--white-dim)">Nothing posted.</div>';
+  posts.slice(0,10).forEach(function(p){
+    h+='<div style="padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.06);font-size:12px;color:#e8f4fd">'+
+      (p.metric?escH(p.metric)+': '+escH(String(p.value))+' \u00B7 ':'')+escH(p.text||'')+
+      '<span style="font-size:10px;color:var(--white-dim)"> \u00B7 '+escH(aosDateKey(new Date(p.createdAt||Date.now())))+'</span></div>';
+  });
+  h+='<div style="font-size:11px;color:var(--white-dim);margin-top:8px">'+followers.length+' follower'+(followers.length===1?'':'s')+
+     (followers.length?': '+escH(followers.map(function(f){return f.followerName||'someone';}).join(', ')):'')+'</div>';
+  return h+'</div>';
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   INJURY AND RETURN TO PLAY
+
+   Soreness on a check-in vanishes into the day. An injury is a period:
+   it starts, it limits something, it ends, and how long it took is a
+   fact worth keeping. Health information about a minor, so it lives in
+   the athlete's own private data: their linked staff and parents see
+   it because they need to, and nobody else can.
+   ══════════════════════════════════════════════════════════════════ */
+var injuries=[];
+var AOS_BODY_PARTS=['Shoulder','Elbow','Wrist/Hand','Back','Hip','Groin','Knee','Ankle','Foot','Head/Concussion','Other'];
+var AOS_INJ_STATUS=[['out','Out'],['limited','Limited'],['returning','Returning'],['cleared','Cleared']];
+window.aosLogInjury=function(){
+  var part=safeVal('inj-part'), note=(safeVal('inj-note')||'').trim();
+  if(!part){ showToast('Pick where it is.'); return; }
+  injuries.unshift({id:'inj_'+Date.now().toString(36),part:part,status:safeVal('inj-status')||'limited',
+    started:safeVal('inj-date')||todayStr(), note:note, cleared:'', updates:[], ts:Date.now()});
+  saveItem('sb_injuries',injuries);
+  var n=safeGet('inj-note'); if(n) n.value='';
+  showToast('Logged. Your coaches and parents can see this.');
+  renderInjuries();
+};
+window.aosUpdateInjury=function(id,status){
+  var inj=injuries.find(function(x){ return x.id===id; });
+  if(!inj) return;
+  inj.updates=inj.updates||[];
+  inj.updates.push({status:status,date:todayStr()});
+  inj.status=status;
+  if(status==='cleared'&&!inj.cleared) inj.cleared=todayStr();
+  if(status!=='cleared') inj.cleared='';
+  saveItem('sb_injuries',injuries);
+  renderInjuries();
+};
+function aosDaysBetween(a,b){
+  if(!a||!b) return null;
+  return Math.max(0,Math.round((new Date(b+'T12:00:00')-new Date(a+'T12:00:00'))/86400000));
+}
+function aosInjuryLineHTML(inj){
+  var col={out:'#e74c3c',limited:'#f39c12',returning:'#00E0FF',cleared:'#2ecc71'}[inj.status]||'#8899aa';
+  var days=inj.cleared?aosDaysBetween(inj.started,inj.cleared):aosDaysBetween(inj.started,todayStr());
+  return '<div style="padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+    '<div style="display:flex;justify-content:space-between">'+
+      '<span style="font-size:13px;color:#e8f4fd">'+escH(inj.part)+'</span>'+
+      '<span style="font-size:12px;font-weight:700;color:'+col+'">'+escH((AOS_INJ_STATUS.find(function(s){return s[0]===inj.status;})||['','?'])[1])+'</span></div>'+
+    '<div style="font-size:11px;color:var(--white-dim)">'+escH(inj.started)+
+      (inj.cleared?(' \u2013 '+escH(inj.cleared)+' \u00B7 '+days+' days'):(' \u00B7 day '+days))+
+      (inj.note?' \u00B7 '+escH(inj.note):'')+'</div>';
+}
+function renderInjuries(){
+  var el=safeGet('sec-injury'); if(!el) return;
+  var open=injuries.filter(function(i){ return i.status!=='cleared'; });
+  var past=injuries.filter(function(i){ return i.status==='cleared'; });
+  var html='<div class="section-title">\uD83E\uDE79 Injuries</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin:-6px 0 12px">Kept so you know how long things took and what came back. Your linked coaches, trainers and parents can see this \u2014 nobody else.</div>'+
+    '<div class="card">'+
+      '<div class="form-row">'+
+        '<div class="form-group"><label>Where</label><select id="inj-part">'+AOS_BODY_PARTS.map(function(x){return '<option>'+x+'</option>';}).join('')+'</select></div>'+
+        '<div class="form-group"><label>Status</label><select id="inj-status">'+AOS_INJ_STATUS.map(function(x){return '<option value="'+x[0]+'">'+x[1]+'</option>';}).join('')+'</select></div>'+
+      '</div>'+
+      '<div class="form-row">'+
+        '<div class="form-group"><label>Started</label><input type="date" id="inj-date" value="'+todayStr()+'"></div>'+
+        '<div class="form-group"><label>Note</label><input id="inj-note" placeholder="What happened"></div>'+
+      '</div>'+
+      '<button class="btn btn-primary btn-full btn-sm" onclick="aosLogInjury()">Log it</button></div>';
+  if(open.length){
+    html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:6px">Now</div>';
+    open.forEach(function(inj){
+      html+=aosInjuryLineHTML(inj)+
+        '<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">'+
+          AOS_INJ_STATUS.map(function(st){
+            return '<button class="btn btn-sm" onclick="aosUpdateInjury(\''+inj.id+'\',\''+st[0]+'\')" style="font-size:11px'+
+              (inj.status===st[0]?';background:rgba(0,224,255,0.15);border:1px solid #00E0FF;color:#00E0FF':'')+'">'+st[1]+'</button>';
+          }).join('')+'</div></div>';
+    });
+    html+='</div>';
+  }
+  if(past.length){
+    html+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:6px">Recovered</div>'+
+      past.map(function(inj){ return aosInjuryLineHTML(inj)+'</div>'; }).join('')+'</div>';
+  }
+  if(!injuries.length) html+='<div class="card" style="font-size:12px;color:var(--white-dim)">Nothing logged. That is the idea.</div>';
+  el.innerHTML=html;
+}
+/* What staff and parents see: current status and how long. */
+function aosInjurySummaryHTML(list,name){
+  var open=(list||[]).filter(function(i){ return i.status!=='cleared'; });
+  if(!open.length) return '';
+  return '<div class="card" style="border-color:rgba(231,76,60,0.4)">'+
+    '<div style="font-weight:700;font-size:13px;color:#e74c3c;margin-bottom:6px">'+escH(name||'Currently')+' carrying something</div>'+
+    open.map(function(i){ return aosInjuryLineHTML(i)+'</div>'; }).join('')+'</div>';
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   SECOND PARENT, COST AND LOGISTICS
+
+   A household is rarely one adult. Two parents can be linked to the
+   same athlete, each with their own account, each seeing the same
+   record — which matters most in the households where it is hardest.
+
+   Cost is the biggest number in a sporting family's life and the one
+   thing no club platform shows them. Logged by either parent, totalled
+   by season and by category, and set against the hours it bought.
+
+   Logistics is the rest of the job: who is driving, where it is, when
+   to leave.
+   ══════════════════════════════════════════════════════════════════ */
+var athleteCosts=[];
+var AOS_COST_CATS=['Club dues','Private training','Travel','Tournament fees','Equipment','Uniforms','Camps/Showcases','Other'];
+window.aosAddCost=function(childId,cb){
+  var amt=parseFloat(safeVal('ct-amt'));
+  if(isNaN(amt)||amt<=0){ showToast('Enter an amount.'); return; }
+  athleteCosts.unshift({id:'ct_'+Date.now().toString(36),childId:childId||'',
+    cat:safeVal('ct-cat')||'Other', amount:Math.round(amt*100)/100,
+    note:(safeVal('ct-note')||'').trim(), date:safeVal('ct-date')||todayStr(),
+    payer:(window.AOS_USER||{}).name||'', ts:Date.now()});
+  saveItem('sb_costs',athleteCosts);
+  var a=safeGet('ct-amt'); if(a) a.value='';
+  showToast('Logged.');
+  if(cb) cb();
+};
+window.aosDeleteCost=function(id,cb){
+  var gone=athleteCosts.find(function(c){ return c.id===id; });
+  athleteCosts=athleteCosts.filter(function(c){ return c.id!==id; });
+  saveItem('sb_costs',athleteCosts);
+  aosUndoBar('Cost removed.',function(){
+    if(gone) athleteCosts.unshift(gone);
+    return Promise.resolve(saveItem('sb_costs',athleteCosts)).then(function(){ if(cb) cb(); });
+  });
+  if(cb) cb();
+};
+function aosCostTotals(list,sinceDays){
+  var from=sinceDays?aosDayOffset(sinceDays):'';
+  var rows=(list||[]).filter(function(c){ return !from||c.date>=from; });
+  var total=rows.reduce(function(a,c){ return a+(Number(c.amount)||0); },0);
+  var byCat={};
+  rows.forEach(function(c){ byCat[c.cat]=(byCat[c.cat]||0)+(Number(c.amount)||0); });
+  return {total:Math.round(total),rows:rows,
+    byCat:Object.keys(byCat).map(function(k){ return {cat:k,amount:Math.round(byCat[k])}; })
+      .sort(function(a,b){ return b.amount-a.amount; })};
+}
+function aosCostHTML(childId,childName,hoursTrained,sessions){
+  var t=aosCostTotals(athleteCosts.filter(function(c){ return !c.childId||c.childId===childId; }),365);
+  var perHour=(hoursTrained>0)?Math.round(t.total/hoursTrained):null;
+  var perSession=(sessions>0)?Math.round(t.total/sessions):null;
+  var h='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">What this is costing</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin-bottom:8px">Last 12 months, whatever you\u2019ve entered. Private to you \u2014 no club or coach sees this.</div>';
+  if(t.total){
+    h+='<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">'+
+      '<span style="font-size:24px;font-weight:800;color:var(--gold)">$'+t.total.toLocaleString()+'</span>'+
+      '<span style="font-size:11px;color:var(--white-dim)">'+
+        (perHour!==null?'$'+perHour+' per hour trained':'')+
+        (perSession!==null?' \u00B7 $'+perSession+' per session':'')+'</span></div>';
+    var max=Math.max.apply(null,t.byCat.map(function(c){return c.amount;}).concat([1]));
+    h+=t.byCat.map(function(c){
+      return '<div style="padding:4px 0">'+
+        '<div style="display:flex;justify-content:space-between;font-size:12px;color:#e8f4fd">'+
+          '<span>'+escH(c.cat)+'</span><span>$'+c.amount.toLocaleString()+'</span></div>'+
+        '<div style="height:5px;border-radius:3px;background:rgba(255,255,255,0.1);margin-top:3px">'+
+          '<div style="height:100%;width:'+Math.round(c.amount/max*100)+'%;border-radius:3px;background:var(--gold)"></div></div></div>';
+    }).join('');
+  } else {
+    h+='<div style="font-size:12px;color:var(--white-dim)">Nothing logged yet. Dues, lessons, travel, gear \u2014 it adds up faster than anyone admits.</div>';
+  }
+  h+='<div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.08)">'+
+    '<div class="form-row">'+
+      '<div class="form-group"><label>Amount ($)</label><input type="number" id="ct-amt" step="0.01"></div>'+
+      '<div class="form-group"><label>What for</label><select id="ct-cat">'+
+        AOS_COST_CATS.map(function(c){ return '<option>'+c+'</option>'; }).join('')+'</select></div></div>'+
+    '<div class="form-row">'+
+      '<div class="form-group"><label>Date</label><input type="date" id="ct-date" value="'+todayStr()+'"></div>'+
+      '<div class="form-group"><label>Note</label><input id="ct-note" placeholder="Optional"></div></div>'+
+    '<button class="btn btn-sm btn-full" onclick="aosAddCost(\''+escH(childId||'')+'\',renderParentChildHome)">Add cost</button></div>';
+  if(t.rows.length){
+    h+='<div style="margin-top:10px">'+t.rows.slice(0,8).map(function(c){
+      return '<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:11px;color:var(--white-dim)">'+
+        '<span>'+escH(c.date)+' \u00B7 '+escH(c.cat)+(c.note?' \u00B7 '+escH(c.note):'')+'</span>'+
+        '<span>$'+Math.round(c.amount).toLocaleString()+
+        ' <button class="btn btn-sm" onclick="aosDeleteCost(\''+c.id+'\',renderParentChildHome)" style="font-size:9px">\u00D7</button></span></div>';
+    }).join('')+'</div>';
+  }
+  return h+'</div>';
+}
+/* ── Logistics ───────────────────────────────────────────────────── */
+window.aosSetRide=function(eventId,athleteId,who,cb){
+  var ev=scheduledEvents.find(function(e){ return e.id===eventId; });
+  if(!ev) return;
+  var next=Object.assign({},ev.responses||{});
+  var cur=next[athleteId]||{status:'in'};
+  next[athleteId]=Object.assign({},cur,{ride:who,rideBy:(window.AOS_USER||{}).name||'',rideAt:Date.now()});
+  fbDb.collection('scheduledEvents').doc(eventId).update({responses:next,updatedAt:Date.now()})
+    .then(function(){ ev.responses=next; showToast(who?('Ride: '+who):'Ride cleared.'); if(cb) cb(); })
+    .catch(function(e){ console.warn('AOS ride failed',e); });
+};
+function aosLogisticsHTML(events,athleteIds,names){
+  var soon=(events||[]).filter(function(ev){
+    if(ev.cancelled) return false;
+    return ev.date>=todayStr()&&ev.date<=aosDayOffset(-7);
+  });
+  if(!soon.length) return '';
+  return '<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">Getting there</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin-bottom:6px">Who\u2019s driving, and where it is.</div>'+
+    soon.slice(0,8).map(function(ev){
+      var aid=athleteIds[0];
+      var r=(ev.responses||{})[aid]||{};
+      var maps=ev.location?('https://maps.google.com/?q='+encodeURIComponent(ev.location)):'';
+      return '<div style="padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+        '<div style="display:flex;justify-content:space-between;gap:8px">'+
+          '<div><div style="font-size:12px;color:#e8f4fd">'+escH(ev.title)+'</div>'+
+          '<div style="font-size:10px;color:var(--white-dim)">'+escH(ev.date)+' \u00B7 '+escH(aosEventTimeLabel(ev))+
+            (ev.location?' \u00B7 '+escH(ev.location):'')+'</div></div>'+
+          (maps?'<a href="'+maps+'" target="_blank" rel="noopener" class="btn btn-sm" style="font-size:10px;flex-shrink:0;text-decoration:none">Directions</a>':'')+
+        '</div>'+
+        '<div style="display:flex;gap:6px;margin-top:5px;align-items:center;flex-wrap:wrap">'+
+          '<span style="font-size:10px;color:var(--white-dim)">Ride:</span>'+
+          ['Me','Other parent','Carpool','They drive'].map(function(w){
+            return '<button class="btn btn-sm" onclick="aosSetRide(\''+ev.id+'\',\''+aid+'\',\''+w+'\',renderParentChildHome)" '+
+              'style="font-size:10px'+(r.ride===w?';background:rgba(0,224,255,0.15);border:1px solid #00E0FF;color:#00E0FF':'')+'">'+w+'</button>';
+          }).join('')+
+          (r.ride&&r.rideBy?'<span style="font-size:10px;color:var(--white-dim)">set by '+escH(r.rideBy)+'</span>':'')+
+        '</div></div>';
+    }).join('')+'</div>';
+}
+/* ── Second parent ───────────────────────────────────────────────── */
+function aosParentsOfChildHTML(g,childId){
+  var others=(aosParentsOf(g,childId)||[]).filter(function(pid){ return pid!==(window.AOS_USER||{}).userId; });
+  var me=(window.AOS_USER||{}).userId;
+  return '<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">Who else is on this account</div>'+
+    (others.length
+      ? '<div style="font-size:12px;color:#e8f4fd">'+escH(others.map(function(pid){ return aosNameOf(g,pid); }).join(', '))+
+        '</div><div style="font-size:11px;color:var(--white-dim);margin-top:4px">They see the same record and can answer for your athlete.</div>'
+      : '<div style="font-size:12px;color:var(--white-dim)">Just you. A second parent or guardian can link with your athlete\u2019s AOS ID \u2014 they get the same view, and both of you can answer for them.</div>')+
+    '</div>';
+}
+
 /* ── Parent view of an athlete ──────────────────────────────────────
    A linked parent can open their child's Home screen — today's check-in,
    training, hydration, streak, goals and next event — and edit the
@@ -11135,7 +11818,7 @@ function renderParentChildHome(){
     aosChildData(cid,'sb_seasons'), aosChildData(cid,'sb_self_skills'),
     aosChildData(cid,'sb_nutrition_log'), aosChildData(cid,'sb_nutrition_goals'),
     aosChildData(cid,'sb_suggestions'), aosMyMessages((window.AOS_USER||{}).userId),
-    aosChildData(cid,'sb_tasks'),
+    aosChildData(cid,'sb_tasks'), aosChildData(cid,'sb_injuries'),
     AppSDK.getItem('aos_local_accounts'), AppSDK.getItem('aos_player_links'),
     AppSDK.getItem('aos_dev_skills'), AppSDK.getItem('aos_dev_plans'),
     AppSDK.getItem('aos_dev_focus'), AppSDK.getItem('aos_season_events'),
@@ -11146,9 +11829,9 @@ function renderParentChildHome(){
     var custom=r[6]||{}, phys=r[7]||{}, batting=r[8]||[], pitching=r[9]||[];
     var seasons=r[10]||[], selfS=r[11]||{};
     var nutLog=r[12]||{}, nutGoals=r[13]||{}, suggestions=r[14]||[], myMsgs=r[15]||[];
-    var childTasks=r[16]||[], accs=r[17]||{}, plinks=r[18]||{}, devSkills=r[19]||{}, devPlans=r[20]||{},
-        devFocus=r[21]||{}, seasonEvents=r[22]||[], challenges=r[23]||[], roster=r[24]||{},
-        assignedTasks=r[25]||[], gamedayNotes=r[26]||{};
+    var childTasks=r[16]||[], childInjuries=r[17]||[], accs=r[18]||{}, plinks=r[19]||{}, devSkills=r[20]||{},
+        devPlans=r[21]||{}, devFocus=r[22]||{}, seasonEvents=r[23]||[], challenges=r[24]||[], roster=r[25]||{},
+        assignedTasks=r[26]||[], gamedayNotes=r[27]||{};
     var td=(typeof getTodayKey==='function')?getTodayKey():aosDateKey();
     var today=rec[td]||{};
     var water=((hyd[td]||{entries:[]}).entries||[]).reduce(function(s,e){return s+(e.oz||0);},0);
@@ -11216,14 +11899,29 @@ function renderParentChildHome(){
           gamedayNote:(function(){ var n=''; _staffIds.forEach(function(sid){ if(gamedayNotes[sid]) n=gamedayNotes[sid].note||gamedayNotes[sid]; }); return n; })()})+
         aosParentAnalyticsHTML({training:tr,recovery:rec})+
         aosAdherenceHTML(tr)+
+        aosInjurySummaryHTML(childInjuries,cname)+
+        aosLogisticsHTML(scheduledEvents,[cid],{})+
         aosParentTasksHTML(childTasks,assignedTasks.filter(function(t){ return t.toPlayerId===cid; }))+
         aosParentEffortHTML(_cmp);
     } else if(tab==='assist'){
-      html=aosParentSuggestionsHTML(suggestions,cname)+
+      var _cs2=aosCareerStatsFrom(rec,tr,goals);
+      html=aosCostHTML(cid,cname,_cs2.hours,_cs2.sessions)+
+        aosParentSuggestionsHTML(suggestions,cname)+
         aosParentNutritionHTML(nutLog,nutGoals)+
         aosParentMetricsHTML(prof,custom,phys,batting,pitching);
     } else if(tab==='team'){
-      html=aosParentTeamHTML({childId:cid,staff:_staff,teammates:_teammates,teamReadiness:_teamReadiness,
+      /* Other parents on this athlete, from the links we already loaded. */
+      var _otherParents=Object.keys(_childLinks).filter(function(k){
+        return (_childLinks[k]||{}).linkerRole==='parent'&&k!==(window.AOS_USER||{}).userId;
+      }).map(function(k){ return (accs[k]||{}).name||_childLinks[k].linkerName||'Parent'; });
+      html='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">Who else is on this account</div>'+
+        (_otherParents.length
+          ? '<div style="font-size:12px;color:#e8f4fd">'+escH(_otherParents.join(', '))+'</div>'+
+            '<div style="font-size:11px;color:var(--white-dim);margin-top:4px">They see the same record and can answer for your athlete.</div>'
+          : '<div style="font-size:12px;color:var(--white-dim)">Just you. A second parent or guardian can link with your athlete\u2019s AOS ID \u2014 same view, and either of you can answer for them.</div>')+
+        '</div>'+
+        aosInjurySummaryHTML(childInjuries,cname)+
+        aosParentTeamHTML({childId:cid,staff:_staff,teammates:_teammates,teamReadiness:_teamReadiness,
         events:_myEvents,challenges:_myChallenges,skills:_skills,selfSkills:selfS,devPlan:_plan,focus:_focus});
     }
     if(tab==='record'||tab==='data'){
@@ -13011,6 +13709,7 @@ var AOS_AUTH = {
         orgCode: finalOrgCode,
         dob:     dob,
         ageMode: ageMode,
+        followPolicy: ageMode==='youth'?'none':(ageMode==='teen'?'approve':'open'),
         roles: [role],
         niUser:  true
       };
