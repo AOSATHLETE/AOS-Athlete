@@ -858,6 +858,274 @@ function _writeMsgKey(key,uid,arr){
   return Promise.all(ops).then(function(){}).catch(function(e){ console.warn('AOS message write failed',key,e); });
 }
 /* ── End messaging ── */
+/* ── What's on this week, where people actually look ──────────────── */
+function aosWeekStripHTML(events,athleteIds,names){
+  var w=aosWeekAhead(events,athleteIds,7);
+  if(!w.booked.length&&!w.open.length&&!w.unanswered.length) return '';
+  var who=function(aid){ return (athleteIds.length>1&&names&&names[aid])?(' \u00B7 '+escH(names[aid])):''; };
+  var row=function(item,action){
+    var ev=item.ev;
+    return '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+      '<div><div style="font-size:12px;color:#e8f4fd">'+escH(ev.title)+who(item.aid)+'</div>'+
+      '<div style="font-size:10px;color:var(--white-dim)">'+escH(ev.date)+' \u00B7 '+escH(aosEventTimeLabel(ev))+
+        (ev.location?' \u00B7 '+escH(ev.location):'')+' \u00B7 '+escH(ev.hostName||'')+'</div></div>'+
+      (action||'')+'</div>';
+  };
+  var h='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:6px">This week</div>';
+  if(w.unanswered.length){
+    h+='<div style="font-size:11px;color:#f39c12;margin:4px 0">Needs an answer</div>';
+    w.unanswered.forEach(function(i){
+      h+=row(i,'<div style="display:flex;gap:4px;flex-shrink:0">'+
+        '<button class="btn btn-sm" onclick="aosRespondEvent(\''+i.ev.id+'\',\''+i.aid+'\',\'in\',aosRefreshEventViews)" style="font-size:11px;background:rgba(46,204,113,0.15);border:1px solid var(--green);color:var(--green)">Going</button>'+
+        '<button class="btn btn-sm" onclick="aosRespondEvent(\''+i.ev.id+'\',\''+i.aid+'\',\'out\',aosRefreshEventViews)" style="font-size:11px">Can\'t</button></div>');
+    });
+  }
+  if(w.open.length){
+    h+='<div style="font-size:11px;color:#00E0FF;margin:8px 0 4px">Open to sign up</div>';
+    w.open.forEach(function(i){
+      var full=i.ev.capacity&&aosEventCount(i.ev,'in')>=i.ev.capacity;
+      h+=row(i,full?'<span style="font-size:11px;color:var(--white-dim);flex-shrink:0">Full</span>'
+        :'<button class="btn btn-sm" onclick="aosRespondEvent(\''+i.ev.id+'\',\''+i.aid+'\',\'in\',aosRefreshEventViews)" style="font-size:11px;flex-shrink:0">Sign up</button>');
+    });
+  }
+  if(w.booked.length){
+    h+='<div style="font-size:11px;color:#2ecc71;margin:8px 0 4px">Booked</div>';
+    w.booked.forEach(function(i){
+      var r=(i.ev.responses||{})[i.aid]||{};
+      h+=row(i,'<div style="text-align:right;flex-shrink:0">'+
+        '<div style="font-size:11px;color:#2ecc71">\u2713 in</div>'+
+        (r.onBehalf?'<div style="font-size:9px;color:var(--white-dim)">by '+escH(r.byName||'parent')+'</div>':'')+
+        '<button class="btn btn-sm" onclick="aosRespondEvent(\''+i.ev.id+'\',\''+i.aid+'\',\'out\',aosRefreshEventViews)" style="font-size:10px;margin-top:2px">Cancel</button></div>');
+    });
+  }
+  return h+'</div>';
+}
+window.aosBindStaffEvents=function(){
+  var b=document.getElementById('se-new');
+  if(b) b.onclick=function(){ aosOpenEventForm(window._staffTeam||''); };
+};
+window.aosRefreshEventViews=function(){
+  ['home','calendar','parent','team'].forEach(function(sec){
+    var el=document.getElementById('sec-'+sec);
+    if(el&&el.classList.contains('active')){
+      var fn={home:'renderHome',calendar:'renderCalendar',parent:'renderParent',team:'renderTeam'}[sec];
+      if(typeof window[fn]==='function') window[fn]();
+    }
+  });
+};
+/* Everything on one day: club, coach, trainer and their own entries. */
+function aosDayEventsHTML(dateKey,athleteIds,names){
+  var rows=[];
+  (scheduledEvents||[]).forEach(function(ev){
+    if(ev.cancelled||ev.date!==dateKey) return;
+    athleteIds.forEach(function(aid){
+      rows.push({ev:ev,aid:aid,status:aosEventStatusFor(ev,aid)});
+    });
+  });
+  if(!rows.length) return '';
+  return rows.map(function(r){
+    var col=r.status==='in'?'#2ecc71':r.status==='out'?'#8899aa':r.ev.kind==='signup'?'#00E0FF':'var(--gold)';
+    var label=r.status==='in'?'\u2713 in':r.status==='out'?'not going':r.ev.kind==='signup'?'open':'needs answer';
+    return '<div style="display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+      '<div><div style="font-size:12px;color:#e8f4fd">'+escH(r.ev.title)+
+        (athleteIds.length>1&&names&&names[r.aid]?' \u00B7 '+escH(names[r.aid]):'')+'</div>'+
+      '<div style="font-size:10px;color:var(--white-dim)">'+escH(aosEventTimeLabel(r.ev))+
+        (r.ev.location?' \u00B7 '+escH(r.ev.location):'')+' \u00B7 '+escH(r.ev.hostName||'')+'</div></div>'+
+      '<div style="text-align:right;flex-shrink:0"><div style="font-size:11px;color:'+col+'">'+label+'</div>'+
+      (r.status==='in'?'':'<button class="btn btn-sm" onclick="aosRespondEvent(\''+r.ev.id+'\',\''+r.aid+'\',\'in\',aosRefreshEventViews)" style="font-size:10px;margin-top:2px">'+
+        (r.ev.kind==='signup'?'Sign up':'Going')+'</button>')+'</div></div>';
+  }).join('');
+}
+/* The staff side: post one, see who answered. */
+function aosStaffEventsHTML(teamId){
+  var u=window.AOS_USER||{};
+  var mine=(scheduledEvents||[]).filter(function(ev){ return ev.hostId===u.userId&&!ev.cancelled; });
+  var h='<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'+
+    '<div style="font-weight:700;font-size:13px">Schedule</div>'+
+    '<button class="btn btn-sm" id="se-new" style="font-size:11px">+ Post a session</button></div>'+
+    '<div id="se-form" style="display:none;margin-bottom:10px"></div>';
+  if(!mine.length){
+    h+='<div style="font-size:11px;color:var(--white-dim)">Post practice, a game or an open session. It lands on every athlete\u2019s calendar and their parents\u2019 \u2014 they answer, you see who\u2019s coming.</div>';
+  }
+  mine.slice(0,12).forEach(function(ev){
+    var inN=aosEventCount(ev,'in'), outN=aosEventCount(ev,'out');
+    var total=(ev.viewers||[]).length;
+    h+='<div style="padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+      '<div style="display:flex;justify-content:space-between;gap:8px">'+
+        '<div><div style="font-size:13px;color:#e8f4fd">'+escH(ev.title)+
+          '<span style="font-size:10px;color:var(--white-dim)"> \u00B7 '+(ev.kind==='signup'?'sign-up':'attendance')+'</span></div>'+
+        '<div style="font-size:11px;color:var(--white-dim)">'+escH(ev.date)+' \u00B7 '+escH(aosEventTimeLabel(ev))+
+          (ev.location?' \u00B7 '+escH(ev.location):'')+'</div></div>'+
+        '<div style="text-align:right;flex-shrink:0">'+
+          '<div style="font-size:12px;color:#2ecc71">'+inN+' in</div>'+
+          '<div style="font-size:10px;color:var(--white-dim)">'+outN+' out'+
+            (ev.capacity?(' \u00B7 cap '+ev.capacity):'')+'</div>'+
+          '<button class="btn btn-sm" onclick="aosCancelEvent(\''+ev.id+'\',aosRefreshEventViews)" style="font-size:10px;margin-top:3px">Cancel</button>'+
+        '</div></div></div>';
+  });
+  return h+'</div>';
+}
+window.aosOpenEventForm=function(teamId){
+  var box=document.getElementById('se-form'); if(!box) return;
+  if(box.style.display==='block'){ box.style.display='none'; return; }
+  box.innerHTML='<div class="form-group"><label>What is it?</label><input id="se-title" placeholder="Team practice"></div>'+
+    '<div class="form-row"><div class="form-group"><label>Date</label><input type="date" id="se-date" value="'+todayStr()+'"></div>'+
+    '<div class="form-group"><label>Type</label><select id="se-type"><option>Practice</option><option>Game</option><option>Training</option><option>Lesson</option><option>Tournament</option><option>Other</option></select></div></div>'+
+    '<div class="form-row"><div class="form-group"><label>Start</label><input type="time" id="se-start" value="17:00"></div>'+
+    '<div class="form-group"><label>End</label><input type="time" id="se-end" value="19:00"></div></div>'+
+    '<div class="form-group"><label>Where</label><input id="se-loc" placeholder="Dome, field 2"></div>'+
+    '<div class="form-row"><div class="form-group"><label>Who answers how?</label><select id="se-kind">'+
+      '<option value="attendance">Everyone expected \u2014 going / can\'t</option>'+
+      '<option value="signup">Optional \u2014 sign up</option></select></div>'+
+    '<div class="form-group"><label>Cap (0 = none)</label><input type="number" id="se-cap" value="0"></div></div>'+
+    '<button class="btn btn-primary btn-full btn-sm" id="se-save">Post it</button>';
+  box.style.display='block';
+  document.getElementById('se-save').onclick=function(){
+    var t=safeVal('se-title').trim();
+    if(!t){ showToast('Give it a name.'); return; }
+    aosCreateEvent({kind:safeVal('se-kind'),title:t,date:safeVal('se-date'),start:safeVal('se-start'),
+      end:safeVal('se-end'),location:safeVal('se-loc'),type:safeVal('se-type'),
+      capacity:safeVal('se-cap'),teamId:teamId||window._staffTeam||''},function(){
+      box.style.display='none'; aosRefreshEventViews();
+    });
+  };
+};
+/* ══════════════════════════════════════════════════════════════════
+   SCHEDULED EVENTS — one event, seen from every side.
+
+   Practice, org training, a trainer's session and a game were three
+   different stores that never lined up: an athlete had to go looking,
+   a parent found out afterwards, and cancelling left stale copies in
+   everyone's calendar.
+
+   Now staff post one document. It carries its audience from the
+   connection graph, and every response hangs off the event itself, so
+   the athlete's calendar, the parent's week and the coach's roll-up
+   are three views of the same row. Cancel it once and it's gone
+   everywhere.
+
+   Two kinds:
+     signup     — optional, opt in (org training, trainer sessions)
+     attendance — expected, say yes or no (practice, games)
+   Either the athlete or their parent may answer, and the record keeps
+   which of them did.
+   ══════════════════════════════════════════════════════════════════ */
+var scheduledEvents=[];
+function _evId(){ return 'ev_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6); }
+function aosEventTimeLabel(ev){
+  if(!ev) return '';
+  if(ev.allDay||!ev.start) return 'All day';
+  var fmt=function(hhmm){
+    var p=String(hhmm).split(':'); var h=parseInt(p[0],10); if(isNaN(h)) return hhmm;
+    var m=p[1]||'00', ap=h>=12?'PM':'AM'; var hr=h%12; if(!hr) hr=12;
+    return hr+':'+m+' '+ap;
+  };
+  return fmt(ev.start)+(ev.end?'\u2013'+fmt(ev.end):'');
+}
+/* Who this event reaches, from the links that already exist. */
+function aosEventAudience(g,me,role,teamId){
+  var out=[me];
+  if(role==='org'){
+    out=out.concat(aosOrgAll(g,me));
+  } else if(role==='coach'||role==='trainer'){
+    out=out.concat(aosTeam(g,me));
+  }
+  if(teamId&&typeof aosTeamAthletes==='function'){
+    var t=aosTeamAthletes(g,teamId)||[];
+    t.forEach(function(a){ out.push(a); aosParentsOf(g,a).forEach(function(p){ out.push(p); }); });
+  }
+  return _aosUniq(out);
+}
+window.aosCreateEvent=function(fields,cb){
+  var u=window.AOS_USER||{};
+  aosLoadGraph().then(function(g){
+    var ev={
+      id:_evId(), kind:fields.kind||'attendance', title:(fields.title||'Session').trim(),
+      date:fields.date||todayStr(), start:fields.start||'', end:fields.end||'',
+      allDay:!fields.start, location:fields.location||'', notes:fields.notes||'',
+      type:fields.type||'Practice', capacity:Number(fields.capacity)||0,
+      teamId:fields.teamId||'', hostId:u.userId, hostName:u.name||'', hostRole:u.role||'',
+      createdAt:Date.now(), cancelled:false,
+      viewers:aosEventAudience(g,u.userId,u.role||'coach',fields.teamId),
+      responses:{}
+    };
+    return fbDb.collection('scheduledEvents').doc(ev.id).set(ev).then(function(){
+      scheduledEvents.unshift(ev);
+      showToast(ev.kind==='signup'?'Posted \u2014 athletes can sign up.':'Posted to the team.');
+      if(cb) cb(ev);
+    });
+  }).catch(function(e){ console.warn('AOS event create failed',e); showToast('Could not post.'); });
+};
+/* One response record, whoever makes it. */
+window.aosRespondEvent=function(eventId,athleteId,status,cb){
+  var u=window.AOS_USER||{};
+  var ev=scheduledEvents.find(function(x){ return x.id===eventId; });
+  if(!ev) return;
+  var onBehalf=(u.userId!==athleteId);
+  /* Write the whole responses map rather than a dotted path: the rules
+     allow a change to `responses`, and a path key reads as a different
+     field entirely. */
+  var next=Object.assign({},ev.responses||{});
+  next[athleteId]={status:status,by:u.userId,byName:u.name||'',onBehalf:onBehalf,at:Date.now()};
+  fbDb.collection('scheduledEvents').doc(eventId).update({responses:next,updatedAt:Date.now()}).then(function(){
+    ev.responses=next;
+    showToast(status==='in'?'You\u2019re in.':status==='out'?'Marked not attending.':'Saved.');
+    if(cb) cb(ev);
+  }).catch(function(e){ console.warn('AOS respond failed',e); showToast('Could not save that.'); });
+};
+window.aosCancelEvent=function(eventId,cb){
+  fbDb.collection('scheduledEvents').doc(eventId).update({cancelled:true,cancelledAt:Date.now()})
+    .then(function(){
+      var ev=scheduledEvents.find(function(x){ return x.id===eventId; });
+      if(ev) ev.cancelled=true;
+      aosUndoBar('Event cancelled.',function(){
+        return fbDb.collection('scheduledEvents').doc(eventId).update({cancelled:false})
+          .then(function(){ if(ev) ev.cancelled=false; if(cb) cb(); });
+      });
+      if(cb) cb();
+    }).catch(function(e){ console.warn('AOS cancel failed',e); showToast('Could not cancel.'); });
+};
+function aosLoadEvents(){
+  var u=window.AOS_USER||{};
+  if(!u.userId) return Promise.resolve([]);
+  return fbDb.collection('scheduledEvents').where('viewers','array-contains',u.userId).get()
+    .then(function(snap){
+      var out=[];
+      snap.forEach(function(d){ out.push(d.data()); });
+      out.sort(function(a,b){ return (a.date+(a.start||'')).localeCompare(b.date+(b.start||'')); });
+      scheduledEvents=out;
+      return out;
+    }).catch(function(e){ console.warn('AOS event load failed',e); return []; });
+}
+/* Which athletes this viewer answers for: themselves, or their children. */
+function aosMyAthletes(g){
+  var u=window.AOS_USER||{};
+  if(u.role==='parent') return aosChildrenOf(g,u.userId);
+  return [u.userId];
+}
+function aosEventStatusFor(ev,athleteId){
+  return ((ev.responses||{})[athleteId]||{}).status||'';
+}
+function aosEventCount(ev,status){
+  return Object.keys(ev.responses||{}).filter(function(k){ return ev.responses[k].status===status; }).length;
+}
+/* What's on, what's open, what needs an answer. */
+function aosWeekAhead(events,athleteIds,days){
+  days=days||7;
+  var today=todayStr();
+  var until=aosDayOffset(-days);
+  var booked=[], open=[], unanswered=[];
+  (events||[]).forEach(function(ev){
+    if(ev.cancelled||ev.date<today||ev.date>until) return;
+    athleteIds.forEach(function(aid){
+      var st=aosEventStatusFor(ev,aid);
+      if(st==='in') booked.push({ev:ev,aid:aid});
+      else if(ev.kind==='signup') open.push({ev:ev,aid:aid});
+      else if(!st) unanswered.push({ev:ev,aid:aid});
+    });
+  });
+  return {booked:booked,open:open,unanswered:unanswered};
+}
 /* ══════════════════════════════════════════════════════════════════
    AUDIENCE LISTS — challenges, polls, season events and the coach's
    communications log. Each was a single shared document, filtered on
@@ -1496,7 +1764,7 @@ window.aosAnswerSuggestion=function(id,accept){
     var rid=uid();
     recurringSessions.push({id:rid,activity:sg.activity,secondary:'',focus:sg.focus||'',
       duration:sg.duration||30,intensity:5,notes:'Suggested by '+(sg.fromName||'a parent'),
-      freq:sg.repeat==='daily'?'daily':'weekly',days:[new Date(sg.date).getDay()],startDate:sg.date});
+      freq:sg.repeat==='daily'?'daily':'weekly',days:[new Date(sg.date+'T12:00:00').getDay()],startDate:sg.date});
     saveItem('sb_recurring_sessions',recurringSessions);
     aosSyncRecurring(0).then(after);
   } else {
@@ -1531,11 +1799,11 @@ function aosSyncRecurring(daysBack){
   var added=false;
   for(var d=daysBack;d>=0;d--){
     var dt=new Date(Date.now()-d*86400000);
-    var key=dt.toISOString().slice(0,10), dow=dt.getDay();
+    var key=aosDateKey(dt), dow=dt.getDay();
     recurringSessions.forEach(function(rs){
       /* A routine can't have happened before it existed. Without this the
          backfill invented weeks of history on a days-old account. */
-      var from=rs.startDate||(rs.createdAt?new Date(rs.createdAt).toISOString().slice(0,10):null);
+      var from=rs.startDate||(rs.createdAt?aosDateKey(new Date(rs.createdAt)):null);
       if(from&&key<from) return;
       if(!from) return;   /* unknown start: only today, handled below */
       var matches=(rs.freq==='daily')||
@@ -1565,7 +1833,7 @@ window.aosCleanRecurring=function(){
       if(!s.recurringId||s.done) { if(s.recurringId) kept++; return true; }
       var rs=(recurringSessions||[]).find(function(r){ return r.id===s.recurringId; });
       if(!rs) { removed++; return false; }                       /* routine is gone */
-      var from=rs.startDate||(rs.createdAt?new Date(rs.createdAt).toISOString().slice(0,10):null);
+      var from=rs.startDate||(rs.createdAt?aosDateKey(new Date(rs.createdAt)):null);
       if(from&&day<from) { removed++; return false; }            /* before it existed */
       var ok=(rs.freq==='daily')||(rs.freq==='weekly'&&Array.isArray(rs.days)&&rs.days.indexOf(dow)>-1);
       if(!ok) { removed++; return false; }                       /* not a day it runs */
@@ -1834,7 +2102,7 @@ function _writeScopedList(key,uid,val){
    and every demo starts clean. Pick a role on the sign-in screen.
    ══════════════════════════════════════════════════════════════════ */
 var AOS_DEMO=false, _demoStore={}, _demoUsers={};
-function _demoDate(offset){ return new Date(Date.now()-(offset||0)*86400000).toISOString().slice(0,10); }
+function _demoDate(offset){ return aosDayOffset(offset||0); }
 function aosBuildDemoData(){
   var org={userId:'demo_org',name:'Northside Fastpitch',role:'org',roles:['org'],email:'org@demo.aos',orgCode:'AOS-DEMO-ORG'};
   var coach={userId:'demo_coach',name:'Coach Rivera',role:'coach',roles:['coach'],email:'coach@demo.aos',coachCode:'AOS-DEMO-COACH',sport:'Softball'};
@@ -2713,12 +2981,102 @@ function expandRecurringDates(startDate, dayCodes, untilDate, maxCount){
   var end=new Date(untilDate+'T00:00:00');
   if(isNaN(cur.getTime())||isNaN(end.getTime())||end<cur) return out;
   while(cur<=end && out.length<maxCount){
-    if(wanted[cur.getDay()]) out.push(cur.toISOString().slice(0,10));
+    if(wanted[cur.getDay()]) out.push(aosDateKey(cur));
     cur.setDate(cur.getDate()+1);
   }
   return out;
 }
-function todayStr(){return new Date().toISOString().slice(0,10)}
+/* ── What day is it? ───────────────────────────────────────────────
+   This used to be UTC, so anything logged after 7pm Central landed on
+   tomorrow. Days are now counted in the person's own time zone: their
+   chosen one if they set it, otherwise the device's. */
+function aosZone(){
+  try{
+    return (typeof profile!=='undefined'&&profile&&profile.timezone)||
+           (window.AOS_USER&&window.AOS_USER.timezone)||
+           Intl.DateTimeFormat().resolvedOptions().timeZone||'';
+  }catch(e){ return ''; }
+}
+function aosDateKey(d){
+  d=d||new Date();
+  var zone=aosZone();
+  if(zone){
+    try{
+      var f=new Intl.DateTimeFormat('en-CA',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit'});
+      return f.format(d);            /* en-CA gives YYYY-MM-DD */
+    }catch(e){ /* fall through to the device's own date */ }
+  }
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function aosDayOffset(n){ return aosDateKey(new Date(Date.now()-(n||0)*86400000)); }
+var AOS_ZONES=[
+  ['America/New_York','Eastern'],['America/Chicago','Central'],['America/Denver','Mountain'],
+  ['America/Phoenix','Arizona'],['America/Los_Angeles','Pacific'],['America/Anchorage','Alaska'],
+  ['Pacific/Honolulu','Hawaii'],['America/Toronto','Toronto'],['America/Vancouver','Vancouver'],
+  ['Europe/London','London'],['Australia/Sydney','Sydney']
+];
+window.aosSetTimezone=function(tz){
+  profile.timezone=tz||'';
+  saveItem('sb_profile',profile);
+  showToast(tz?('Days now roll at midnight '+tz.split('/').pop().replace(/_/g,' ')):'Using this device\u2019s time zone.');
+  aosScheduleMidnightRoll();
+  if(typeof renderProfile==='function') renderProfile();
+};
+function aosTimezoneCardHTML(){
+  var cur=(typeof profile!=='undefined'&&profile&&profile.timezone)||'';
+  var device='';
+  try{ device=Intl.DateTimeFormat().resolvedOptions().timeZone||''; }catch(e){}
+  return '<div class="card card-sm" style="margin-bottom:12px">'+
+    '<div style="font-weight:700;font-size:12px;margin-bottom:6px;text-transform:uppercase;letter-spacing:.8px;color:var(--gold)">Time zone</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin-bottom:8px">Your day starts and ends here. Anything you log at 9pm belongs to today, not tomorrow.</div>'+
+    '<select onchange="aosSetTimezone(this.value)">'+
+      '<option value=""'+(cur?'':' selected')+'>This device'+(device?' ('+escH(device.split('/').pop().replace(/_/g,' '))+')':'')+'</option>'+
+      AOS_ZONES.map(function(z){ return '<option value="'+escH(z[0])+'"'+(cur===z[0]?' selected':'')+'>'+escH(z[1])+'</option>'; }).join('')+
+    '</select>'+
+    '<div style="font-size:10px;color:var(--white-dim);margin-top:6px">Today is '+escH(todayStr())+' for you.</div></div>';
+}
+/* ── The day rolls at midnight ─────────────────────────────────────
+   Left open overnight, the app used to keep yesterday on screen until
+   someone reloaded: a stale check-in, a streak that hadn't moved, last
+   night's sessions still listed as today. Now it turns over on its own. */
+var _midnightTimer=null;
+function aosScheduleMidnightRoll(){
+  if(_midnightTimer) clearTimeout(_midnightTimer);
+  var now=new Date();
+  var next=new Date(now.getTime()+24*3600000);
+  var ms;
+  try{
+    /* Midnight in their zone, found by asking what time it is there. */
+    var parts=new Intl.DateTimeFormat('en-GB',{timeZone:aosZone()||undefined,hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).formatToParts(now);
+    var get=function(t){ return parseInt((parts.find(function(p){return p.type===t;})||{}).value,10)||0; };
+    var secsIn=get('hour')*3600+get('minute')*60+get('second');
+    ms=(86400-secsIn)*1000+2000;
+  }catch(e){ ms=next.setHours(0,0,5,0)-now.getTime(); }
+  if(!(ms>0)) ms=60000;
+  window._aosDayKey=todayStr();
+  _midnightTimer=setTimeout(function(){ aosRollDay(); aosScheduleMidnightRoll(); }, Math.min(ms,6*3600000));
+}
+function aosRollDay(){
+  var key=todayStr();
+  if(key===window._aosDayKey){ return; }   /* not midnight yet, just a long day */
+  window._aosDayKey=key;
+  /* Bring the new day in: recurring sessions, events, and whatever is
+     on screen. Nothing is written that the athlete didn't ask for. */
+  if(typeof aosSyncRecurring==='function') aosSyncRecurring(1);
+  if(typeof aosLoadEvents==='function') aosLoadEvents();
+  var active=document.querySelector('.section.active');
+  var id=active?active.id.replace('sec-',''):'';
+  var fn={home:'renderHome',training:'renderTraining',calendar:'renderCalendar',
+          recovery:'renderRecovery',gameday:'renderGameday',parent:'renderParent',
+          record:'renderRecord',team:'renderTeam'}[id];
+  if(fn&&typeof window[fn]==='function') window[fn]();
+  showToast('New day \u2014 '+key);
+}
+/* A phone that slept through midnight wakes to the right day. */
+document.addEventListener('visibilitychange',function(){
+  if(!document.hidden && window._aosDayKey && todayStr()!==window._aosDayKey) aosRollDay();
+});
+function todayStr(){ return aosDateKey(); }
 function fmt(n,d){d=d||3;return isNaN(n)?'.'+('0'.repeat(d)):Number(n).toFixed(d)}
 function safeGet(id){return document.getElementById(id)}
 function safeVal(id){var el=safeGet(id);return el?el.value:''}
@@ -3063,7 +3421,7 @@ function confirmDeleteChildData(){
 // ── Data helpers ──────────────────────────────────────────────
 function getDateRange(days){
   var out=[];
-  for(var i=days-1;i>=0;i--){var d=new Date();d.setDate(d.getDate()-i);out.push(d.toISOString().slice(0,10));}
+  for(var i=days-1;i>=0;i--){var d=new Date();d.setDate(d.getDate()-i);out.push(aosDateKey(d));}
   return out;
 }
 function buildAthleteStats(days){
@@ -4141,6 +4499,8 @@ async function initApp(){
     window._athHistory=await AppSDK.getItem('aos_athlete_history')||{};
     seasonSnapshots=await AppSDK.getItem('sb_seasons')||[];
     recruitPath=await AppSDK.getItem('sb_recruit_path')||{};
+    await aosLoadEvents();
+    aosScheduleMidnightRoll();
     trainingSuggestions=await AppSDK.getItem('sb_suggestions')||[];
     window._chatSeen=await AppSDK.getItem('sb_chat_seen')||0;
     /* Re-address anything I created to whoever is on the team now. */
@@ -4619,7 +4979,7 @@ function renderHome(){
   // Streak
   var streak=0;
   var d=new Date();
-  while(true){var ds=d.toISOString().slice(0,10);if(training[ds]&&training[ds].length>0){streak++}else{break}d.setDate(d.getDate()-1)}
+  while(true){var ds=aosDateKey(d);if(training[ds]&&training[ds].length>0){streak++}else{break}d.setDate(d.getDate()-1)}
   var quote=QUOTES[now.getDay()];
   el.innerHTML='<div style="margin-bottom:16px"><div style="font-size:22px;font-weight:800;color:var(--gold)">'+greeting+', '+playerName+' 👋</div><div style="font-size:12px;color:var(--white-dim);margin-top:2px">'+dateStr+'</div></div>'+
   '<div class="stat-grid"><div class="stat-card"><div class="stat-value">'+hydOz+'<span style="font-size:12px;color:var(--white-dim)">/'+hydGoal+'oz</span></div><div class="stat-label">💧 Hydration</div></div>'+
@@ -4671,6 +5031,27 @@ function renderHome(){
   '<footer style="text-align:center;padding:20px 0;font-size:10px;color:var(--white-dim)">AOS · BUILT TO PERFORM.</footer>';
   var wb=safeGet('home-water');if(wb)wb.addEventListener('click',function(){addWater(8);renderHome()});
   var tb=safeGet('home-timer');if(tb)tb.addEventListener('click',function(){navigateTo('timer')});
+  /* What's on this week — booked, open, and waiting on an answer.
+     Events may still be loading on a fresh sign-in, so fetch once and
+     redraw rather than showing nothing. */
+  if(!window._evLoaded){
+    window._evLoaded=true;
+    aosLoadEvents().then(function(list){ if(list&&list.length) renderHome(); });
+  }
+  var _ws=aosWeekStripHTML(scheduledEvents,[(window.AOS_USER||{}).userId]);
+  if(_ws){
+    var _host=safeGet('sec-home');
+    if(_host){
+      var _bar=document.getElementById('home-week');
+      if(!_bar){
+        _bar=document.createElement('div'); _bar.id='home-week';
+        var _anchor=_host.querySelector('.stat-grid');
+        if(_anchor&&_anchor.parentNode) _anchor.parentNode.insertBefore(_bar,_anchor.nextSibling);
+        else _host.insertBefore(_bar,_host.firstChild);
+      }
+      _bar.innerHTML=_ws;
+    }
+  }
   var trb=safeGet('home-train');if(trb)trb.addEventListener('click',function(){navigateTo('training')});
   // Quick Access grid listeners
   el.querySelectorAll('.home-nav-btn').forEach(function(btn){
@@ -4786,6 +5167,7 @@ function renderGamedayHubForStaff(){
 
     html+='</div>';
     el.innerHTML=html;
+    if(typeof aosBindStaffEvents==="function") aosBindStaffEvents();
   });
 }
 
@@ -4984,6 +5366,7 @@ function renderTrainingHubForStaff(){
 
     html+='</div>';
     el.innerHTML=html;
+    if(typeof aosBindStaffEvents==="function") aosBindStaffEvents();
   });
 }
 
@@ -5011,7 +5394,7 @@ function renderTrainingHistory(){
 function renderTrainingInsights(){
   var c=safeGet('training-content');if(!c)return;
   var now=new Date();var days7=[];
-  for(var i=6;i>=0;i--){var d=new Date(now);d.setDate(d.getDate()-i);days7.push(d.toISOString().slice(0,10))}
+  for(var i=6;i>=0;i--){var d=new Date(now);d.setDate(d.getDate()-i);days7.push(aosDateKey(d))}
   var maxM=1;
   var barData=days7.map(function(ds){var sessions=training[ds]||[];var mins=sessions.reduce(function(s,x){return s+(parseInt(x.duration)||0)},0);if(mins>maxM)maxM=mins;return{day:ds.slice(5),mins:mins}});
   var barHTML='<div class="mini-bars">';
@@ -5182,7 +5565,7 @@ function openChallengeBuilder(existingChs){
 
   // Set default end date to 7 days from now
   var def=new Date();def.setDate(def.getDate()+7);
-  var defStr=def.toISOString().slice(0,10);
+  var defStr=aosDateKey(def);
   document.getElementById('ch-end').value=defStr;
 
   // Close handlers
@@ -5504,7 +5887,7 @@ function renderTeam(){
   })();
   var TI={name:profile.teamName||_defaultTeamName,motto:profile.teamMotto||'Every day is a chance to get better.',season:profile.teamSeason||_defaultSeason,emoji:profile.teamEmoji||'&#9918;',color:profile.teamColor||'#00E0FF'};
   // "Me" entry — always real, built from the athlete's own profile/recovery data
-  var meEntry={name:me, pos:profile.primaryPos||profile.position||'P', unit:profile.teamUnit||posToUnit(profile.position||'P'), j:parseInt(profile.jersey||profile.jerseyNum)||0, s:'Active', tag:profile.tagline||'Here to compete', str:profile.streak||0, r:(function(){try{var _td=window.getTodayKey?window.getTodayKey():(new Date()).toISOString().slice(0,10);if(recovery&&recovery[_td]&&recovery[_td].readiness!==undefined)return Number(recovery[_td].readiness);}catch(e){}return profile.readiness||6;})(), isMe:true};
+  var meEntry={name:me, pos:profile.primaryPos||profile.position||'P', unit:profile.teamUnit||posToUnit(profile.position||'P'), j:parseInt(profile.jersey||profile.jerseyNum)||0, s:'Active', tag:profile.tagline||'Here to compete', str:profile.streak||0, r:(function(){try{var _td=todayStr();if(recovery&&recovery[_td]&&recovery[_td].readiness!==undefined)return Number(recovery[_td].readiness);}catch(e){}return profile.readiness||6;})(), isMe:true};
   // Roster starts as just the athlete themself — no fabricated teammates.
   // Real teammates (from aos_team_roster, populated by actual linking) get
   // merged in below when they exist.
@@ -5555,7 +5938,7 @@ function renderTeam(){
         (function(){
           var active=ROSTER.filter(function(p){return p.s==='Active';});
           var avg=active.length?Math.round(active.reduce(function(s,p){return s+p.r;},0)/active.length):0;
-          var myR=(function(){try{var _td=window.getTodayKey?window.getTodayKey():(new Date()).toISOString().slice(0,10);if(recovery&&recovery[_td]&&recovery[_td].readiness!==undefined)return Number(recovery[_td].readiness);}catch(e){}return profile.readiness||6;})();
+          var myR=(function(){try{var _td=todayStr();if(recovery&&recovery[_td]&&recovery[_td].readiness!==undefined)return Number(recovery[_td].readiness);}catch(e){}return profile.readiness||6;})();
           var teamC=avg>=8?'#2ecc71':avg>=6?'#f39c12':'#e74c3c';
           var myC=myR>=8?'#2ecc71':myR>=6?'#f39c12':'#e74c3c';
           return '<div style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.2);border-radius:10px;padding:10px;text-align:center">'+
@@ -6332,6 +6715,7 @@ function renderTeamHubForStaff(){
 
     html+='</div></div>';
     el.innerHTML=html;
+    if(typeof aosBindStaffEvents==="function") aosBindStaffEvents();
   });
 }
 
@@ -7467,7 +7851,7 @@ function renderRecovery(){
   methHTML+='</div>';
   var histHTML='';
   for(var d=6;d>=0;d--){
-    var dt=new Date();dt.setDate(dt.getDate()-d);var ds=dt.toISOString().slice(0,10);
+    var dt=new Date();dt.setDate(dt.getDate()-d);var ds=aosDateKey(dt);
     var r=recovery[ds];
     if(r){histHTML+='<div style="display:flex;justify-content:space-between;font-size:11px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05)"><span>'+ds.slice(5)+'</span><span>\uD83D\uDCA4'+r.sleep+'h \u26A1'+(r.energy||'-')+' '+(r.mood||'—')+' ✅'+(r.readiness||0)+'/10</span></div>';}
   }
@@ -7656,7 +8040,7 @@ function checkHydrationDayReset(){
   var td=todayStr();
   if(!hydration[td]){
     var _yd=new Date();_yd.setDate(_yd.getDate()-1);
-    var _yds=_yd.toISOString().slice(0,10);
+    var _yds=aosDateKey(_yd);
     hydration[td]={entries:[],goal:(hydration[_yds]||{}).goal||64,resetDate:td};
     saveItem('sb_hydration',hydration);
   }
@@ -7689,7 +8073,7 @@ function renderHydration(){
   var lastStr=lastE?Math.round((Date.now()-lastE.time)/60000)+' min ago':'—';
   // 7-day bars
   var barHTML='<div class="mini-bars">';var maxOz=goal;
-  for(var d=6;d>=0;d--){var dt=new Date();dt.setDate(dt.getDate()-d);var ds=dt.toISOString().slice(0,10);var dh=hydration[ds]||{entries:[]};var dOz=dh.entries.reduce(function(s,e){return s+e.oz},0);if(dOz>maxOz)maxOz=dOz;
+  for(var d=6;d>=0;d--){var dt=new Date();dt.setDate(dt.getDate()-d);var ds=aosDateKey(dt);var dh=hydration[ds]||{entries:[]};var dOz=dh.entries.reduce(function(s,e){return s+e.oz},0);if(dOz>maxOz)maxOz=dOz;
   barHTML+='<div class="mini-bar-col"><div class="mini-bar-val">'+dOz+'</div><div class="mini-bar-fill" style="height:'+Math.max(3,Math.round(dOz/maxOz*60))+'px;background:'+(dOz>=goal?'var(--green)':'var(--gold)')+'"></div><div class="mini-bar-lbl">'+ds.slice(5)+'</div></div>'}
   barHTML+='</div>';
   el.innerHTML='<div class="section-title">💧 Hydration</div>'+
@@ -7714,6 +8098,23 @@ function renderHydration(){
 
 /* ========== CALENDAR ========== */
 function renderCalendar(){
+  /* A parent answers for their athletes; everyone else for themselves. */
+  (function(){
+    var u=window.AOS_USER||{};
+    if(u.role!=='parent'){ window._calAthletes=[u.userId]; return; }
+    /* Look the children up once. Retrying whenever the list came back
+       empty — a parent with no linked athlete — re-entered this render
+       forever and took the page down with it. */
+    if(window._calKidsFor===u.userId) return;
+    window._calKidsFor=u.userId;
+    aosLoadGraph().then(function(g){
+      window._calAthletes=aosChildrenOf(g,u.userId)||[];
+      window._calAthleteNames={};
+      (window._calAthletes||[]).forEach(function(k){ window._calAthleteNames[k]=aosNameOf(g,k); });
+      var sec=document.getElementById('sec-calendar');
+      if(window._calAthletes.length&&sec&&sec.classList.contains('active')) renderCalendar();
+    }).catch(function(){});
+  })();
   var el=safeGet('sec-calendar');if(!el)return;
   var now=new Date();
   var first=new Date(calYear,calMonth,1);var dow=first.getDay();
@@ -7729,7 +8130,15 @@ function renderCalendar(){
     var evts=calEvents.filter(function(e){return e.date===ds});
     var myEvts=calEvents.filter(function(e){return e.date===ds&&e.personal});
     var teamEvts=calEvents.filter(function(e){return e.date===ds&&!e.personal});
-    var dotHTML=(teamEvts.length?'<div class="dot" style="background:var(--gold)"></div>':'')+(myEvts.length?'<div class="dot" style="background:var(--cyan)"></div>':'');
+    /* Events posted by a coach, trainer or club — one source, so a dot
+       here means the same thing as the row below. */
+    var shared=(scheduledEvents||[]).filter(function(ev){ return !ev.cancelled&&ev.date===ds; });
+    var mineIds=(typeof window._calAthletes!=='undefined'&&window._calAthletes.length)?window._calAthletes:[(window.AOS_USER||{}).userId];
+    var needsMe=shared.some(function(ev){
+      return mineIds.some(function(aid){ var st=aosEventStatusFor(ev,aid); return ev.kind==='signup'?st!=='in':!st; }); });
+    var dotHTML=(shared.length?'<div class="dot" style="background:'+(needsMe?'#f39c12':'#2ecc71')+'"></div>':'')+
+      (teamEvts.length?'<div class="dot" style="background:var(--gold)"></div>':'')+
+      (myEvts.length?'<div class="dot" style="background:var(--cyan)"></div>':'');
     gridHTML+='<div class="cal-day'+(isToday?' today':'')+' cal-day-btn" data-cd="'+ds+'">'+d+dotHTML+'</div>';
   }
   var remaining=42-dow-daysInMonth;
@@ -7742,7 +8151,7 @@ function renderCalendar(){
     +'</div>';
   // Upcoming 14 days
   var upcomingHTML='';
-  var u14=[];for(var i=0;i<14;i++){var dt=new Date();dt.setDate(dt.getDate()+i);u14.push(dt.toISOString().slice(0,10))}
+  var u14=[];for(var i=0;i<14;i++){var dt=new Date();dt.setDate(dt.getDate()+i);u14.push(aosDateKey(dt))}
   var upEvents=calEvents.filter(function(e){return u14.indexOf(e.date)>-1}).sort(function(a,b){return a.date.localeCompare(b.date)});
   if(upEvents.length){
     upcomingHTML='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:6px">\uD83D\uDCC6 Upcoming 14 Days</div>'
@@ -7804,13 +8213,27 @@ function renderCalendar(){
     }
     renderCalendar();
   });
+  /* Tapping a day opens it: everything posted by a coach, trainer or
+     club alongside their own entries, with the response right there. */
   el.querySelectorAll('.cal-day-btn').forEach(function(b){b.addEventListener('click',function(){
     var ds=this.getAttribute('data-cd');
-    var evts=calEvents.filter(function(e){return e.date===ds});
-    if(evts.length){
-      var msg=evts.map(function(e){return e.title+(e.personal?' (Personal)':'')+(e.invitedTeam?' \uD83D\uDC65':'');}).join(' \u2022 ');
-      showToast(msg,3500);
-    } else showToast('No events on '+ds);
+    var ids=(typeof window._calAthletes!=='undefined'&&window._calAthletes.length)?window._calAthletes:[(window.AOS_USER||{}).userId];
+    var panel=document.getElementById('cal-day-panel');
+    if(!panel){ panel=document.createElement('div'); panel.id='cal-day-panel'; el.appendChild(panel); }
+    var shared=aosDayEventsHTML(ds,ids,window._calAthleteNames||{});
+    var mine=calEvents.filter(function(e){return e.date===ds;});
+    var h='<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'+
+      '<div style="font-weight:700;font-size:13px">'+escH(ds)+'</div>'+
+      '<button class="btn btn-sm" onclick="document.getElementById(\'cal-day-panel\').innerHTML=\'\'" style="font-size:11px">Close</button></div>';
+    if(!shared&&!mine.length) h+='<div style="font-size:12px;color:var(--white-dim)">Nothing on this day.</div>';
+    h+=shared||'';
+    mine.forEach(function(e){
+      h+='<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+        '<span style="font-size:12px;color:#e8f4fd">'+escH(e.title)+'</span>'+
+        '<span style="font-size:10px;color:var(--white-dim)">'+escH(e.type||(e.personal?'Personal':'Team'))+'</span></div>';
+    });
+    panel.innerHTML=h+'</div>';
+    panel.scrollIntoView({behavior:'smooth',block:'nearest'});
   })});
 }
 function inviteTeamToEvent(evtId){
@@ -7834,7 +8257,7 @@ function renderAnalyticsPlayer(){
   var c=safeGet('analytics-content');if(!c)return;
   var td=getTodayKey();
   // Build 7-day training data
-  var days7=[]; for(var di=6;di>=0;di--){var d=new Date();d.setDate(d.getDate()-di);days7.push(d.toISOString().slice(0,10));}
+  var days7=[]; for(var di=6;di>=0;di--){var d=new Date();d.setDate(d.getDate()-di);days7.push(aosDateKey(d));}
   var labels7=days7.map(function(d){var dt=new Date(d);return ['Su','Mo','Tu','We','Th','Fr','Sa'][dt.getUTCDay()];});
   var sessData=days7.map(function(d){return (training[d]||[]).length;});
   var recData=days7.map(function(d){var r=recovery[d]||{};return r.readiness||0;});
@@ -8210,7 +8633,7 @@ function aosAdherence(trIn,days){
   days=days||7;
   var sched=0, done=0, minsPlanned=0, minsDone=0;
   for(var i=0;i<days;i++){
-    var day=new Date(Date.now()-i*86400000).toISOString().slice(0,10);
+    var day=aosDayOffset(i);
     ((trIn||{})[day]||[]).forEach(function(s){
       sched++; minsPlanned+=Number(s.duration)||0;
       if(s.done){ done++; minsDone+=Number(s.duration)||0; }
@@ -8250,7 +8673,7 @@ function aosMetricTrend(entries,field,lowerIsBetter){
   if(!vals.length) return null;
   var latest=vals[vals.length-1];
   var prev=vals.length>1?vals[vals.length-2]:null;
-  var cut=new Date(Date.now()-90*86400000).toISOString().slice(0,10);
+  var cut=aosDayOffset(90);
   var old=vals.filter(function(x){ return x.d<cut; }).pop()||vals[0];
   function mk(a,b){
     if(!a||!b||a===b) return null;
@@ -8387,7 +8810,7 @@ window.aosExportMyRecord=function(){
   var blob=new Blob([JSON.stringify(out,null,2)],{type:'application/json'});
   var a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
-  a.download='AOS-my-record-'+(new Date().toISOString().slice(0,10))+'.json';
+  a.download='AOS-my-record-'+(aosDateKey())+'.json';
   document.body.appendChild(a); a.click();
   setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); },1000);
   showToast('Your record is yours \u2014 downloaded.');
@@ -8635,6 +9058,7 @@ function renderRecord(){
     '<button class="btn btn-primary btn-full" id="rec-export" style="margin-bottom:8px">\u2b07\ufe0f Download my record</button>'+
     '<button class="btn btn-full" id="rec-copy">\uD83D\uDCCB Copy a summary to paste</button></div>';
   el.innerHTML=html;
+  if(typeof aosBindStaffEvents==="function") aosBindStaffEvents();
   var ex=safeGet('rec-export'); if(ex) ex.addEventListener('click',aosExportMyRecord);
   var cp=safeGet('rec-copy'); if(cp) cp.addEventListener('click',aosCopyMyRecord);
   var cs=safeGet('rec-close-season'); if(cs) cs.addEventListener('click',aosCloseSeason);
@@ -8814,7 +9238,7 @@ function renderNutrition(){
   var today=new Date();
   for(var dh=6;dh>=0;dh--){
     var ddt=new Date(today);ddt.setDate(today.getDate()-dh);
-    var dds=ddt.toISOString().slice(0,10);
+    var dds=aosDateKey(ddt);
     var dlog=nutritionLog[dds]||[];
     if(dlog.length===0)continue;
     var dtots={cal:0,pro:0,carb:0,fat:0};
@@ -9630,8 +10054,10 @@ function renderCoach(){
 
     html+='</div>';
     html+=aosArchiveHTML(res[13]||{},u.userId);
+    html+=aosStaffEventsHTML(window._staffTeam||'');
     html+=aosMoreTilesHTML('coach');
     el.innerHTML=html;
+     if(typeof aosBindStaffEvents==="function") aosBindStaffEvents();
   });
 }
 
@@ -9932,6 +10358,7 @@ function renderOrg(){
 
     html+='</div>';
     html+=aosArchiveHTML(res[7]||{},u.userId);
+    html+=aosStaffEventsHTML(window._staffTeam||'');
     html+=aosMoreTilesHTML('org');
     el.innerHTML=html;
   });
@@ -10312,7 +10739,7 @@ function aosParentDataHTML(childId,childName){
    targets. Suggestions are suggestions: the athlete accepts them, and
    the training log stays theirs to write.
    ══════════════════════════════════════════════════════════════════ */
-function _pDay(off){ return new Date(Date.now()-(off||0)*86400000).toISOString().slice(0,10); }
+function _pDay(off){ return aosDayOffset(off||0); }
 function _pSum(a){ return (a||[]).reduce(function(x,y){return x+(Number(y)||0);},0); }
 
 /* ── Phase 1: the snapshot ── */
@@ -10707,10 +11134,10 @@ function renderParentChildHome(){
     var childTasks=r[16]||[], accs=r[17]||{}, plinks=r[18]||{}, devSkills=r[19]||{}, devPlans=r[20]||{},
         devFocus=r[21]||{}, seasonEvents=r[22]||[], challenges=r[23]||[], roster=r[24]||{},
         assignedTasks=r[25]||[], gamedayNotes=r[26]||{};
-    var td=(typeof getTodayKey==='function')?getTodayKey():new Date().toISOString().slice(0,10);
+    var td=(typeof getTodayKey==='function')?getTodayKey():aosDateKey();
     var today=rec[td]||{};
     var water=((hyd[td]||{entries:[]}).entries||[]).reduce(function(s,e){return s+(e.oz||0);},0);
-    var weekAgo=new Date(Date.now()-6*86400000).toISOString().slice(0,10);
+    var weekAgo=aosDayOffset(6);
     var sessions=(Array.isArray(tr)?tr:[]).filter(function(s){return (s.date||'')>=weekAgo;}).length;
     var openGoals=(Array.isArray(goals)?goals:[]).filter(function(g){return !g.completed;}).length;
     var next=(Array.isArray(cal)?cal:[]).filter(function(e){return (e.date||'')>=td;})
@@ -10764,7 +11191,8 @@ function renderParentChildHome(){
 
     var html='';
     if(tab==='now'){
-      html=aosParentNeedsYouHTML(_openReqs,myMsgs.filter(function(m){
+      html=aosWeekStripHTML(scheduledEvents,[cid],(function(){var o={};o[cid]=cname;return o;})())+
+        aosParentNeedsYouHTML(_openReqs,myMsgs.filter(function(m){
         return m.fromId!==(window.AOS_USER||{}).userId&&(m.ts||0)>Number(window._chatSeen||0)&&
                (m.kind==='chat'||m.kind==='feed'); }).length)+
         aosParentSnapshotHTML({hydration:hyd,training:tr,recovery:rec,goals:goals,
@@ -10790,7 +11218,7 @@ function renderParentChildHome(){
        plainly on the recovery screen. */
     var last7=[], sleeps=[];
     for(var _i=0;_i<7;_i++){
-      var _d=new Date(Date.now()-_i*86400000).toISOString().slice(0,10);
+      var _d=aosDayOffset(_i);
       var _r=rec[_d];
       if(_r&&_r.readiness!==undefined) last7.push(Number(_r.readiness));
       if(_r&&_r.sleep!==undefined) sleeps.push(Number(_r.sleep));
@@ -11334,6 +11762,7 @@ function renderProfile() {
   el.innerHTML = '<div class="section-title">👤 My Profile</div>'
   +'<div class="card card-sm" id="avail-card" style="margin-bottom:12px"></div>'
   +aosRolesCardHTML()
+  +aosTimezoneCardHTML()
   +aosSportsCardHTML()
   +'<div class="card card-sm" style="margin-bottom:12px">'
   +'<div style="font-weight:700;font-size:12px;margin-bottom:6px;text-transform:uppercase;letter-spacing:.8px;color:var(--gold)">Where you play</div>'
@@ -11924,6 +12353,7 @@ function renderTrainer(){
 
     html+='</div>';
      html+=aosArchiveHTML(res[11]||{},u.userId);
+    html+=aosStaffEventsHTML(window._staffTeam||'');
     html+=aosMoreTilesHTML('trainer');
     el.innerHTML=html;
   });
