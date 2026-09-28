@@ -3678,14 +3678,129 @@ function statBox(emoji,label,val,unit,change,changeColor){
 // ── MAIN renderReports ────────────────────────────────────────
 var reportPeriod=30;
 var reportView='player';
+/* ══════════════════════════════════════════════════════════════════
+   REPORTS, BY ROLE
+
+   This screen used to show everyone the same thing: an athlete's own
+   progress, with Parent View and Org View bolted on beside it. A coach
+   opening Reports saw a read-only parent dashboard monitoring himself,
+   full of zeros, and an org report built from numbers that were typed
+   into the source code.
+
+   A report should answer the question that role actually has. For a
+   coach: how is the team, and how is each player in it.
+   ══════════════════════════════════════════════════════════════════ */
+function aosDaysSince(dateStr){
+  if(!dateStr) return null;
+  return aosDaysBetween(dateStr,todayStr());
+}
+/* One row per athlete: last seen, work done, how they're turning up. */
+function aosRosterReportRows(players,events){
+  return (players||[]).map(function(p){
+    var att=aosAttendance(events,p.userId||p.id,30);
+    var last=p.lastTrainingDate||'';
+    var quiet=aosDaysSince(last);
+    return {
+      id:p.userId||p.id, name:p.name||'Athlete',
+      sessions30:Number(p.sessions30||p.sessionCount||0),
+      readiness:(p.avgReadiness!==undefined&&p.avgReadiness!==null)?p.avgReadiness:null,
+      lastTraining:last, quietDays:quiet,
+      attended:att.attended, invited:att.invited, attPct:att.pct,
+      injured:!!p.injured
+    };
+  });
+}
+function aosCoachReportHTML(teamName,rows,roleColor){
+  var n=rows.length;
+  var trained=rows.filter(function(r){ return r.quietDays!==null&&r.quietDays<=7; }).length;
+  var quiet=rows.filter(function(r){ return r.quietDays===null||r.quietDays>14; });
+  var readings=rows.filter(function(r){ return r.readiness!==null; });
+  var avgReady=readings.length?Math.round(readings.reduce(function(a,r){return a+r.readiness;},0)/readings.length*10)/10:null;
+  var attRows=rows.filter(function(r){ return r.invited>0; });
+  var attPct=attRows.length?Math.round(attRows.reduce(function(a,r){return a+r.attPct;},0)/attRows.length):null;
+  if(!n){
+    return '<div class="card"><div style="font-weight:700;font-size:14px;margin-bottom:6px">No athletes yet</div>'+
+      '<div style="font-size:12px;color:var(--white-dim)">Once athletes link to you, this shows how the team is going and how each player is doing. Nothing here is estimated \u2014 it fills in as they use it.</div></div>';
+  }
+  var h='<div class="card"><div style="font-weight:800;font-size:15px;color:'+roleColor+';margin-bottom:2px">'+escH(teamName||'Your team')+'</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin-bottom:10px">Last 30 days. Blanks mean nobody logged it, not zero.</div>'+
+    '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">'+
+      coachSnap('\uD83D\uDC65',n,'Athletes')+
+      coachSnap('\uD83D\uDCAA',trained,'Trained this week')+
+      coachSnap('\u26A1',avgReady===null?'\u2014':avgReady,'Avg ready')+
+      coachSnap('\uD83D\uDCC5',attPct===null?'\u2014':attPct+'%','Attendance')+
+    '</div></div>';
+  /* The bit a coach actually needs: who has gone quiet. */
+  if(quiet.length){
+    h+='<div class="card" style="border-color:rgba(243,156,18,0.45)">'+
+      '<div style="font-weight:700;font-size:13px;color:#f39c12;margin-bottom:4px">Gone quiet</div>'+
+      '<div style="font-size:11px;color:var(--white-dim);margin-bottom:6px">Nothing logged in two weeks or more. Often means life, sometimes means something else.</div>'+
+      quiet.map(function(r){
+        return '<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12px;color:#e8f4fd">'+
+          '<span>'+escH(r.name)+'</span><span style="color:var(--white-dim)">'+
+          (r.quietDays===null?'never logged':(r.quietDays+' days')) +'</span></div>';
+      }).join('')+'</div>';
+  }
+  h+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Every player</div>'+
+    '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">'+
+    '<tr style="color:var(--white-dim);font-size:10px;text-transform:uppercase;letter-spacing:.5px">'+
+      '<th style="text-align:left;padding:4px 6px 6px 0">Player</th>'+
+      '<th style="text-align:right;padding:4px 6px 6px 0">Sessions</th>'+
+      '<th style="text-align:right;padding:4px 6px 6px 0">Ready</th>'+
+      '<th style="text-align:right;padding:4px 6px 6px 0">Attend</th>'+
+      '<th style="text-align:right;padding:4px 0 6px 0">Last</th></tr>'+
+    rows.map(function(r){
+      var lastCol=r.quietDays===null?'\u2014':(r.quietDays===0?'today':r.quietDays+'d');
+      var lastStyle=(r.quietDays===null||r.quietDays>14)?'color:#e74c3c':(r.quietDays>7?'color:var(--gold)':'color:#2ecc71');
+      return '<tr style="border-top:1px solid rgba(255,255,255,0.06)">'+
+        '<td style="padding:6px 6px 6px 0;color:#e8f4fd">'+escH(r.name)+
+          (r.injured?' <span style="font-size:9px;color:#e74c3c">\u26A0</span>':'')+'</td>'+
+        '<td style="text-align:right;padding:6px 6px 6px 0;color:#e8f4fd">'+r.sessions30+'</td>'+
+        '<td style="text-align:right;padding:6px 6px 6px 0;color:#e8f4fd">'+(r.readiness===null?'\u2014':r.readiness)+'</td>'+
+        '<td style="text-align:right;padding:6px 6px 6px 0;color:#e8f4fd">'+(r.invited?(r.attended+'/'+r.invited):'\u2014')+'</td>'+
+        '<td style="text-align:right;padding:6px 0;'+lastStyle+'">'+lastCol+'</td></tr>';
+    }).join('')+'</table></div></div>';
+  return h;
+}
+function renderCoachReport(rc){
+  var u=window.AOS_USER||{};
+  var roleColor=u.role==='trainer'?'#00ff88':u.role==='org'?'#c77dff':'#00E0FF';
+  rc.innerHTML='<div class="card" style="font-size:12px;color:var(--white-dim)">Loading\u2026</div>';
+  Promise.all([
+    AppSDK.getItem('aos_local_accounts'),
+    AppSDK.getItem('aos_player_links')
+  ]).then(function(res){
+    var players=getMyLinkedPlayers(res[0]||{},res[1]||{},u);
+    return Promise.all(players.map(function(p){
+      return aosChildData(p.userId||p.id,'sb_injuries').then(function(inj){
+        p.injured=(Array.isArray(inj)?inj:[]).some(function(i){ return i.status!=='cleared'; });
+        return p;
+      }).catch(function(){ return p; });
+    }));
+  }).then(function(players){
+    var rows=aosRosterReportRows(players,scheduledEvents);
+    var label=u.role==='trainer'?'Your athletes':(u.role==='org'?'Your organisation':'Your team');
+    rc.innerHTML=aosCoachReportHTML(label,rows,roleColor);
+  }).catch(function(e){
+    console.warn('AOS coach report failed',e);
+    rc.innerHTML='<div class="card" style="font-size:12px;color:var(--white-dim)">Could not load the roster.</div>';
+  });
+}
+
 function renderReports(){
   var el=safeGet('sec-reports');if(!el)return;
-  var views=[
-    {k:'player',label:'📊 My Progress'},
-    {k:'parent',label:'👪 Parent View'},
-    {k:'org',label:'🏢 Org View'},
-    {k:'auto',label:'🔄 Auto-Send'}
-  ];
+  var _r=(window.AOS_USER&&window.AOS_USER.role)||'player';
+  var _roles=(window.AOS_USER&&window.AOS_USER.roles)||[_r];
+  /* One report per role, not every view for everybody. Someone who
+     holds two roles gets two tabs, because they have two jobs. */
+  var _has=function(x){ return _r===x||_roles.indexOf(x)>=0; };
+  var views=[];
+  if(_has('player')) views.push({k:'player',label:'\uD83D\uDCCA My Progress'});
+  if(_has('coach')||_has('trainer')||_has('org'))
+    views.push({k:'team',label:_r==='trainer'?'\uD83C\uDFCB\uFE0F My Athletes':(_r==='org'?'\uD83C\uDFE2 Organisation':'\uD83D\uDC65 My Team')});
+  if(_has('parent')) views.push({k:'parent',label:'\uD83D\uDC6A My Athletes'});
+  views.push({k:'auto',label:'\uD83D\uDD04 Auto-Send'});
+  if(!views.some(function(v){ return v.k===reportView; })) reportView=views[0].k;
   el.innerHTML='<div class="section-title">📄 Reports & Sharing</div>'+aosPersonalScreenNote('reports')+
   '<div class="tab-pills" style="overflow-x:auto;flex-wrap:nowrap;padding-bottom:4px">'+
     views.map(function(v){return '<button class="tab-pill rpt-view-tab'+(reportView===v.k?' active':'')+'" data-rv="'+v.k+'">'+v.label+'</button>';}).join('')+
@@ -3696,9 +3811,10 @@ function renderReports(){
   });
   var rc=safeGet('report-content');if(!rc)return;
   if(reportView==='player') renderPlayerReport(rc);
+  else if(reportView==='team') renderCoachReport(rc);
   else if(reportView==='parent') renderParentReport(rc);
   else if(reportView==='auto') renderAutoReportPanel(rc);
-  else renderOrgReport(rc);
+  else renderPlayerReport(rc);
 }
 
 function renderAutoReportPanel(rc){
@@ -4511,75 +4627,12 @@ function coachSnap(emoji,val,label){
 }
 
 // ── ORG DASHBOARD REPORT ─────────────────────────────────────
-function renderOrgReport(rc){
-  var SPORTS=[
-    {name:'Baseball',athletes:24,avgReady:7.2,compliance:91,topStreak:18,sessions:187},
-    {name:'Softball',athletes:18,avgReady:8.1,compliance:96,topStreak:21,sessions:142},
-    {name:'Basketball',athletes:15,avgReady:6.4,compliance:82,topStreak:12,sessions:118},
-    {name:'Soccer',athletes:22,avgReady:7.8,compliance:88,topStreak:15,sessions:165},
-    {name:'Track',athletes:12,avgReady:7.5,compliance:94,topStreak:14,sessions:98}
-  ];
-  var totalAth=SPORTS.reduce(function(a,s){return a+s.athletes;},0);
-  var avgComp=Math.round(SPORTS.reduce(function(a,s){return a+s.compliance;},0)/SPORTS.length);
-  var totalSess=SPORTS.reduce(function(a,s){return a+s.sessions;},0);
-  var avgRdy=Math.round(SPORTS.reduce(function(a,s){return a+s.avgReady;},0)/SPORTS.length*10)/10;
-
-  rc.innerHTML=
-  '<div class="card" style="border-color:rgba(0,224,255,0.3)">'+
-    '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">'+
-      '<div style="font-size:32px">🏢</div>'+
-      '<div><div style="font-weight:800;font-size:16px">Org Dashboard Report</div>'+
-      '<div style="font-size:12px;color:var(--white-dim)">'+escH(profile.orgName||'Your Organization')+' · Aug 2026</div></div>'+
-    '</div>'+
-    // Org-wide metrics
-    '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:14px;text-align:center">'+
-      coachSnap('👥',totalAth,'Athletes')+
-      coachSnap('⚡',avgRdy,'Avg Ready')+
-      coachSnap('📊',avgComp+'%','Compliance')+
-      coachSnap('💪',totalSess,'Sessions')+
-    '</div>'+
-    // Sport breakdown table
-    '<div style="font-weight:700;font-size:13px;margin-bottom:10px">🏅 Sport-by-Sport Breakdown</div>'+
-    '<div style="overflow-x:auto">'+
-    '<table style="width:100%;font-size:11px;border-collapse:collapse">'+
-      '<thead><tr style="color:var(--white-dim);border-bottom:1px solid rgba(255,255,255,0.1)">'+
-        '<th style="text-align:left;padding:6px 4px">Sport</th>'+
-        '<th style="text-align:center;padding:6px 4px">Athletes</th>'+
-        '<th style="text-align:center;padding:6px 4px">Avg Ready</th>'+
-        '<th style="text-align:center;padding:6px 4px">Compliance</th>'+
-        '<th style="text-align:center;padding:6px 4px">Sessions</th>'+
-      '</tr></thead>'+
-      '<tbody>'+
-      SPORTS.map(function(s){
-        var rc2=s.avgReady>=8?'var(--green)':s.avgReady>=6?'var(--warning)':'var(--danger)';
-        var cc=s.compliance>=90?'var(--green)':s.compliance>=75?'var(--warning)':'var(--danger)';
-        return '<tr style="border-bottom:1px solid rgba(255,255,255,0.05)">'+
-          '<td style="padding:8px 4px;font-weight:600">'+escH(s.name)+'</td>'+
-          '<td style="text-align:center;padding:8px 4px">'+s.athletes+'</td>'+
-          '<td style="text-align:center;padding:8px 4px;font-weight:700;color:'+rc2+'">'+s.avgReady+'</td>'+
-          '<td style="text-align:center;padding:8px 4px;font-weight:700;color:'+cc+'">'+s.compliance+'%</td>'+
-          '<td style="text-align:center;padding:8px 4px">'+s.sessions+'</td>'+
-        '</tr>';
-      }).join('')+
-      '</tbody>'+
-    '</table></div>'+
-    // Compliance bar
-    '<div style="margin-top:14px">'+
-      '<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">'+
-        '<span>Org-Wide Compliance</span><span style="font-weight:700;color:var(--green)">'+avgComp+'%</span>'+
-      '</div>'+
-      '<div style="height:8px;background:rgba(255,255,255,0.08);border-radius:4px">'+
-        '<div style="height:100%;border-radius:4px;background:var(--green);width:'+avgComp+'%"></div>'+
-      '</div>'+
-    '</div>'+
-    // Action buttons
-    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px">'+
-      '<button class="btn btn-primary" style="font-size:11px" onclick="showToast(\'Org report emailed to all coaches + admin ✅\')">📧 Email to All Coaches</button>'+
-      '<button class="btn" style="font-size:11px;background:rgba(0,224,255,0.1);border-color:var(--gold);color:var(--gold)" onclick="showToast(\'Monthly org report scheduled — 1st of each month ✅\')">🗓️ Schedule Monthly</button>'+
-    '</div>'+
-    '<button class="btn btn-full" style="margin-top:8px;font-size:11px;background:rgba(46,204,113,0.1);border-color:var(--green);color:var(--green)" onclick="showToast(\'Exporting full org PDF report... 📊\')">📄 Export Full Org PDF</button>'+
-  '</div>';
-}
+/* renderOrgReport removed. It printed a five-sport table — 91 athletes,
+   Baseball 24 / 7.2 / 91% / 187 — typed into this file, under the
+   heading "Your Organization", above an "Email to All Coaches" button.
+   None of it came from any team. An org's report is now built from the
+   real roster by renderCoachReport, and says so when there is nothing
+   to report yet. */
 
 
 // ── AOS Age Transfer Engine ──────────────────────────────────────────────────
@@ -5536,6 +5589,7 @@ function renderTrainingHubForStaff(){
     html+='<div style="background:#0d2233;border-radius:12px;padding:12px;text-align:center"><div style="font-size:24px;font-weight:900;color:'+roleColor+'">'+players.length+'</div><div style="font-size:11px;color:#8899aa">Athletes</div></div>';
     html+='</div>';
 
+    html+=aosStaffEventsHTML(window._staffTeam||'');
     html+='<div style="font-weight:800;color:#e8f4fd;font-size:14px;margin-bottom:8px">ROSTER — TODAY\'S TRAINING</div>';
     if(!players.length){
       html+='<div style="color:#8899aa;font-size:13px;padding:20px 0 10px">No athletes linked yet.</div>';
