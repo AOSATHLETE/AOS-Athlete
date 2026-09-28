@@ -3752,7 +3752,7 @@ function aosCoachReportHTML(teamName,rows,roleColor){
     rows.map(function(r){
       var lastCol=r.quietDays===null?'\u2014':(r.quietDays===0?'today':r.quietDays+'d');
       var lastStyle=(r.quietDays===null||r.quietDays>14)?'color:#e74c3c':(r.quietDays>7?'color:var(--gold)':'color:#2ecc71');
-      return '<tr style="border-top:1px solid rgba(255,255,255,0.06)">'+
+      return '<tr class="rpt-row" data-rid="'+escH(r.id)+'" style="border-top:1px solid rgba(255,255,255,0.06);cursor:pointer">'+
         '<td style="padding:6px 6px 6px 0;color:#e8f4fd">'+escH(r.name)+
           (r.injured?' <span style="font-size:9px;color:#e74c3c">\u26A0</span>':'')+'</td>'+
         '<td style="text-align:right;padding:6px 6px 6px 0;color:#e8f4fd">'+r.sessions30+'</td>'+
@@ -3780,12 +3780,229 @@ function renderCoachReport(rc){
   }).then(function(players){
     var rows=aosRosterReportRows(players,scheduledEvents);
     var label=u.role==='trainer'?'Your athletes':(u.role==='org'?'Your organisation':'Your team');
-    rc.innerHTML=aosCoachReportHTML(label,rows,roleColor);
+    rc.innerHTML=aosDigestButtonHTML()+aosCoachReportHTML(label,rows,roleColor);
+    /* Tapping a player opens them in the Team Hub, where the work is:
+       notes, dev plan, skills, assigned training. A report you can't
+       act from is just a list. */
+    rc.querySelectorAll('.rpt-row').forEach(function(tr){
+      tr.addEventListener('click',function(){
+        window._tthAthlete=this.getAttribute('data-rid');
+        window._tth='roster';
+        navigateTo('team');
+      });
+    });
   }).catch(function(e){
     console.warn('AOS coach report failed',e);
     rc.innerHTML='<div class="card" style="font-size:12px;color:var(--white-dim)">Could not load the roster.</div>';
   });
 }
+
+/* ══════════════════════════════════════════════════════════════════
+   THE WEEKLY DIGEST
+
+   Reports only help the person who goes looking for them. Most parents
+   won't, most weeks. So once a week, the first time they open the app,
+   the week comes to them: what their athlete did, what's coming, and
+   anything worth a word.
+
+   It appears once per week and can be dismissed in one tap. It never
+   blocks the app, and it says nothing when there is nothing to say —
+   a digest that fires every week regardless is just noise with a
+   schedule.
+   ══════════════════════════════════════════════════════════════════ */
+function aosWeekKey(d){
+  var dt=d?new Date(d+'T12:00:00'):new Date();
+  var day=(dt.getDay()+6)%7;               /* weeks run Monday to Sunday */
+  var monday=new Date(dt.getTime()-day*86400000);
+  return aosDateKey(monday);
+}
+function aosBuildDigest(name,d){
+  var from=aosDayOffset(7);
+  var sessions=0, minutes=0;
+  Object.keys(d.training||{}).forEach(function(k){
+    if(k<from) return;
+    (d.training[k]||[]).forEach(function(t){ if(t.done){ sessions++; minutes+=Number(t.duration)||0; } });
+  });
+  var reads=[];
+  Object.keys(d.recovery||{}).forEach(function(k){
+    if(k>=from&&d.recovery[k]&&d.recovery[k].readiness) reads.push(Number(d.recovery[k].readiness));
+  });
+  var avgReady=reads.length?Math.round(reads.reduce(function(a,b){return a+b;},0)/reads.length*10)/10:null;
+  var att=aosAttendance(d.events,d.childId,7);
+  var upcoming=(d.events||[]).filter(function(ev){
+    return !ev.cancelled&&ev.date>=todayStr()&&ev.date<=aosDayOffset(-7);
+  }).sort(function(a,b){ return (a.date||'').localeCompare(b.date||''); });
+  var openInj=(d.injuries||[]).filter(function(i){ return i.status!=='cleared'; });
+  /* Only the things a parent would actually want raised. */
+  var flags=[];
+  if(openInj.length) flags.push(openInj.map(function(i){ return i.part+' ('+i.status+')'; }).join(', '));
+  if(!sessions&&!reads.length) flags.push('Nothing logged this week');
+  if(att.invited&&att.missed) flags.push('Missed '+att.missed+' of '+att.invited+' team sessions');
+  return {name:name, sessions:sessions, hours:Math.round(minutes/60*10)/10,
+    checkIns:reads.length, avgReady:avgReady, attendance:att, upcoming:upcoming,
+    flags:flags, empty:(!sessions&&!reads.length&&!att.invited&&!upcoming.length&&!openInj.length)};
+}
+function aosDigestHTML(dg){
+  var h='<div style="font-weight:800;font-size:16px;color:var(--gold);margin-bottom:2px">'+
+    ((window.AOS_USER||{}).role==='player'?'Your week':escH(dg.name||'Your athlete')+'\u2019s week')+'</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin-bottom:10px">Last seven days</div>'+
+    '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px">'+
+      coachSnap('\uD83D\uDCAA',dg.sessions,'Sessions')+
+      coachSnap('\u26A1',dg.avgReady===null?'\u2014':dg.avgReady,'Avg ready')+
+      coachSnap('\uD83D\uDCC5',dg.attendance.invited?(dg.attendance.attended+'/'+dg.attendance.invited):'\u2014','Attended')+
+    '</div>';
+  if(dg.flags.length){
+    h+='<div style="background:rgba(243,156,18,0.12);border:1px solid rgba(243,156,18,0.4);border-radius:10px;padding:10px;margin-bottom:10px">'+
+      dg.flags.map(function(f){ return '<div style="font-size:12px;color:#f39c12">\u2022 '+escH(f)+'</div>'; }).join('')+'</div>';
+  }
+  if(dg.upcoming.length){
+    h+='<div style="font-size:11px;color:var(--white-dim);margin-bottom:4px">Coming up</div>'+
+      dg.upcoming.slice(0,4).map(function(ev){
+        return '<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:12px;color:#e8f4fd">'+
+          '<span>'+escH(ev.title)+'</span>'+
+          '<span style="color:var(--white-dim);font-size:11px">'+escH(ev.date)+' \u00B7 '+escH(aosEventTimeLabel(ev))+'</span></div>';
+      }).join('');
+  }
+  return h;
+}
+window.aosDismissDigest=function(dest){
+  var box=document.getElementById('aos-digest');
+  if(box) box.remove();
+  saveItem('sb_digest_seen',aosWeekKey());
+  if(dest&&typeof dest==='string') navigateTo(dest);
+  else if(dest===true) navigateTo('parent');
+};
+function aosShowDigest(dg,kind){
+  if(document.getElementById('aos-digest')) return;
+  var wrap=document.createElement('div');
+  wrap.id='aos-digest';
+  wrap.style.cssText='position:fixed;inset:0;z-index:9999;background:rgba(3,10,20,0.82);display:flex;align-items:flex-end;justify-content:center;padding:16px;padding-bottom:calc(16px + env(safe-area-inset-bottom,0px))';
+  var body=(kind==='staff')?aosStaffDigestHTML(dg):aosDigestHTML(dg);
+  var dest=(kind==='staff')?'reports':(kind==='player'?'record':'parent');
+  wrap.innerHTML='<div style="background:#0B1A2E;border:1px solid rgba(255,255,255,0.12);border-radius:16px;padding:16px;max-width:460px;width:100%;max-height:82vh;overflow:auto">'+
+    body+
+    '<div style="display:flex;gap:8px;margin-top:14px">'+
+      '<button class="btn btn-primary btn-sm" style="flex:1" onclick="aosDismissDigest(\''+dest+'\')">See the full report</button>'+
+      '<button class="btn btn-sm" style="flex:1" onclick="aosDismissDigest(false)">Not now</button>'+
+    '</div></div>';
+  wrap.addEventListener('click',function(e){ if(e.target===wrap) aosDismissDigest(false); });
+  document.body.appendChild(wrap);
+}
+/* The athlete's own week. Deliberately not a scoreboard: an athlete
+   who did nothing gets what's coming up, not a lecture. */
+function aosBuildOwnDigest(name){
+  var from=aosDayOffset(7), sessions=0, minutes=0;
+  Object.keys(training||{}).forEach(function(k){
+    if(k<from) return;
+    (training[k]||[]).forEach(function(t){ if(t.done){ sessions++; minutes+=Number(t.duration)||0; } });
+  });
+  var reads=[];
+  Object.keys(recovery||{}).forEach(function(k){
+    if(k>=from&&recovery[k]&&recovery[k].readiness) reads.push(Number(recovery[k].readiness));
+  });
+  var avg=reads.length?Math.round(reads.reduce(function(a,b){return a+b;},0)/reads.length*10)/10:null;
+  var att=aosAttendance(scheduledEvents,(window.AOS_USER||{}).userId,7);
+  var upcoming=(scheduledEvents||[]).filter(function(ev){
+    return !ev.cancelled&&ev.date>=todayStr()&&ev.date<=aosDayOffset(-7);
+  }).sort(function(a,b){ return (a.date||'').localeCompare(b.date||''); });
+  var own=(calEvents||[]).filter(function(e){ return e.date>=todayStr()&&e.date<=aosDayOffset(-7); });
+  upcoming=upcoming.concat(own).sort(function(a,b){ return (a.date||'').localeCompare(b.date||''); });
+  var flags=[];
+  (injuries||[]).forEach(function(i){ if(i.status!=='cleared') flags.push(i.part+' \u2014 '+i.status); });
+  return {name:name,sessions:sessions,hours:Math.round(minutes/60*10)/10,checkIns:reads.length,
+    avgReady:avg,attendance:att,upcoming:upcoming,flags:flags,
+    empty:(!sessions&&!reads.length&&!att.invited&&!upcoming.length&&!flags.length)};
+}
+/* The staff week: not totals, but who needs a word. */
+function aosBuildStaffDigest(rows,events){
+  var quiet=rows.filter(function(r){ return r.quietDays===null||r.quietDays>14; });
+  var hurt=rows.filter(function(r){ return r.injured; });
+  var trained=rows.filter(function(r){ return r.quietDays!==null&&r.quietDays<=7; }).length;
+  var upcoming=(events||[]).filter(function(ev){
+    return !ev.cancelled&&ev.date>=todayStr()&&ev.date<=aosDayOffset(-7);
+  }).sort(function(a,b){ return (a.date||'').localeCompare(b.date||''); });
+  return {athletes:rows.length,trained:trained,quiet:quiet,hurt:hurt,upcoming:upcoming,
+    empty:(!rows.length||(!quiet.length&&!hurt.length&&!upcoming.length&&!trained))};
+}
+function aosStaffDigestHTML(dg){
+  var h='<div style="font-weight:800;font-size:16px;color:var(--gold);margin-bottom:2px">Your week</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin-bottom:10px">Across '+dg.athletes+' athlete'+(dg.athletes===1?'':'s')+'</div>'+
+    '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px">'+
+      coachSnap('\uD83D\uDCAA',dg.trained,'Trained')+
+      coachSnap('\uD83D\uDD07',dg.quiet.length,'Gone quiet')+
+      coachSnap('\uD83E\uDE79',dg.hurt.length,'Carrying something')+
+    '</div>';
+  if(dg.quiet.length){
+    h+='<div style="background:rgba(243,156,18,0.12);border:1px solid rgba(243,156,18,0.4);border-radius:10px;padding:10px;margin-bottom:10px">'+
+      '<div style="font-size:11px;color:#f39c12;margin-bottom:4px">Nothing logged in two weeks</div>'+
+      dg.quiet.slice(0,8).map(function(r){
+        return '<div style="display:flex;justify-content:space-between;font-size:12px;color:#e8f4fd">'+
+          '<span>'+escH(r.name)+'</span><span style="color:var(--white-dim)">'+
+          (r.quietDays===null?'never':r.quietDays+'d')+'</span></div>';
+      }).join('')+'</div>';
+  }
+  if(dg.hurt.length){
+    h+='<div style="font-size:11px;color:var(--white-dim);margin-bottom:4px">Carrying something</div>'+
+      dg.hurt.slice(0,8).map(function(r){
+        return '<div style="font-size:12px;color:#e8f4fd;padding:2px 0">\u2022 '+escH(r.name)+'</div>';
+      }).join('');
+  }
+  if(dg.upcoming.length){
+    h+='<div style="font-size:11px;color:var(--white-dim);margin:8px 0 4px">Coming up</div>'+
+      dg.upcoming.slice(0,4).map(function(ev){
+        return '<div style="display:flex;justify-content:space-between;padding:3px 0;font-size:12px;color:#e8f4fd">'+
+          '<span>'+escH(ev.title)+'</span><span style="color:var(--white-dim);font-size:11px">'+escH(ev.date)+'</span></div>';
+      }).join('');
+  }
+  return h;
+}
+/* Called once, after the app has loaded. */
+window.aosMaybeWeeklyDigest=function(force){
+  var u=window.AOS_USER||{};
+  var role=u.role||'player';
+  if(['parent','player','coach','trainer','org'].indexOf(role)<0) return Promise.resolve(false);
+  return AppSDK.getItem('sb_digest_seen').then(function(seen){
+    if(!force&&seen===aosWeekKey()) return false;
+    if(role==='player'){
+      var dgA=aosBuildOwnDigest(u.name||'Your');
+      if(dgA.empty&&!force) return false;   /* nothing yet — try again later this week */
+      aosShowDigest(dgA,'player');
+      return true;
+    }
+    if(role!=='parent'){
+      return Promise.all([AppSDK.getItem('aos_local_accounts'),AppSDK.getItem('aos_player_links')])
+        .then(function(res){
+          var players=getMyLinkedPlayers(res[0]||{},res[1]||{},u);
+          return Promise.all(players.map(function(pl){
+            return aosChildData(pl.userId||pl.id,'sb_injuries').then(function(inj){
+              pl.injured=(Array.isArray(inj)?inj:[]).some(function(i){ return i.status!=='cleared'; });
+              return pl;
+            }).catch(function(){ return pl; });
+          }));
+        }).then(function(players){
+          var dgS=aosBuildStaffDigest(aosRosterReportRows(players,scheduledEvents),scheduledEvents);
+          if(dgS.empty&&!force) return false;   /* nothing yet — try again later this week */
+          aosShowDigest(dgS,'staff');
+          return true;
+        });
+    }
+    return aosLoadGraph().then(function(g){
+      var kids=aosChildrenOf(g,u.userId)||[];
+      if(!kids.length) return false;
+      var cid=kids[0];
+      return Promise.all([
+        aosChildData(cid,'sb_training'), aosChildData(cid,'sb_recovery'), aosChildData(cid,'sb_injuries')
+      ]).then(function(r){
+        var dg=aosBuildDigest(aosNameOf(g,cid),{training:r[0]||{},recovery:r[1]||{},
+          injuries:Array.isArray(r[2])?r[2]:[], events:scheduledEvents, childId:cid});
+        /* Nothing to report is not a report — and not a week used up. */
+        if(dg.empty&&!force) return false;
+        aosShowDigest(dg,'parent');
+        return true;
+      });
+    });
+  }).catch(function(e){ console.warn('AOS digest failed',e); return false; });
+};
 
 function renderReports(){
   var el=safeGet('sec-reports');if(!el)return;
@@ -3799,9 +4016,12 @@ function renderReports(){
   if(_has('coach')||_has('trainer')||_has('org'))
     views.push({k:'team',label:_r==='trainer'?'\uD83C\uDFCB\uFE0F My Athletes':(_r==='org'?'\uD83C\uDFE2 Organisation':'\uD83D\uDC65 My Team')});
   if(_has('parent')) views.push({k:'parent',label:'\uD83D\uDC6A My Athletes'});
-  views.push({k:'auto',label:'\uD83D\uDD04 Auto-Send'});
+  /* Auto-Send removed. It reported "Report sent!" and "Auto-reports ON
+     (weekly)" while the app has no email path of any kind — no mail
+     service, no backend, no mailto. Nothing was ever delivered. It
+     comes back when there is something behind it. */
   if(!views.some(function(v){ return v.k===reportView; })) reportView=views[0].k;
-  el.innerHTML='<div class="section-title">📄 Reports & Sharing</div>'+aosPersonalScreenNote('reports')+
+  el.innerHTML='<div class="section-title">📄 Reports & Sharing</div>'+
   '<div class="tab-pills" style="overflow-x:auto;flex-wrap:nowrap;padding-bottom:4px">'+
     views.map(function(v){return '<button class="tab-pill rpt-view-tab'+(reportView===v.k?' active':'')+'" data-rv="'+v.k+'">'+v.label+'</button>';}).join('')+
   '</div>'+
@@ -3813,153 +4033,17 @@ function renderReports(){
   if(reportView==='player') renderPlayerReport(rc);
   else if(reportView==='team') renderCoachReport(rc);
   else if(reportView==='parent') renderParentReport(rc);
-  else if(reportView==='auto') renderAutoReportPanel(rc);
+  /* The team report writes its own (it renders after a fetch, which
+     would wipe anything prepended here). */
+  if(reportView!=='team'&&['parent','player','coach','trainer','org'].indexOf((window.AOS_USER||{}).role)>=0)
+    rc.insertAdjacentHTML('afterbegin',aosDigestButtonHTML());
   else renderPlayerReport(rc);
 }
 
-function renderAutoReportPanel(rc){
-  AppSDK.getItem('aos_auto_report').then(function(s){
-    s=s||{enabled:false,freq:'weekly',recipients:[],lastSent:null};
-    var u=window.AOS_USER||{};
-    var links=[];
-    if(u.linkedCoach) links.push({id:u.linkedCoach,label:'🏫 Coach'});
-    if(Array.isArray(u.linkedParents)) u.linkedParents.forEach(function(pid){links.push({id:pid,label:'👨 Parent '+pid.slice(-4)});});
-    rc.innerHTML=
-      '<div class="card" style="margin-top:12px">'+
-        '<div style="font-family:Barlow Condensed,sans-serif;font-size:18px;font-weight:800;color:var(--gold);margin-bottom:12px">🔄 Auto-Report Settings</div>'+
-        '<div style="font-size:12px;color:var(--white-dim);margin-bottom:14px">Automatically send your weekly or monthly progress report to linked coaches and parents.</div>'+
-        '<div class="form-group"><label style="display:flex;align-items:center;justify-content:space-between">'+
-          '<span>Enable Auto-Reports</span>'+
-          '<label class="toggle-switch"><input type="checkbox" id="ar-enabled" '+(s.enabled?'checked':'')+'>'+
-            '<span class="toggle-slider"></span>'+
-          '</label>'+
-        '</label></div>'+
-        '<div class="form-group"><label>Frequency</label>'+
-          '<div style="display:flex;gap:8px;margin-top:6px">'+
-            '<button class="tab-pill ar-freq'+(s.freq==='weekly'?' active':'')+'" data-f="weekly" style="flex:1">📅 Weekly</button>'+
-            '<button class="tab-pill ar-freq'+(s.freq==='monthly'?' active':'')+'" data-f="monthly" style="flex:1">📆 Monthly</button>'+
-          '</div>'+
-        '</div>'+
-        '<div class="form-group"><label>📤 Send To</label>'+
-          (links.length?
-            '<div style="margin-top:6px;display:flex;flex-direction:column;gap:6px">'+
-              links.map(function(l){
-                var checked=s.recipients.indexOf(l.id)>-1;
-                return '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">'+
-                  '<input type="checkbox" class="ar-recip" data-id="'+escH(l.id)+'" '+(checked?'checked':'')+' style="width:16px;height:16px;accent-color:var(--gold)"> '+
-                  l.label+'</label>';
-              }).join('')+
-            '</div>':
-            '<div style="font-size:12px;color:var(--white-dim);margin-top:6px">No linked accounts yet. Link a coach or parent in your Profile first.</div>'
-          )+
-        '</div>'+
-        (s.lastSent?'<div style="font-size:11px;color:var(--white-dim);margin-bottom:10px">Last sent: '+s.lastSent+'</div>':'')+
-        '<div style="display:flex;gap:8px;margin-top:4px">'+
-          '<button class="btn btn-primary" id="ar-save" style="flex:1">💾 Save Settings</button>'+
-          '<button class="btn" id="ar-send-now" style="flex:1;background:rgba(0,224,255,0.1);color:var(--gold)">📤 Send Now</button>'+
-        '</div>'+
-      '</div>';
-    rc.querySelectorAll('.ar-freq').forEach(function(b){
-      b.addEventListener('click',function(){
-        rc.querySelectorAll('.ar-freq').forEach(function(x){x.classList.remove('active');});
-        this.classList.add('active');
-      });
-    });
-    var saveBtn=document.getElementById('ar-save');
-    if(saveBtn) saveBtn.onclick=function(){
-      var enabled=!!(document.getElementById('ar-enabled')&&document.getElementById('ar-enabled').checked);
-      var freqBtn=rc.querySelector('.ar-freq.active');
-      var freq=freqBtn?freqBtn.getAttribute('data-f'):'weekly';
-      var recips=[];
-      rc.querySelectorAll('.ar-recip').forEach(function(cb){if(cb.checked)recips.push(cb.getAttribute('data-id'));});
-      AppSDK.setItem('aos_auto_report',{enabled:enabled,freq:freq,recipients:recips,lastSent:s.lastSent}).then(function(){
-        showToast(enabled?'🔄 Auto-reports ON ('+freq+')!':'🛋️ Auto-reports disabled.');
-      });
-    };
-    var sendBtn=document.getElementById('ar-send-now');
-    if(sendBtn) sendBtn.onclick=function(){
-      AppSDK.getItem('aos_auto_report').then(function(cur){
-        cur=cur||{};cur.lastSent=getTodayKey();
-        AppSDK.setItem('aos_auto_report',cur).then(function(){
-          showToast('📤 Report sent to linked accounts! ✅');
-          renderAutoReportPanel(rc);
-        });
-      });
-    };
-  });
-}
+/* Both copies of renderAutoReportPanel removed with the tab: two
+   near-identical definitions, the second shadowing the first, both
+   claiming reports had been sent. */
 
-function renderAutoReportPanel(rc){
-  AppSDK.getItem('aos_auto_report').then(function(s){
-    s=s||{enabled:false,freq:'weekly',recipients:[],lastSent:null};
-    var u=window.AOS_USER||{};
-    var links=[];
-    if(u.linkedCoach) links.push({id:u.linkedCoach,label:'<EFBFBD><EFBFBD> Coach'});
-    if(Array.isArray(u.linkedParents)) u.linkedParents.forEach(function(pid){links.push({id:pid,label:'<EFBFBD><EFBFBD> Parent '+pid.slice(-4)});});
-    rc.innerHTML=
-      '<div class="card" style="margin-top:12px">'+
-        '<div style="font-family:Barlow Condensed,sans-serif;font-size:18px;font-weight:800;color:var(--gold);margin-bottom:12px"><EFBFBD><EFBFBD> Auto-Report Settings</div>'+
-        '<div style="font-size:12px;color:var(--white-dim);margin-bottom:14px">Automatically send your weekly or monthly progress report to linked coaches and parents.</div>'+
-        '<div class="form-group"><label style="display:flex;align-items:center;justify-content:space-between">'+
-          '<span>Enable Auto-Reports</span>'+
-          '<label class="toggle-switch"><input type="checkbox" id="ar-enabled" '+(s.enabled?'checked':'')+'>'+
-            '<span class="toggle-slider"></span>'+
-          '</label>'+
-        '</label></div>'+
-        '<div class="form-group"><label>Frequency</label>'+
-          '<div style="display:flex;gap:8px;margin-top:6px">'+
-            '<button class="tab-pill ar-freq'+(s.freq==='weekly'?' active':'')+'" data-f="weekly" style="flex:1"><EFBFBD><EFBFBD> Weekly</button>'+
-            '<button class="tab-pill ar-freq'+(s.freq==='monthly'?' active':'')+'" data-f="monthly" style="flex:1"><EFBFBD><EFBFBD> Monthly</button>'+
-          '</div>'+
-        '</div>'+
-        '<div class="form-group"><label><EFBFBD><EFBFBD> Send To</label>'+
-          (links.length?
-            '<div style="margin-top:6px;display:flex;flex-direction:column;gap:6px">'+
-              links.map(function(l){
-                var checked=s.recipients.indexOf(l.id)>-1;
-                return '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">'+
-                  '<input type="checkbox" class="ar-recip" data-id="'+escH(l.id)+'" '+(checked?'checked':'')+' style="width:16px;height:16px;accent-color:var(--gold)"> '+
-                  l.label+'</label>';
-              }).join('')+
-            '</div>':
-            '<div style="font-size:12px;color:var(--white-dim);margin-top:6px">No linked accounts yet. Link a coach or parent in your Profile first.</div>'
-          )+
-        '</div>'+
-        (s.lastSent?'<div style="font-size:11px;color:var(--white-dim);margin-bottom:10px">Last sent: '+s.lastSent+'</div>':'')+
-        '<div style="display:flex;gap:8px;margin-top:4px">'+
-          '<button class="btn btn-primary" id="ar-save" style="flex:1"><EFBFBD><EFBFBD> Save Settings</button>'+
-          '<button class="btn" id="ar-send-now" style="flex:1;background:rgba(0,224,255,0.1);color:var(--gold)"><EFBFBD><EFBFBD> Send Now</button>'+
-        '</div>'+
-      '</div>';
-    rc.querySelectorAll('.ar-freq').forEach(function(b){
-      b.addEventListener('click',function(){
-        rc.querySelectorAll('.ar-freq').forEach(function(x){x.classList.remove('active');});
-        this.classList.add('active');
-      });
-    });
-    var saveBtn=document.getElementById('ar-save');
-    if(saveBtn) saveBtn.onclick=function(){
-      var enabled=!!(document.getElementById('ar-enabled')&&document.getElementById('ar-enabled').checked);
-      var freqBtn=rc.querySelector('.ar-freq.active');
-      var freq=freqBtn?freqBtn.getAttribute('data-f'):'weekly';
-      var recips=[];
-      rc.querySelectorAll('.ar-recip').forEach(function(cb){if(cb.checked)recips.push(cb.getAttribute('data-id'));});
-      AppSDK.setItem('aos_auto_report',{enabled:enabled,freq:freq,recipients:recips,lastSent:s.lastSent}).then(function(){
-        showToast(enabled?'<EFBFBD><EFBFBD> Auto-reports ON ('+freq+')!':'<EFBFBD><EFBFBD> Auto-reports disabled.');
-      });
-    };
-    var sendBtn=document.getElementById('ar-send-now');
-    if(sendBtn) sendBtn.onclick=function(){
-      AppSDK.getItem('aos_auto_report').then(function(cur){
-        cur=cur||{};cur.lastSent=getTodayKey();
-        AppSDK.setItem('aos_auto_report',cur).then(function(){
-          showToast('<EFBFBD><EFBFBD> Report sent! <EFBFBD><EFBFBD>');
-          renderAutoReportPanel(rc);
-        });
-      });
-    };
-  });
-}
 
 // ── PLAYER REPORT (30/60/90 + Instagram card) ────────────────
 
@@ -4119,12 +4203,9 @@ function renderPlayerReport(rc){
     '</div>'+
     '<div style="font-size:11px;color:var(--white-dim);margin-top:8px;text-align:center">Screenshot the card above, then tap Share to Instagram</div>'+
   '</div>'+
-  // Auto-schedule report
-  '<div class="card">'+
-    '<div style="font-weight:700;font-size:13px;margin-bottom:10px">🔔 Auto-Report Schedule</div>'+
-    '<div style="font-size:12px;color:var(--white-dim);margin-bottom:10px">Automatically send your progress report to your support team</div>'+
-    autoReportSettings()+
-  '</div>';
+  /* The auto-report schedule card is gone too: four toggles promising
+     weekly emails to parents, alerts to trainers when readiness drops,
+     and a monthly summary. Nothing behind any of them. */
 
   // Wire period buttons
   rc.querySelectorAll('[data-p]').forEach(function(b){
@@ -4173,24 +4254,8 @@ function buildCaption(stats,period){
     'Tracking every rep, every recovery, every goal with @AOSAthlete 📊\n\n'+
     '#AOSAthlete #'+stats.sport.replace(/\s/g,'')+'Athlete #AthletePerformance #SportsTech #'+period+'DayChallenge';
 }
-function autoReportSettings(){
-  return '<div style="display:flex;flex-direction:column;gap:8px">'+
-    reportToggle('👨‍👩‍👧 Send to Parent','Weekly Sunday 7pm','rpt-parent')+
-    reportToggle('🏫 Send to Coach','After each training session','rpt-coach')+
-    reportToggle('💪 Send to Trainer','When readiness < 5','rpt-trainer')+
-    reportToggle('📅 Monthly Summary','1st of each month','rpt-monthly')+
-  '</div>';
-}
-function reportToggle(label,sub,id){
-  return '<div style="display:flex;align-items:center;justify-content:space-between;padding:10px;background:rgba(255,255,255,0.04);border-radius:8px">'+
-    '<div><div style="font-size:13px">'+label+'</div><div style="font-size:11px;color:var(--white-dim)">'+sub+'</div></div>'+
-    '<label style="position:relative;display:inline-block;width:40px;height:22px;cursor:pointer">'+
-      '<input type="checkbox" id="'+id+'" style="opacity:0;width:0;height:0" onchange="saveReportPref(\''+id+'\',this.checked)">'+
-      '<span style="position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(255,255,255,0.1);border-radius:11px;transition:0.3s" id="'+id+'-track"></span>'+
-      '<span style="position:absolute;top:2px;left:2px;width:18px;height:18px;background:#fff;border-radius:50%;transition:0.3s" id="'+id+'-thumb"></span>'+
-    '</label>'+
-  '</div>';
-}
+/* autoReportSettings removed with the card it filled. */
+/* reportToggle removed: nothing renders it any more. */
 function saveReportPref(id,val){
   AppSDK.getItem('aos_report_prefs').then(function(p){
     p=p||{};p[id]=val;AppSDK.setItem('aos_report_prefs',p);
@@ -4203,6 +4268,12 @@ function saveReportPref(id,val){
 }
 
 // ── PARENT REPORT ────────────────────────────────────────────
+function aosDigestButtonHTML(){
+  return '<div class="card" style="display:flex;justify-content:space-between;align-items:center">'+
+    '<div><div style="font-weight:700;font-size:13px">This week\u2019s digest</div>'+
+    '<div style="font-size:11px;color:var(--white-dim)">Shows once a week when you open the app.</div></div>'+
+    '<button class="btn btn-sm" onclick="aosMaybeWeeklyDigest(true)" style="font-size:11px">Show it</button></div>';
+}
 function renderParentReport(rc){
   // Determine child name
   var childName=((profile.firstName||'')+(profile.lastName?' '+profile.lastName:'')).trim()||'Your Athlete';
@@ -4744,6 +4815,7 @@ async function initApp(){
     aosLoadFeed();
     await aosLoadEvents();
     aosScheduleMidnightRoll();
+    setTimeout(function(){ if(window.aosMaybeWeeklyDigest) aosMaybeWeeklyDigest(false); },1200);
     trainingSuggestions=await AppSDK.getItem('sb_suggestions')||[];
     window._chatSeen=await AppSDK.getItem('sb_chat_seen')||0;
     /* Re-address anything I created to whoever is on the team now. */
