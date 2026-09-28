@@ -4811,11 +4811,22 @@ async function initApp(){
         }
       }catch(e){ /* stays unknown; the follow policy flag still applies */ }
     }
+    /* Does this athlete have a coach, trainer or club yet? The join-by-code
+       box is only useful until they do. */
+    try{
+      var _g0=await aosLoadGraph();
+      window._hasStaff=(aosStaffOfAthlete(_g0,(window.AOS_USER||{}).userId)||[]).length>0;
+    }catch(e){ window._hasStaff=false; }
     await aosLoadFollows();
     aosLoadFeed();
     await aosLoadEvents();
     aosScheduleMidnightRoll();
-    setTimeout(function(){ if(window.aosMaybeWeeklyDigest) aosMaybeWeeklyDigest(false); },1200);
+    /* A link opened before signing in waits until there is an account
+       to attach it to. */
+    var _pend=aosPendingInviteCode();
+    if(_pend){ aosStashInvite(_pend); setTimeout(function(){ aosRedeemInvite(_pend); },900); }
+    else { setTimeout(function(){ if(window.aosMaybeWeeklyDigest) aosMaybeWeeklyDigest(false); },1200); }
+    aosLoadMyInvites();
     trainingSuggestions=await AppSDK.getItem('sb_suggestions')||[];
     window._chatSeen=await AppSDK.getItem('sb_chat_seen')||0;
     /* Re-address anything I created to whoever is on the team now. */
@@ -6824,6 +6835,7 @@ function renderTeamHubForStaff(){
     html+='<div id="tth-content">';
 
     if(tab==='roster'){
+      html+=aosInvitePanelHTML(window._staffTeam||'',window._staffTeamName||'');
       if(!players.length){
         html+='<div class="card" style="text-align:center;padding:24px;color:#8899aa;font-size:13px">No athletes linked yet.</div>';
       } else {
@@ -9454,6 +9466,7 @@ function renderRecord(){
     '<div style="font-size:10px;color:var(--white-dim);margin-top:6px">Bars are sessions logged; the number above each is your average readiness that month.</div></div>';
   html+=aosDivisionReadHTML();
   html+=aosPathHTML();
+  if(!window._hasStaff) html+=aosJoinByCodeHTML();
   html+=aosAdherenceHTML(training);
   html+=aosAttendanceHTML(scheduledEvents,(window.AOS_USER||{}).userId);
   html+=aosSelfComparisonHTML();
@@ -12045,6 +12058,183 @@ window.aosSaveChildReport=function(name,rep,bests){
   setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); },1000);
   showToast('Saved.');
 };
+
+/* ══════════════════════════════════════════════════════════════════
+   INVITES
+
+   Until now a coach with fifteen families had to get each of them to
+   sign up and type a code. That is the difference between an app one
+   person uses and an app a team uses.
+
+   One link serves the whole team. It expires, it can be revoked, and
+   the coach can see who has joined with it. The code is the secret;
+   the invite document holds nothing about any child.
+   ══════════════════════════════════════════════════════════════════ */
+var myInvites=[];
+var AOS_INVITE_DAYS=30;
+function aosInviteCode(){
+  var a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';   /* no O/0, no I/1 */
+  var out='';
+  for(var i=0;i<8;i++) out+=a[Math.floor(Math.random()*a.length)];
+  return out;
+}
+function aosInviteLink(code){
+  var base=location.href.split('#')[0];
+  return base+'#join='+code;
+}
+window.aosCreateInvite=function(teamId,teamName,cb){
+  var u=window.AOS_USER||{};
+  var code=aosInviteCode();
+  var inv={code:code, ownerId:u.userId, ownerName:u.name||'Your coach', ownerRole:u.role||'coach',
+    teamId:teamId||'', teamName:teamName||'', revoked:false,
+    createdAt:Date.now(), expiresAt:Date.now()+AOS_INVITE_DAYS*86400000, joined:[]};
+  fbDb.collection('invites').doc(code).set(inv).then(function(){
+    myInvites.unshift(inv);
+    showToast('Invite ready \u2014 share the link.');
+    if(cb) cb(inv);
+  }).catch(function(e){ console.warn('AOS invite create failed',e); showToast('Could not create an invite.'); });
+};
+window.aosRevokeInvite=function(code,cb){
+  fbDb.collection('invites').doc(code).update({revoked:true,revokedAt:Date.now()}).then(function(){
+    myInvites.forEach(function(i){ if(i.code===code) i.revoked=true; });
+    showToast('Revoked. That link no longer works.');
+    if(cb) cb();
+  }).catch(function(e){ console.warn('AOS revoke failed',e); });
+};
+function aosLoadMyInvites(){
+  var u=window.AOS_USER||{};
+  if(!u.userId||['coach','trainer','org'].indexOf(u.role)<0) return Promise.resolve([]);
+  return fbDb.collection('invites').where('ownerId','==',u.userId).get().then(function(sn){
+    myInvites=[]; sn.forEach(function(d){ myInvites.push(d.data()); });
+    myInvites.sort(function(a,b){ return (b.createdAt||0)-(a.createdAt||0); });
+    return fbDb.collection('links').where('linkerId','==',u.userId).get();
+  }).then(function(ls){
+    var byCode={};
+    ls.forEach(function(d){
+      var v=d.data();
+      if(v.inviteCode) (byCode[v.inviteCode]=byCode[v.inviteCode]||[]).push(v.playerId);
+    });
+    myInvites.forEach(function(i){ i.joinedCount=(byCode[i.code]||[]).length; });
+    return myInvites;
+  }).catch(function(){ return myInvites; });
+}
+window.aosCopyInvite=function(code){
+  var u=window.AOS_USER||{};
+  var inv=myInvites.find(function(i){ return i.code===code; })||{};
+  var msg='Join '+(inv.teamName||(u.name||'our team'))+' on AOS Athlete:\n'+aosInviteLink(code)+
+          '\n\nOr sign up and enter code '+code+'.';
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(msg).then(function(){ showToast('Copied \u2014 paste it to your families.'); },
+      function(){ showToast(msg); });
+  } else { showToast('Code '+code); }
+};
+function aosInvitePanelHTML(teamId,teamName){
+  var live=myInvites.filter(function(i){ return !i.revoked&&i.expiresAt>Date.now(); });
+  var h='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">Invite your families</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin-bottom:8px">One link for the whole team. They open it, sign up, and land on your roster \u2014 no codes to read out. Expires in '+AOS_INVITE_DAYS+' days, and you can revoke it any time.</div>';
+  if(!live.length){
+    h+='<button class="btn btn-primary btn-full btn-sm" onclick="aosCreateInvite(\''+escH(teamId||'')+'\',\''+escH((teamName||'').replace(/'/g,''))+'\',function(){renderTeamHubForStaff();})">Create an invite link</button>';
+  }
+  live.forEach(function(i){
+    var days=Math.max(0,Math.round((i.expiresAt-Date.now())/86400000));
+    h+='<div style="border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:10px;margin-bottom:8px">'+
+      '<div style="font-family:monospace;font-size:19px;font-weight:800;color:var(--gold);letter-spacing:2px">'+escH(i.code)+'</div>'+
+      '<div style="font-size:10px;color:var(--white-dim);margin:3px 0 8px;word-break:break-all">'+escH(aosInviteLink(i.code))+'</div>'+
+      '<div style="font-size:11px;color:var(--white-dim);margin-bottom:8px">'+
+        (i.teamName?escH(i.teamName)+' \u00B7 ':'')+(i.joinedCount||0)+' joined \u00B7 '+days+' days left</div>'+
+      '<div style="display:flex;gap:6px">'+
+        '<button class="btn btn-sm" style="flex:1" onclick="aosCopyInvite(\''+escH(i.code)+'\')">Copy invite</button>'+
+        '<button class="btn btn-sm" onclick="aosRevokeInvite(\''+escH(i.code)+'\',function(){renderTeamHubForStaff();})" style="font-size:11px">Revoke</button>'+
+      '</div></div>';
+  });
+  if(live.length) h+='<button class="btn btn-sm btn-full" onclick="aosCreateInvite(\''+escH(teamId||'')+'\',\''+escH((teamName||'').replace(/'/g,''))+'\',function(){renderTeamHubForStaff();})" style="font-size:11px">Another link</button>';
+  return h+'</div>';
+}
+/* ── Joining ─────────────────────────────────────────────────────── */
+function aosPendingInviteCode(){
+  var m=(location.hash||'').match(/join=([A-Z0-9]{6,12})/i);
+  if(m) return m[1].toUpperCase();
+  try{ return sessionStorage.getItem('aos_join')||''; }catch(e){ return ''; }
+}
+window.aosStashInvite=function(code){
+  try{ sessionStorage.setItem('aos_join',(code||'').toUpperCase()); }catch(e){}
+};
+window.aosClearInvite=function(){
+  try{ sessionStorage.removeItem('aos_join'); }catch(e){}
+  if((location.hash||'').indexOf('join=')>=0) location.hash='';
+};
+window.aosRedeemInvite=function(code,cb){
+  var u=window.AOS_USER||{};
+  code=(code||'').toUpperCase();
+  if(!code) return;
+  if(u.role!=='player'){
+    showToast('Invites are for athletes. Share the link with your athlete.');
+    aosClearInvite(); if(cb) cb(false); return;
+  }
+  fbDb.collection('invites').doc(code).get().then(function(d){
+    if(!d.exists){ showToast('That invite code isn\u2019t valid.'); aosClearInvite(); if(cb) cb(false); return; }
+    var inv=d.data();
+    if(inv.revoked){ showToast('That invite has been revoked.'); aosClearInvite(); if(cb) cb(false); return; }
+    if(inv.expiresAt<=Date.now()){ showToast('That invite has expired.'); aosClearInvite(); if(cb) cb(false); return; }
+    if(inv.ownerId===u.userId){ aosClearInvite(); if(cb) cb(false); return; }
+    aosConfirmJoin(inv,cb);
+  }).catch(function(e){ console.warn('AOS invite lookup failed',e); if(cb) cb(false); });
+};
+/* They see who they're joining before anything is connected. */
+function aosConfirmJoin(inv,cb){
+  if(document.getElementById('aos-join')) return;
+  var wrap=document.createElement('div');
+  wrap.id='aos-join';
+  wrap.style.cssText='position:fixed;inset:0;z-index:9999;background:rgba(3,10,20,0.85);display:flex;align-items:center;justify-content:center;padding:16px';
+  wrap.innerHTML='<div style="background:#0B1A2E;border:1px solid rgba(255,255,255,0.12);border-radius:16px;padding:18px;max-width:420px;width:100%">'+
+    '<div style="font-weight:800;font-size:17px;color:var(--gold);margin-bottom:6px">Join '+escH(inv.teamName||inv.ownerName)+'?</div>'+
+    '<div style="font-size:13px;color:#e8f4fd;line-height:1.6;margin-bottom:10px">'+
+      escH(inv.ownerName)+' invited you'+(inv.teamName?(' to '+escH(inv.teamName)):'')+'.</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);line-height:1.6;margin-bottom:14px">'+
+      'They\u2019ll be able to see your training, check-ins and numbers, and assign you work. Your record stays yours \u2014 if you leave, it goes with you.</div>'+
+    '<div style="display:flex;gap:8px">'+
+      '<button class="btn btn-primary btn-sm" style="flex:1" id="join-yes">Join</button>'+
+      '<button class="btn btn-sm" style="flex:1" id="join-no">Not now</button>'+
+    '</div></div>';
+  document.body.appendChild(wrap);
+  document.getElementById('join-no').addEventListener('click',function(){
+    wrap.remove(); aosClearInvite(); if(cb) cb(false);
+  });
+  document.getElementById('join-yes').addEventListener('click',function(){
+    document.getElementById('join-yes').disabled=true;
+    aosCompleteJoin(inv,function(ok){ wrap.remove(); if(cb) cb(ok); });
+  });
+}
+function aosCompleteJoin(inv,cb){
+  var u=window.AOS_USER||{};
+  var linkId=u.userId+'__'+inv.ownerId;
+  var rec={playerId:u.userId, linkerId:inv.ownerId, linkerName:inv.ownerName,
+    linkerRole:inv.ownerRole||'coach', parties:[u.userId,inv.ownerId],
+    inviteCode:inv.code, teamId:inv.teamId||'', linkedAt:Date.now()};
+  /* The joiner can't write the coach's invite — only the owner can, and
+     that's the right rule. Who joined is counted from the links each
+     invite created, which the coach can already read. */
+  fbDb.collection('links').doc(linkId).set(rec).then(function(){
+    aosClearInvite();
+    showToast('You\u2019re in \u2014 '+(inv.teamName||inv.ownerName)+'.');
+    if(typeof aosLoadGraph==='function') aosLoadGraph(true);
+    if(typeof renderHome==='function') renderHome();
+    if(cb) cb(true);
+  }).catch(function(e){
+    console.warn('AOS join failed',e);
+    showToast('Could not join with that invite.');
+    if(cb) cb(false);
+  });
+}
+/* Entering a code by hand, for anyone who was read it over the phone. */
+function aosJoinByCodeHTML(){
+  return '<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">Have an invite code?</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin-bottom:8px">From a coach, trainer or club.</div>'+
+    '<div style="display:flex;gap:8px">'+
+      '<input id="join-code" placeholder="ABCD2345" maxlength="12" style="flex:1;text-transform:uppercase;letter-spacing:2px;font-family:monospace">'+
+      '<button class="btn btn-primary btn-sm" onclick="aosRedeemInvite((document.getElementById(\'join-code\')||{}).value)">Join</button>'+
+    '</div></div>';
+}
 
 /* ── Parent view of an athlete ──────────────────────────────────────
    A linked parent can open their child's Home screen — today's check-in,
