@@ -5227,7 +5227,7 @@ function renderReferral(){
   +'<button id="ref-copy" class="btn btn-primary btn-full">&#x1F4CB; Copy Referral Link</button></div>'
   +'<div class="card">'
   +'<div style="font-weight:700;font-size:13px;margin-bottom:8px">&#x1F3C6; Team Captain Bonus</div>'
-  +'<div style="font-size:13px;color:var(--white-dim);line-height:1.6">Captains who recruit 5+ teammates get <b style="color:var(--gold)">1 month FREE</b>. Credits apply at billing. $9.99/mo after trial.</div></div>';
+  +'<div style="font-size:13px;color:var(--white-dim);line-height:1.6">Bring your teammates in \u2014 the more of your team that\u2019s here, the more your coach can do with it.</div></div>';
   setTimeout(function(){
     var cb=safeGet('ref-copy');
     if(cb)cb.onclick=function(){if(navigator.clipboard)navigator.clipboard.writeText(shareUrl).then(function(){showToast('Referral link copied!');});else{var t=document.createElement('textarea');t.value=shareUrl;document.body.appendChild(t);t.select();document.execCommand('copy');t.remove();showToast('Copied!');}};
@@ -5256,29 +5256,15 @@ function renderSubscription(){
   +'<div style="text-align:right;font-size:12px;color:var(--white-dim);line-height:1.8">'
   +'<div>🏆 Earn credits by logging</div><div>🔥 training & completing goals</div><div>📊 Streaks = bonus credits</div></div></div>'
   +'<div style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:10px;font-size:12px;color:var(--white-dim)">'
-  +'Credit uses: AI Coach sessions • Premium Reports • Leaderboard boosts</div></div>'
+  +'Credits are a work in progress \u2014 nothing to spend them on yet.</div></div>'
+  /* Pricing hidden: Pro isn't live, there is no checkout behind the
+     upgrade button, and the block deal isn't a deal anyone can take.
+     Showing a price for something that cannot be bought is the same
+     class of problem as the reports that were never sent. */
   +'<div class="card" style="margin-top:8px">'
-  +'<div style="font-weight:700;font-size:14px;margin-bottom:12px">📋 Plans</div>'
-  +'<div style="display:grid;gap:8px">'
-  +'<div style="background:rgba(0,224,255,0.06);border:1px solid rgba(0,224,255,0.2);border-radius:10px;padding:12px">'
-  +'<div style="font-weight:700;color:var(--cyan)">🆓 Free — $0/mo</div>'
-  +'<div style="font-size:12px;color:var(--white-dim);margin-top:4px;line-height:1.7">Training log • Recovery tracking • Nutrition • Basic reports • Team view</div></div>'
-  +'<div style="background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.3);border-radius:10px;padding:12px">'
-  +'<div style="font-weight:700;color:var(--gold)">⭐ Pro — $9.99/mo</div>'
-  +'<div style="font-size:12px;color:var(--white-dim);margin-top:4px;line-height:1.7">Everything Free + AI Coach • Instagram reports • Advanced analytics • Leaderboard highlights • Priority support</div></div>'
-  +'</div>'
-  +(_plan==='pro'
-    ?'<div style="margin-top:12px;background:rgba(46,204,113,0.1);border:1px solid rgba(46,204,113,0.3);border-radius:8px;padding:10px;color:var(--green);font-weight:600;text-align:center">✅ You are on AOS Pro — enjoy all features!</div>'
-    :'<button class="btn btn-primary btn-full" style="margin-top:14px;font-size:15px;padding:14px" id="sub-upgrade">🚀 Start Free Trial → Go Pro</button>')
-  +'</div>'
-  +'<div class="card" style="margin-top:8px">'
-  +'<div style="font-weight:700;font-size:13px;margin-bottom:8px">🏆 Team Captain Block Deal</div>'
-  +'<div style="font-size:13px;color:var(--white-dim);line-height:1.6">Captains who recruit <b style="color:var(--gold)">10+ athletes</b> get their subscription <b style="color:var(--gold)">FREE for the season</b>. Lead your team on AOS.</div></div>'
-  +'<div style="margin-top:10px;font-size:11px;color:var(--white-dim);text-align:center">Coaches, Parents, Trainers &amp; Org — always <b style="color:var(--green)">FREE</b>.</div>';
-  setTimeout(function(){
-    var b=safeGet('sub-upgrade');
-    if(b)b.onclick=function(){showToast('🚀 Redirecting to checkout...');};
-  },0);
+  +'<div style="font-weight:700;font-size:14px;margin-bottom:6px">Early access</div>'
+  +'<div style="font-size:13px;color:var(--white-dim);line-height:1.7">Everything in AOS is free while we\u2019re building it \u2014 every feature, every role. If paid plans arrive later, your record stays yours either way, and you\u2019ll know before anything changes.</div>'
+  +'</div>';
 }
 
 function renderHome(){
@@ -9378,7 +9364,25 @@ function aosPathMetrics(div){
     return {label:b.m,unit:b.u||'',target:target,best:best,met:met,gap:met?0:gap};
   });
 }
-function aosPathHTML(){
+/* The parent sees the same path their athlete sees. It reads from
+   whichever data it is handed, so the parent's copy is the athlete's
+   picture, not a second one kept in parallel. */
+function aosPathHTMLFor(ctx){
+  var savedPhys=(typeof metricsPhysical!=='undefined')?metricsPhysical:null;
+  var savedProf=(typeof profile!=='undefined')?profile:null;
+  var savedPath=(typeof recruitPath!=='undefined')?recruitPath:null;
+  try{
+    if(ctx.phys!==undefined) metricsPhysical=ctx.phys||{};
+    if(ctx.profile!==undefined) profile=ctx.profile||{};
+    recruitPath=ctx.path||{};
+    return aosPathHTML(true);
+  } finally {
+    if(savedPhys!==null) metricsPhysical=savedPhys;
+    if(savedProf!==null) profile=savedProf;
+    if(savedPath!==null) recruitPath=savedPath;
+  }
+}
+function aosPathHTML(readOnly){
   var div=aosPathTarget();
   var divName=(AOS_DIVISIONS.find(function(d){return d[0]===div;})||['','D1'])[1];
   var mets=aosPathMetrics(div);
@@ -9424,7 +9428,7 @@ function aosPathHTML(){
     h+='<div style="font-size:11px;font-weight:700;color:var(--gold);margin:10px 0 4px">'+group+' \u00B7 '+n+' of '+list.length+'</div>';
     list.forEach(function(i){
       var on=!!items[i.id];
-      h+='<div onclick="aosTogglePathItem(\''+i.id+'\')" style="display:flex;gap:8px;align-items:flex-start;padding:5px 0;cursor:pointer">'+
+      h+='<div '+(readOnly?'':'onclick="aosTogglePathItem(\''+i.id+'\')"')+' style="display:flex;gap:8px;align-items:flex-start;padding:5px 0;cursor:pointer">'+
         '<span style="font-size:14px;color:'+(on?'#2ecc71':'#8899aa')+'">'+(on?'\u2611':'\u2610')+'</span>'+
         '<span style="font-size:12px;color:'+(on?'#8899aa':'#e8f4fd')+';'+(on?'text-decoration:line-through':'')+'">'+escH(i.t)+
         (i.note?'<div style="font-size:10px;color:var(--white-dim);text-decoration:none">'+escH(i.note)+'</div>':'')+'</span></div>';
@@ -11923,6 +11927,67 @@ function aosParentAddEventHTML(childId,childName){
       '<div class="form-group"><label>Until</label><input type="date" id="pc-ev-until"></div></div>'+
     '<button class="btn btn-primary btn-full btn-sm" onclick="aosAddToChildCalendar(\''+escH(childId)+'\',\''+escH((childName||'').replace(/'/g,"")) +'\',renderParentChildHome)">Add it</button></div>';
 }
+/* Their game-day routine, as they have it. A parent driving to the
+   field can see what is still unticked without asking. */
+function aosParentGamedayChecklistHTML(gd,name){
+  var items=(gd&&gd.items)||[];
+  if(!items.length) return '';
+  var done=items.filter(function(i){ return i.done; }).length;
+  return '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'+
+    '<div style="font-weight:700;font-size:13px">Game day routine</div>'+
+    '<div style="font-size:11px;color:var(--white-dim)">'+done+' of '+items.length+'</div></div>'+
+    items.slice(0,12).map(function(i){
+      return '<div style="display:flex;gap:8px;padding:3px 0;font-size:12px;color:'+(i.done?'var(--white-dim)':'#e8f4fd')+'">'+
+        '<span>'+(i.done?'\u2705':'\u2B1C')+'</span><span'+(i.done?' style="text-decoration:line-through"':'')+'>'+
+        escH(i.text||i.label||'Item')+'</span></div>';
+    }).join('')+
+    '<div style="font-size:10px;color:var(--white-dim);margin-top:6px">Theirs to tick \u2014 you\u2019re seeing it, not doing it.</div></div>';
+}
+/* What they have posted, and who follows them. Parents of minors get
+   this without having to approve each follower themselves. */
+function aosParentSocialHTML(childId,childName){
+  var box='<div class="card" id="pfeed-'+escH(childId)+'"><div style="font-weight:700;font-size:13px;margin-bottom:4px">'+
+    escH(childName||'Their')+' posts and followers</div>'+
+    '<div style="font-size:11px;color:var(--white-dim)">Loading\u2026</div></div>';
+  setTimeout(function(){
+    var el=document.getElementById('pfeed-'+childId); if(!el) return;
+    Promise.all([
+      fbDb.collection('posts').where('authorId','==',childId).get().catch(function(){ return null; }),
+      fbDb.collection('follows').where('targetId','==',childId).get().catch(function(){ return null; })
+    ]).then(function(r){
+      var posts=[], fols=[];
+      if(r[0]) r[0].forEach(function(d){ posts.push(d.data()); });
+      if(r[1]) r[1].forEach(function(d){ fols.push(d.data()); });
+      posts.sort(function(a,b){ return (b.createdAt||0)-(a.createdAt||0); });
+      el.innerHTML=aosParentFeedHTML(childId,childName,posts,fols).replace(/^<div class="card">/,'').replace(/<\/div>$/,'');
+    });
+  },60);
+  return box;
+}
+/* A parent asks one thing of a leaderboard: where is my kid. This
+   answers that and nothing else \u2014 no browsing other people's children. */
+function aosParentStandingHTML(childId,childName,accs){
+  var me=(accs||{})[childId]; if(!me) return '';
+  if(me.lbOptOut) return '';
+  var pool=Object.keys(accs||{}).map(function(k){ return accs[k]; })
+    .filter(function(a){ return a&&a.role==='player'&&!a.lbOptOut; });
+  if(pool.length<3) return '';
+  var rank=function(field){
+    var sorted=pool.slice().sort(function(a,b){ return (Number(b[field])||0)-(Number(a[field])||0); });
+    var i=sorted.findIndex(function(a){ return a.userId===childId; });
+    return i<0?null:{place:i+1,of:sorted.length,value:Number(me[field])||0};
+  };
+  var rows=[['streak','Day streak'],['challengePoints','Challenge points']]
+    .map(function(f){ var r=rank(f[0]); return r?{label:f[1],r:r}:null; }).filter(Boolean);
+  if(!rows.length) return '';
+  return '<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">Where '+escH(childName||'they')+' stand'+((childName||'').length?'s':'')+'</div>'+
+    '<div style="font-size:11px;color:var(--white-dim);margin-bottom:6px">Among athletes who opted in. Standing moves for all sorts of reasons \u2014 it is not a measure of how they are doing.</div>'+
+    rows.map(function(x){
+      return '<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:12px;color:#e8f4fd">'+
+        '<span>'+escH(x.label)+'</span><span><b style="color:var(--gold)">#'+x.r.place+'</b> of '+x.r.of+
+        ' <span style="color:var(--white-dim)">('+x.r.value+')</span></span></div>';
+    }).join('')+'</div>';
+}
 /* ── Logistics ───────────────────────────────────────────────────── */
 window.aosSetRide=function(eventId,athleteId,who,cb){
   var ev=scheduledEvents.find(function(e){ return e.id===eventId; });
@@ -12282,6 +12347,7 @@ function renderParentChildHome(){
     aosChildData(cid,'sb_nutrition_log'), aosChildData(cid,'sb_nutrition_goals'),
     aosChildData(cid,'sb_suggestions'), aosMyMessages((window.AOS_USER||{}).userId),
     aosChildData(cid,'sb_tasks'), aosChildData(cid,'sb_injuries'),
+    aosChildData(cid,'sb_recruit_path'), aosChildData(cid,'sb_gameday'),
     AppSDK.getItem('aos_local_accounts'), AppSDK.getItem('aos_player_links'),
     AppSDK.getItem('aos_dev_skills'), AppSDK.getItem('aos_dev_plans'),
     AppSDK.getItem('aos_dev_focus'), AppSDK.getItem('aos_season_events'),
@@ -12292,9 +12358,10 @@ function renderParentChildHome(){
     var custom=r[6]||{}, phys=r[7]||{}, batting=r[8]||[], pitching=r[9]||[];
     var seasons=r[10]||[], selfS=r[11]||{};
     var nutLog=r[12]||{}, nutGoals=r[13]||{}, suggestions=r[14]||[], myMsgs=r[15]||[];
-    var childTasks=r[16]||[], childInjuries=r[17]||[], accs=r[18]||{}, plinks=r[19]||{}, devSkills=r[20]||{},
-        devPlans=r[21]||{}, devFocus=r[22]||{}, seasonEvents=r[23]||[], challenges=r[24]||[], roster=r[25]||{},
-        assignedTasks=r[26]||[], gamedayNotes=r[27]||{};
+    var childTasks=r[16]||[], childInjuries=r[17]||[], childPath=r[18]||{}, childGameday=r[19]||{},
+        accs=r[20]||{}, plinks=r[21]||{}, devSkills=r[22]||{}, devPlans=r[23]||{}, devFocus=r[24]||{},
+        seasonEvents=r[25]||[], challenges=r[26]||[], roster=r[27]||{}, assignedTasks=r[28]||[],
+        gamedayNotes=r[29]||{};
     var td=(typeof getTodayKey==='function')?getTodayKey():aosDateKey();
     var today=rec[td]||{};
     var water=((hyd[td]||{entries:[]}).entries||[]).reduce(function(s,e){return s+(e.oz||0);},0);
@@ -12363,6 +12430,7 @@ function renderParentChildHome(){
         aosParentAnalyticsHTML({training:tr,recovery:rec})+
         aosAdherenceHTML(tr)+
         aosInjurySummaryHTML(childInjuries,cname)+
+        aosParentGamedayChecklistHTML(childGameday,cname)+
         aosLogisticsHTML(scheduledEvents,[cid],{})+
         aosParentAddEventHTML(cid,cname)+
         aosParentTasksHTML(childTasks,assignedTasks.filter(function(t){ return t.toPlayerId===cid; }))+
@@ -12391,6 +12459,9 @@ function renderParentChildHome(){
     if(tab==='report'){
       var _rep=aosChildReport({recovery:rec,training:tr,goals:goals,events:scheduledEvents,
         childId:cid,injuries:childInjuries});
+      html+=aosPathHTMLFor({phys:phys,profile:prof,path:childPath})+
+        aosParentStandingHTML(cid,cname,accs)+
+        aosParentSocialHTML(cid,cname);
       var _sportsR=(Array.isArray(prof.sports)&&prof.sports.length)?prof.sports:[prof.sport||'Other'];
       var _bestsR=aosPersonalBestsFrom(custom,phys,_sportsR);
       html+=aosParentReportHTML(cname,_rep,_bestsR);
