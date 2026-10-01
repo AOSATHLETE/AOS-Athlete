@@ -1044,6 +1044,17 @@ window.aosBindStaffEvents=function(){
   var b=document.getElementById('se-new');
   if(b) b.onclick=function(){ aosOpenEventForm(window._staffTeam||''); };
 };
+/* Redraws whichever staff screen is actually on, without guessing. */
+function _aosRerenderStaffScreen(){
+  ['coach','trainer','org','team','training'].forEach(function(sec){
+    var el=document.getElementById('sec-'+sec);
+    if(el&&el.classList.contains('active')){
+      var fn={coach:'renderCoach',trainer:'renderTrainer',org:'renderOrg',
+              team:'renderTeam',training:'renderTraining'}[sec];
+      if(typeof window[fn]==='function') window[fn]();
+    }
+  });
+}
 window.aosRefreshEventViews=function(){
   ['home','calendar','parent','team'].forEach(function(sec){
     var el=document.getElementById('sec-'+sec);
@@ -1055,15 +1066,30 @@ window.aosRefreshEventViews=function(){
 };
 /* Everything on one day: club, coach, trainer and their own entries. */
 function aosDayEventsHTML(dateKey,athleteIds,names){
+  var me=(window.AOS_USER||{}).userId;
   var rows=[];
   (scheduledEvents||[]).forEach(function(ev){
     if(ev.cancelled||ev.date!==dateKey) return;
+    /* Whoever posted it gets one row with the controls, not a row per
+       athlete asking them whether they're going to their own practice. */
+    if(ev.hostId===me){ rows.push({ev:ev,aid:me,host:true}); return; }
     athleteIds.forEach(function(aid){
       rows.push({ev:ev,aid:aid,status:aosEventStatusFor(ev,aid)});
     });
   });
   if(!rows.length) return '';
   return rows.map(function(r){
+    if(r.host){
+      var inN=aosEventCount(r.ev,'in'), outN=aosEventCount(r.ev,'out');
+      return '<div style="display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
+        '<div><div style="font-size:12px;color:#e8f4fd">'+escH(r.ev.title)+'</div>'+
+        '<div style="font-size:10px;color:var(--white-dim)">'+escH(aosEventTimeLabel(r.ev))+
+          (r.ev.location?' \u00B7 '+escH(r.ev.location):'')+' \u00B7 '+inN+' in, '+outN+' out</div></div>'+
+        '<div style="text-align:right;flex-shrink:0;display:flex;gap:4px;align-items:flex-start">'+
+          '<button class="btn btn-sm" onclick="aosOpenEventForm(\''+escH(r.ev.teamId||'')+'\',\''+r.ev.id+'\',\'se-form-cal\')" style="font-size:10px">Edit</button>'+
+          '<button class="btn btn-sm" onclick="aosCancelEvent(\''+r.ev.id+'\',aosRefreshEventViews)" style="font-size:10px">Cancel</button>'+
+        '</div></div>';
+    }
     var col=r.status==='in'?'#2ecc71':r.status==='out'?'#8899aa':r.ev.kind==='signup'?'#00E0FF':'var(--gold)';
     var label=r.status==='in'?'\u2713 in':r.status==='out'?'not going':r.ev.kind==='signup'?'open':'needs answer';
     return '<div style="display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
@@ -1080,7 +1106,13 @@ function aosDayEventsHTML(dateKey,athleteIds,names){
 function aosStaffEventsHTML(teamId){
   var u=window.AOS_USER||{};
   var mine=(scheduledEvents||[]).filter(function(ev){ return ev.hostId===u.userId&&!ev.cancelled; });
-  var h='<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'+
+  /* The dashboard is where a coach lands, so the gap is named here too,
+     not only on the Schedule tab. One scan per load; the guard below is
+     what stops the callback re-rendering into a loop. */
+  if(!window._aosRepublish&&typeof aosRepublishRefresh==='function') setTimeout(function(){
+    aosRepublishRefresh(function(scan){ if(scan&&scan.events.length) _aosRerenderStaffScreen(); });
+  },0);
+  var h=(typeof aosRepublishCardHTML==='function'?aosRepublishCardHTML():'')+'<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'+
     '<div style="font-weight:700;font-size:13px">Schedule</div>'+
     '<button class="btn btn-sm" id="se-new" onclick="aosOpenEventForm(window._staffTeam||\'\')" style="font-size:11px">+ Post a session</button></div>'+
     '<div id="se-form" style="display:none;margin-bottom:10px"></div>';
@@ -1100,14 +1132,38 @@ function aosStaffEventsHTML(teamId){
           '<div style="font-size:12px;color:#2ecc71">'+inN+' in</div>'+
           '<div style="font-size:10px;color:var(--white-dim)">'+outN+' out'+
             (ev.capacity?(' \u00B7 cap '+ev.capacity):'')+'</div>'+
-          '<button class="btn btn-sm" onclick="aosCancelEvent(\''+ev.id+'\',aosRefreshEventViews)" style="font-size:10px;margin-top:3px">Cancel</button>'+
+          '<div style="display:flex;gap:4px;margin-top:3px;justify-content:flex-end">'+
+            '<button class="btn btn-sm" onclick="aosOpenEventForm(window._staffTeam||\'\',\''+ev.id+'\')" style="font-size:10px">Edit</button>'+
+            '<button class="btn btn-sm" onclick="aosCancelEvent(\''+ev.id+'\',aosRefreshEventViews)" style="font-size:10px">Cancel</button>'+
+          '</div>'+
         '</div></div></div>';
   });
+  /* Cancelled events stay reachable. A game called off on Thursday and
+     back on by Friday shouldn't need re-typing, and a coach should be
+     able to see what they cancelled. */
+  var off=(scheduledEvents||[]).filter(function(ev){ return ev.hostId===u.userId&&ev.cancelled; });
+  if(off.length){
+    h+='<div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.08)">'+
+       '<div style="font-size:11px;color:var(--white-dim);margin-bottom:6px">Cancelled</div>';
+    off.slice(0,8).forEach(function(ev){
+      h+='<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 0">'+
+        '<div style="font-size:12px;color:var(--white-dim);text-decoration:line-through">'+escH(ev.title)+
+          ' \u00B7 '+escH(ev.date)+(ev.start?' '+escH(ev.start):'')+'</div>'+
+        '<button class="btn btn-sm" onclick="aosRestoreEvent(\''+ev.id+'\',aosRefreshEventViews)" style="font-size:10px;flex-shrink:0">Restore</button>'+
+      '</div>';
+    });
+    h+='</div>';
+  }
   return h+'</div>';
 }
-window.aosOpenEventForm=function(teamId){
-  var box=document.getElementById('se-form'); if(!box) return;
-  if(box.style.display==='block'){ box.style.display='none'; return; }
+window.aosOpenEventForm=function(teamId,eventId,boxId){
+  var box=document.getElementById(boxId||'se-form'); if(!box) return;
+  var ex=eventId?(scheduledEvents||[]).find(function(x){ return x.id===eventId; }):null;
+  if(eventId&&!ex){ showToast('That event is no longer there.'); return; }
+  /* Tapping Edit on a second event swaps the form over rather than
+     closing it; tapping the same one again closes it. */
+  if(box.style.display==='block'&&box.getAttribute('data-ev')===(eventId||'')){ box.style.display='none'; return; }
+  box.setAttribute('data-ev',eventId||'');
   box.innerHTML='<div class="form-group"><label>What is it?</label><input id="se-title" placeholder="Team practice"></div>'+
     '<div class="form-row"><div class="form-group"><label>Date</label><input type="date" id="se-date" value="'+todayStr()+'"></div>'+
     '<div class="form-group"><label>Type</label><select id="se-type"><option>Practice</option><option>Game</option><option>Training</option><option>Lesson</option><option>Tournament</option><option>Other</option></select></div></div>'+
@@ -1123,11 +1179,43 @@ window.aosOpenEventForm=function(teamId){
       '<option value="attendance">Everyone expected \u2014 going / can\'t</option>'+
       '<option value="signup">Optional \u2014 sign up</option></select></div>'+
     '<div class="form-group"><label>Cap (0 = none)</label><input type="number" id="se-cap" value="0"></div></div>'+
-    '<button class="btn btn-primary btn-full btn-sm" id="se-save">Post it</button>';
+    '<div id="se-warn" style="display:none;font-size:11px;color:#FFD700;margin-bottom:8px"></div>'+
+    '<button class="btn btn-primary btn-full btn-sm" id="se-save">'+(ex?'Save changes':'Post it')+'</button>';
   box.style.display='block';
+  if(ex){
+    /* Editing one event, not a series: repeat belongs to creating. */
+    ['se-repeat','se-until'].forEach(function(id){
+      var f=document.getElementById(id); if(f&&f.parentNode) f.parentNode.style.display='none';
+    });
+    var set=function(id,v){ var f=document.getElementById(id); if(f) f.value=v||''; };
+    set('se-title',ex.title); set('se-date',ex.date); set('se-type',ex.type||'Practice');
+    set('se-start',ex.start); set('se-end',ex.end); set('se-loc',ex.location);
+    set('se-kind',ex.kind||'attendance'); set('se-cap',ex.capacity||0);
+    var warn=document.getElementById('se-warn');
+    var answered=Object.keys(ex.responses||{}).length;
+    var recheck=function(){
+      if(!warn) return;
+      var moved=(safeVal('se-date')!==ex.date)||(safeVal('se-start')!==(ex.start||''));
+      if(moved&&answered){
+        warn.style.display='block';
+        warn.textContent='Moving this clears the '+answered+' repl'+(answered===1?'y':'ies')+' already in \u2014 everyone will be asked again.';
+      } else warn.style.display='none';
+    };
+    ['se-date','se-start'].forEach(function(id){
+      var f=document.getElementById(id); if(f) f.onchange=recheck;
+    });
+  }
   document.getElementById('se-save').onclick=function(){
     var t=safeVal('se-title').trim();
     if(!t){ showToast('Give it a name.'); return; }
+    if(ex){
+      aosUpdateEvent(ex.id,{title:t,date:safeVal('se-date'),start:safeVal('se-start'),
+        end:safeVal('se-end'),location:safeVal('se-loc'),type:safeVal('se-type'),
+        kind:safeVal('se-kind'),capacity:safeVal('se-cap')},function(){
+          box.style.display='none'; box.setAttribute('data-ev',''); aosRefreshEventViews();
+        });
+      return;
+    }
     /* A repeating session is a series of real events: each one has its
        own responses, so cancelling next Tuesday doesn't erase who said
        yes to the Tuesday after. */
@@ -1240,6 +1328,51 @@ window.aosRespondEvent=function(eventId,athleteId,status,cb){
     showToast(status==='in'?'You\u2019re in.':status==='out'?'Marked not attending.':'Saved.');
     if(cb) cb(ev);
   }).catch(function(e){ console.warn('AOS respond failed',e); showToast('Could not save that.'); });
+};
+/* Editing one that already exists. A moved game is a changed row, not
+   a new one: the same document keeps its place in everyone's calendar.
+   Replies are only cleared when the thing they answered about — the day
+   or the start time — actually moved. */
+window.aosUpdateEvent=function(eventId,fields,cb){
+  var u=window.AOS_USER||{};
+  var ev=(scheduledEvents||[]).find(function(x){ return x.id===eventId; });
+  if(!ev){ showToast('That event is no longer there.'); return; }
+  if(ev.hostId!==u.userId){ showToast('Only whoever posted it can change it.'); return; }
+  var date=fields.date||ev.date, start=fields.start||'';
+  var moved=(date!==ev.date)||(start!==(ev.start||''));
+  var answered=Object.keys(ev.responses||{}).length;
+  var patch={
+    title:(fields.title||ev.title||'Session').trim(), date:date,
+    start:start, end:fields.end||'', allDay:!start,
+    location:fields.location||'', type:fields.type||ev.type||'Practice',
+    kind:fields.kind||ev.kind||'attendance',
+    capacity:Number(fields.capacity)||0,
+    cancelled:false, updatedAt:Date.now(), editedAt:Date.now()
+  };
+  if(moved) patch.responses={};
+  /* An imported event that gets moved by hand keeps answering to the
+     key it came in under as well as its new one, so a re-import of
+     either version of the sheet finds this row instead of making a
+     second copy of the same game. */
+  if(ev.importKey){
+    var keys=(ev.importKeys||[ev.importKey]).slice();
+    var nk=aosSchedKey(ev.teamId||'',{date:date,start:start,title:patch.title});
+    if(keys.indexOf(nk)<0) keys.push(nk);
+    patch.importKey=nk; patch.importKeys=keys.slice(-6);
+  }
+  fbDb.collection('scheduledEvents').doc(eventId).update(patch).then(function(){
+    Object.assign(ev,patch);
+    showToast(moved&&answered?'Moved \u2014 '+answered+' repl'+(answered===1?'y':'ies')+' cleared, everyone asked again.':'Saved.');
+    if(cb) cb(ev);
+  }).catch(function(e){ console.warn('AOS event update failed',e); showToast('Could not save that change.'); });
+};
+window.aosRestoreEvent=function(eventId,cb){
+  var u=window.AOS_USER||{};
+  var ev=(scheduledEvents||[]).find(function(x){ return x.id===eventId; });
+  if(!ev||ev.hostId!==u.userId) return;
+  fbDb.collection('scheduledEvents').doc(eventId).update({cancelled:false,updatedAt:Date.now()})
+    .then(function(){ ev.cancelled=false; showToast('Back on the calendar.'); if(cb) cb(); })
+    .catch(function(e){ console.warn('AOS event restore failed',e); showToast('Could not restore it.'); });
 };
 window.aosCancelEvent=function(eventId,cb){
   fbDb.collection('scheduledEvents').doc(eventId).update({cancelled:true,cancelledAt:Date.now()})
@@ -2508,6 +2641,9 @@ window.AppSDK = {
       <div class="form-group">
         <label>Password</label>
         <input type="password" id="local-signin-pass" placeholder="Your password" autocomplete="current-password" style="width:100%">
+      </div>
+      <div style="text-align:right;margin-top:-6px;margin-bottom:6px">
+        <button class="auth-link" id="forgot-pass-btn" style="font-size:12px">Forgot your password?</button>
       </div>
       <div class="auth-error" id="signin-error"></div>
       <div style="margin-top:14px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.08)">
@@ -6813,7 +6949,7 @@ function renderTeamHubForStaff(){
 
     /* Sub-tabs */
     html+='<div style="display:flex;gap:6px;margin-bottom:14px;overflow-x:auto">';
-    (u.role==='org'?[['roster','👥 Roster'],['assign','🏋️ Assign Training'],['orgtraining','🗓️ Org Training'],['reports','📊 Reports'],['challenges','🏆 Challenges'],['feed','📢 Feed']]:[['roster','👥 Roster'],['assign','🏋️ Assign Training'],['reports','📊 Reports'],['challenges','🏆 Challenges'],['feed','📢 Feed']]).forEach(function(t){
+    (u.role==='org'?[['roster','👥 Roster'],['schedule','🗓️ Schedule'],['assign','🏋️ Assign Training'],['orgtraining','🗓️ Org Training'],['reports','📊 Reports'],['challenges','🏆 Challenges'],['feed','📢 Feed']]:[['roster','👥 Roster'],['schedule','🗓️ Schedule'],['assign','🏋️ Assign Training'],['reports','📊 Reports'],['challenges','🏆 Challenges'],['feed','📢 Feed']]).forEach(function(t){
       html+='<button onclick="window._tth=\''+t[0]+'\';renderTeamHubForStaff();" style="flex-shrink:0;padding:8px 14px;border-radius:20px;border:1px solid '+(tab===t[0]?roleColor:'#334')+';background:'+(tab===t[0]?roleColor+'22':'transparent')+';color:'+(tab===t[0]?roleColor:'#8899aa')+';font-size:12px;font-weight:700;cursor:pointer">'+t[1]+'</button>';
     });
     html+='</div>';
@@ -6836,6 +6972,17 @@ function renderTeamHubForStaff(){
           '</div>';
         });
       }
+    }
+
+    else if(tab==='schedule'){
+      html+=aosSchedPanelHTML();
+      /* The scan needs the connection graph, which is a round trip, so
+         the tab paints first and the card appears when it knows. */
+      if(!window._aosRepublish) setTimeout(function(){
+        aosRepublishRefresh(function(scan){
+          if(scan&&scan.events.length&&window._tth==='schedule') renderTeamHubForStaff();
+        });
+      },0);
     }
 
     else if(tab==='assign'){
@@ -8503,7 +8650,8 @@ function renderCalendar(){
     var mine=calEvents.concat(window._calChildEvents||[]).filter(function(e){return e.date===ds;});
     var h='<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'+
       '<div style="font-weight:700;font-size:13px">'+escH(ds)+'</div>'+
-      '<button class="btn btn-sm" onclick="document.getElementById(\'cal-day-panel\').innerHTML=\'\'" style="font-size:11px">Close</button></div>';
+      '<button class="btn btn-sm" onclick="document.getElementById(\'cal-day-panel\').innerHTML=\'\'" style="font-size:11px">Close</button></div>'+
+      '<div id="se-form-cal" style="display:none;margin-bottom:10px"></div>';
     if(!shared&&!mine.length) h+='<div style="font-size:12px;color:var(--white-dim)">Nothing on this day.</div>';
     h+=shared||'';
     mine.forEach(function(e){
@@ -10358,16 +10506,7 @@ function renderCoach(){
     html+='<div style="background:#0d2233;border:1px solid #334;border-radius:14px;padding:14px;margin-bottom:14px">';
     html+='<div style="font-weight:800;color:#00E0FF;margin-bottom:8px;font-size:13px">🗓️ SEASON EVENTS</div>';
     html+='<div style="font-size:11px;color:#8899aa;margin-bottom:8px">Shows on every linked athlete\'s Team → Season tab.</div>';
-    html+='<div style="display:flex;gap:8px;margin-bottom:8px">';
-    html+='<input id="coach-ev-title" placeholder="Event title" style="flex:2;padding:9px 12px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px">';
-    html+='<input id="coach-ev-date" type="date" style="flex:1;padding:9px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px">';
-    html+='<input id="coach-ev-start" type="time" title="Start" style="flex:1;padding:9px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px">';
-    html+='<input id="coach-ev-end" type="time" title="End" style="flex:1;padding:9px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px">';
-    html+='<input id="coach-ev-loc" placeholder="Where" style="flex:2;padding:9px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px">';
-    html+='</div>';
-    html+='<select id="coach-ev-type" style="width:100%;padding:9px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px;margin-bottom:8px">';
-    html+='<option value="practice">Practice</option><option value="game">Game</option><option value="eval">Evaluation</option><option value="milestone">Milestone</option><option value="event">Event</option>';
-    html+='</select>';
+    html+=aosSeasonFormHTML('coach','#00E0FF','<option value="practice">Practice</option><option value="game">Game</option><option value="eval">Evaluation</option><option value="milestone">Milestone</option><option value="event">Event</option>');
     html+='<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#8899aa;margin-bottom:8px;cursor:pointer"><input type="checkbox" id="coach-ev-recurring" onchange="document.getElementById(\'coach-ev-recur-opts\').style.display=this.checked?\'block\':\'none\'"> Make this recurring</label>';
     html+='<div id="coach-ev-recur-opts" style="display:none;background:rgba(255,255,255,0.03);border-radius:8px;padding:10px;margin-bottom:8px">';
     html+='<div style="font-size:11px;color:#8899aa;margin-bottom:6px">Starts on the date above. Repeats weekly on:</div>';
@@ -10405,7 +10544,7 @@ function renderCoach(){
         var declNames=rsvps.filter(function(r){return r.status==='not_attending';}).map(function(r){return r.playerName;});
         html+='<div style="background:rgba(255,255,255,0.03);border-radius:8px;padding:8px 10px;margin-bottom:0">'+
           '<div style="display:flex;align-items:center;gap:8px">'+
-          '<div style="flex:1"><span style="font-size:12px;color:#e8f4fd;font-weight:600">'+escH(e.title)+'</span> <span style="font-size:10px;color:#8899aa">'+(e.date||'')+' · '+e.type+'</span></div>'+
+          '<div style="flex:1"><div style="font-size:12px;color:#e8f4fd;font-weight:600">'+escH(e.title)+'</div><div style="font-size:10px;color:#8899aa">'+aosSeasonWhenHTML(e)+'</div></div>'+
           '<button onclick="removeCoachSeasonEvent(\''+e.id+'\')" style="background:rgba(231,76,60,0.12);border:1px solid rgba(231,76,60,0.5);color:#e74c3c;border-radius:6px;cursor:pointer;font-size:14px;font-weight:700;padding:6px 10px" title="Remove event" aria-label="Remove event">✕</button></div>'+
           '<div style="font-size:10px;margin-top:4px"><span style="color:#2ecc71">✅ '+attN+' attending</span>'+(attNames.length?': '+escH(attNames.join(', ')):'')+
           (declN?'<br><span style="color:#ff4466">❌ '+declN+' can\'t make it</span>: '+escH(declNames.join(', ')):'')+'</div>'+
@@ -10605,6 +10744,40 @@ window.saveCoachWeeklyPlan=function(){
   }).then(function(){showToast('Weekly plan saved! Athletes will see this. ✅');renderCoach();});
 };
 
+/* One markup for the Season Events form, used by both the coach and the
+   trainer side. Six inputs used to share a single flex row: on a phone
+   that left the two time pickers about fifty pixels wide, which on iOS
+   clips the time text away entirely \u2014 you could tap it, but you could
+   not read what you had set. Stacked, with real labels. */
+function aosSeasonFormHTML(prefix,accent,typeOptions){
+  var fld='padding:10px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:14px;box-sizing:border-box;width:100%';
+  var lbl='font-size:11px;color:#8899aa;margin-bottom:4px';
+  var h='';
+  h+='<input id="'+prefix+'-ev-title" placeholder="Event title" style="'+fld+';margin-bottom:8px">';
+  h+='<div style="display:flex;gap:8px;margin-bottom:8px">';
+  h+='<div style="flex:1;min-width:0"><div style="'+lbl+'">Date</div><input id="'+prefix+'-ev-date" type="date" style="'+fld+'"></div>';
+  h+='<div style="flex:1;min-width:0"><div style="'+lbl+'">Type</div><select id="'+prefix+'-ev-type" style="'+fld+'">'+typeOptions+'</select></div>';
+  h+='</div>';
+  h+='<div style="display:flex;gap:8px;margin-bottom:8px">';
+  h+='<div style="flex:1;min-width:0"><div style="'+lbl+'">Start</div><input id="'+prefix+'-ev-start" type="time" style="'+fld+'"></div>';
+  h+='<div style="flex:1;min-width:0"><div style="'+lbl+'">End</div><input id="'+prefix+'-ev-end" type="time" style="'+fld+'"></div>';
+  h+='</div>';
+  h+='<div style="'+lbl+'">Where</div>';
+  h+='<input id="'+prefix+'-ev-loc" placeholder="Dome, field 2" style="'+fld+';margin-bottom:8px">';
+  return h;
+}
+/* The date, the time and the place on one line, however much of it was
+   filled in \u2014 a coach who sets a start time should see it afterwards. */
+function aosSeasonWhenHTML(e){
+  var bits=[e.date||''];
+  /* Same clock the athlete reads it on: a coach who sets 17:30 and is
+     shown "17:30" while the family sees "5:30 PM" has two things to
+     reconcile for no reason. */
+  if(e.start) bits.push(aosEventTimeLabel(e));
+  if(e.location) bits.push(e.location);
+  if(e.type) bits.push(e.type);
+  return escH(bits.filter(Boolean).join(' \u00B7 '));
+}
 window.addCoachSeasonEvent=function(){
   var u=window.AOS_USER||{};
   var title=document.getElementById('coach-ev-title').value.trim();
@@ -10636,8 +10809,9 @@ window.addCoachSeasonEvent=function(){
     return AppSDK.setItem('aos_season_events',evs);
   }).then(function(){
     showToast(isRecurring?'Recurring event added to season calendar! ✅':'Event added to season calendar! ✅');
-    document.getElementById('coach-ev-title').value='';
-    document.getElementById('coach-ev-date').value='';
+    ['coach-ev-title','coach-ev-date','coach-ev-start','coach-ev-end','coach-ev-loc'].forEach(function(id){
+      var f=document.getElementById(id); if(f) f.value='';
+    });
     document.getElementById('coach-ev-recurring').checked=false;
     document.getElementById('coach-ev-recur-opts').style.display='none';
     document.getElementById('coach-ev-until').value='';
@@ -12135,6 +12309,514 @@ window.aosSaveChildReport=function(name,rep,bests){
    the coach can see who has joined with it. The code is the secret;
    the invite document holds nothing about any child.
    ══════════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════════
+   SCHEDULE IMPORT / EXPORT  (coach, trainer, org)
+
+   A season arrives as a spreadsheet, not as forty taps. This reads a
+   CSV or a block pasted straight out of a sheet, shows the coach what
+   it understood, and writes the lot in one go. Re-importing a revised
+   schedule updates the rows it already made instead of doubling them.
+
+   Dates and times are handled as strings throughout — never parsed
+   into a Date and read back — because that is exactly how an evening
+   session used to land on the following day.
+   ══════════════════════════════════════════════════════════════════ */
+var AOS_SCHED_COLS={
+  date:['date','day','gamedate','eventdate','startdate','dates','matchdate','practicedate'],
+  start:['start','starttime','time','begins','starts','from','timestart'],
+  end:['end','endtime','finish','ends','until','to','timeend'],
+  title:['title','event','summary','name','opponent','eventname','activity','session','description2'],
+  location:['location','place','venue','field','facility','address','site','where','park'],
+  type:['type','kind','category','eventtype'],
+  notes:['notes','note','comment','comments','details','description','info','remarks'],
+  capacity:['capacity','spots','limit','max','seats','openings']
+};
+var AOS_SCHED_TYPES=['Practice','Game','Training','Lesson','Tournament','Other'];
+function _aosSchedNorm(s){ return String(s==null?'':s).toLowerCase().replace(/[^a-z0-9]/g,''); }
+function _p2(n){ return String(n).padStart(2,'0'); }
+
+/* A CSV reader that survives quoted commas, doubled quotes and the
+   tab-separated block you get from pasting a spreadsheet selection. */
+function aosCsvParse(text,delim){
+  var s=String(text||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  if(s.charCodeAt(0)===0xFEFF) s=s.slice(1);          /* Excel's BOM */
+  var rows=[],row=[],cur='',q=false;
+  for(var i=0;i<s.length;i++){
+    var c=s.charAt(i);
+    if(q){
+      if(c==='"'){ if(s.charAt(i+1)==='"'){ cur+='"'; i++; } else q=false; }
+      else cur+=c;
+    }
+    else if(c==='"'&&cur==='') q=true;
+    else if(c===delim){ row.push(cur); cur=''; }
+    else if(c==='\n'){ row.push(cur); rows.push(row); row=[]; cur=''; }
+    else cur+=c;
+  }
+  row.push(cur); rows.push(row);
+  return rows.filter(function(r){
+    return r.some(function(x){ return String(x||'').trim()!==''; });
+  }).map(function(r){ return r.map(function(x){ return String(x||'').trim(); }); });
+}
+
+/* M/D/YYYY is assumed over D/M/YYYY — US club schedules. ISO wins
+   outright when it's there, so a sheet can be made unambiguous. */
+function aosParseDateLoose(s){
+  s=String(s||'').trim();
+  if(!s) return '';
+  var m=s.match(/(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})/);
+  if(m) return m[1]+'-'+_p2(+m[2])+'-'+_p2(+m[3]);
+  m=s.match(/(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})/);
+  if(m){
+    var y=m[3]; if(y.length===2) y=(+y>70?'19':'20')+y;
+    return y+'-'+_p2(+m[1])+'-'+_p2(+m[2]);
+  }
+  var MON={jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12};
+  var low=s.toLowerCase(), thisYear=String(new Date().getFullYear());
+  /* Day-first is tried first: in "11 April 2026" a month-first pattern
+     would otherwise swallow "20" out of the year as the day. */
+  m=low.match(/(\d{1,2})(?!\d)(?:st|nd|rd|th)?\s+([a-z]{3,9}),?\s*(\d{4})?/);
+  if(m&&MON[m[2].slice(0,3)]) return (m[3]||thisYear)+'-'+_p2(MON[m[2].slice(0,3)])+'-'+_p2(+m[1]);
+  m=low.match(/([a-z]{3,9})\.?\s+(\d{1,2})(?!\d)(?:st|nd|rd|th)?,?\s*(\d{4})?/);
+  if(m&&MON[m[1].slice(0,3)]) return (m[3]||thisYear)+'-'+_p2(MON[m[1].slice(0,3)])+'-'+_p2(+m[2]);
+  return '';
+}
+function aosParseTimeLoose(s){
+  s=String(s||'').trim().toLowerCase().replace(/\./g,'');
+  if(!s) return '';
+  if(/^noon$/.test(s)) return '12:00';
+  if(/^midnight$/.test(s)) return '00:00';
+  var m=s.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm|a|p)?/);
+  if(!m) return '';
+  var h=parseInt(m[1],10), mi=m[2]?parseInt(m[2],10):0, ap=(m[3]||'').charAt(0);
+  if(isNaN(h)||isNaN(mi)||mi>59) return '';
+  if(ap==='p'&&h<12) h+=12;
+  if(ap==='a'&&h===12) h=0;
+  if(h>23) return '';
+  return _p2(h)+':'+_p2(mi);
+}
+function aosAddMinutes(t,mins){
+  if(!t) return '';
+  var p=t.split(':'), total=(+p[0])*60+(+p[1])+mins;
+  if(total>=1440) return '23:59';
+  return _p2(Math.floor(total/60))+':'+_p2(total%60);
+}
+function aosNextDayStr(ds){
+  var p=(ds||'').split('-');
+  var d=new Date(+p[0],+p[1]-1,+p[2]+1);
+  return d.getFullYear()+'-'+_p2(d.getMonth()+1)+'-'+_p2(d.getDate());
+}
+
+/* Read the sheet. Returns the rows it understood and the ones it
+   didn't, so the coach sees both before anything is written. */
+function aosSchedParse(text){
+  var raw=String(text||'');
+  if(!raw.trim()) return {rows:[],bad:[],note:'Nothing pasted yet.'};
+  var first=raw.split('\n')[0]||'';
+  var delim=((first.match(/\t/g)||[]).length>(first.match(/,/g)||[]).length)?'\t':',';
+  var grid=aosCsvParse(raw,delim);
+  if(!grid.length) return {rows:[],bad:[],note:'Nothing to read.'};
+
+  var head=grid[0].map(_aosSchedNorm), map={}, hasHeader=false;
+  Object.keys(AOS_SCHED_COLS).forEach(function(k){
+    AOS_SCHED_COLS[k].forEach(function(syn){
+      if(map[k]===undefined){
+        var i=head.indexOf(syn);
+        if(i>=0){ map[k]=i; hasHeader=true; }
+      }
+    });
+  });
+  /* No header row recognised: fall back to a fixed order and say so. */
+  var note='';
+  if(!hasHeader||map.date===undefined){
+    map={date:0,start:1,title:2,location:3,end:4};
+    hasHeader=false;
+    note='No column headings recognised — read as Date, Start, Title, Location, End.';
+  }
+  var body=hasHeader?grid.slice(1):grid;
+  var cell=function(r,k){ return map[k]===undefined?'':(r[map[k]]||''); };
+
+  var rows=[],bad=[];
+  body.forEach(function(r,idx){
+    var dRaw=cell(r,'date'), date=aosParseDateLoose(dRaw);
+    var title=cell(r,'title').trim();
+    var typeRaw=cell(r,'type').trim();
+    var type=AOS_SCHED_TYPES.filter(function(t){
+      return _aosSchedNorm(t)===_aosSchedNorm(typeRaw);
+    })[0]||(typeRaw?'Other':'Practice');
+    if(!date){
+      bad.push({line:idx+(hasHeader?2:1),why:dRaw?('Couldn\u2019t read the date "'+dRaw+'"'):'No date',raw:r.join(' \u00B7 ')});
+      return;
+    }
+    var start=aosParseTimeLoose(cell(r,'start'));
+    var end=aosParseTimeLoose(cell(r,'end'));
+    if(start&&end&&end<=start) end='';
+    rows.push({
+      date:date, start:start, end:end,
+      title:title||(typeRaw||'Session'),
+      location:cell(r,'location').trim(),
+      type:type, notes:cell(r,'notes').trim(),
+      capacity:Math.max(0,parseInt(cell(r,'capacity'),10)||0),
+      line:idx+(hasHeader?2:1)
+    });
+  });
+  rows.sort(function(a,b){ return (a.date+(a.start||'')).localeCompare(b.date+(b.start||'')); });
+  return {rows:rows,bad:bad,note:note};
+}
+
+/* ── The import panel ─────────────────────────────────────────────── */
+window._aosSchedPreview=null;
+window.aosSchedReadFile=function(input){
+  var f=input&&input.files&&input.files[0];
+  if(!f) return;
+  var r=new FileReader();
+  r.onload=function(){
+    var box=document.getElementById('sched-csv');
+    if(box){ box.value=String(r.result||''); aosSchedPreview(); }
+  };
+  r.onerror=function(){ showToast('Couldn\u2019t read that file.'); };
+  r.readAsText(f);
+};
+window.aosSchedPreview=function(){
+  var box=document.getElementById('sched-csv');
+  window._aosSchedPreview=aosSchedParse(box?box.value:'');
+  aosSchedRenderPreview();
+};
+window.aosSchedClear=function(){
+  var box=document.getElementById('sched-csv');
+  if(box) box.value='';
+  window._aosSchedPreview=null;
+  aosSchedRenderPreview();
+};
+function aosSchedRenderPreview(){
+  var el=document.getElementById('sched-preview');
+  if(!el) return;
+  var p=window._aosSchedPreview;
+  if(!p){ el.innerHTML=''; return; }
+  var h='';
+  if(p.note) h+='<div style="font-size:11px;color:#FFD700;margin-bottom:8px">'+escH(p.note)+'</div>';
+  if(!p.rows.length&&!p.bad.length){
+    el.innerHTML='<div style="font-size:12px;color:#8899aa">Nothing readable in there yet.</div>';
+    return;
+  }
+  h+='<div style="font-size:12px;font-weight:700;color:#e8f4fd;margin-bottom:6px">'+
+      p.rows.length+' event'+(p.rows.length===1?'':'s')+' ready'+
+      (p.bad.length?' \u00B7 <span style="color:#ff4466">'+p.bad.length+' skipped</span>':'')+'</div>';
+  if(p.rows.length){
+    h+='<div style="max-height:240px;overflow:auto;border:1px solid #334;border-radius:8px;margin-bottom:8px">';
+    p.rows.slice(0,200).forEach(function(r){
+      h+='<div style="padding:7px 9px;border-bottom:1px solid #22303f;font-size:11px;color:#cfe">'+
+        '<span style="color:#FFD700;font-weight:700">'+escH(r.date)+'</span>'+
+        (r.start?' <span style="color:#8899aa">'+escH(r.start)+(r.end?'\u2013'+escH(r.end):'')+'</span>':' <span style="color:#8899aa">all day</span>')+
+        ' \u00B7 '+escH(r.title)+
+        (r.location?' <span style="color:#8899aa">@ '+escH(r.location)+'</span>':'')+
+        ' <span style="color:#667">['+escH(r.type)+']</span>'+
+      '</div>';
+    });
+    if(p.rows.length>200) h+='<div style="padding:7px 9px;font-size:11px;color:#8899aa">\u2026and '+(p.rows.length-200)+' more.</div>';
+    h+='</div>';
+  }
+  if(p.bad.length){
+    h+='<div style="border:1px solid #ff446644;border-radius:8px;padding:8px;margin-bottom:8px;max-height:140px;overflow:auto">';
+    p.bad.slice(0,30).forEach(function(b){
+      h+='<div style="font-size:11px;color:#ff8899;margin-bottom:3px">Line '+b.line+': '+escH(b.why)+'</div>';
+    });
+    h+='</div>';
+  }
+  if(p.rows.length){
+    h+='<button class="btn btn-primary btn-full btn-sm" onclick="aosSchedImport()">Add '+p.rows.length+' event'+(p.rows.length===1?'':'s')+' to the schedule</button>';
+  }
+  el.innerHTML=h;
+}
+
+/* Writing. One key per event (team + date + start + title) means a
+   second import of a revised schedule edits what it already made. */
+function aosSchedKey(teamId,r){
+  return (teamId||'-')+'|'+r.date+'|'+(r.start||'')+'|'+_aosSchedNorm(r.title);
+}
+window.aosSchedImport=function(){
+  var p=window._aosSchedPreview;
+  if(!p||!p.rows.length) return;
+  var u=window.AOS_USER||{};
+  if(!u.userId){ showToast('Sign in first.'); return; }
+  var teamId=window._staffTeam||'';
+  var kind=(document.getElementById('sched-kind')||{}).value||'attendance';
+  var btn=document.getElementById('sched-preview');
+  showToast('Importing '+p.rows.length+'\u2026');
+  aosLoadGraph().then(function(g){
+    var viewers=aosEventAudience(g,u.userId,u.role||'coach',teamId);
+    if(viewers.length>1000){ showToast('That audience is too large to post to.'); return; }
+    var existing={};
+    (scheduledEvents||[]).forEach(function(e){
+      if(e.hostId!==u.userId||!e.importKey) return;
+      (e.importKeys||[e.importKey]).forEach(function(k){ existing[k]=e; });
+    });
+    var ops=[],made=0,changed=0;
+    p.rows.forEach(function(r){
+      var key=aosSchedKey(teamId,r);
+      var prev=existing[key];
+      if(prev){
+        changed++;
+        var pk=(prev.importKeys||[prev.importKey]).slice();
+        if(pk.indexOf(key)<0) pk.push(key);
+        ops.push({ref:fbDb.collection('scheduledEvents').doc(prev.id),update:{
+          date:r.date, title:r.title, start:r.start, end:r.end||(r.start?aosAddMinutes(r.start,90):''),
+          allDay:!r.start, location:r.location, notes:r.notes, type:r.type,
+          capacity:r.capacity, cancelled:false, viewers:viewers, updatedAt:Date.now(),
+          importKey:key, importKeys:pk.slice(-6)
+        }});
+      } else {
+        made++;
+        var ev={
+          id:_evId(), kind:kind, title:r.title, date:r.date,
+          start:r.start, end:r.end||(r.start?aosAddMinutes(r.start,90):''),
+          allDay:!r.start, location:r.location, notes:r.notes, type:r.type,
+          capacity:r.capacity, seriesId:'', teamId:teamId,
+          hostId:u.userId, hostName:u.name||'', hostRole:u.role||'',
+          createdAt:Date.now(), cancelled:false,
+          importKey:key, importKeys:[key], source:'csv',
+          viewers:viewers, responses:{}
+        };
+        ops.push({ref:fbDb.collection('scheduledEvents').doc(ev.id),set:ev});
+      }
+    });
+    /* Firestore caps a batch at 500 writes; go in chunks and stop on
+       the first failure rather than reporting a half-written import. */
+    var chunks=[];
+    for(var i=0;i<ops.length;i+=400) chunks.push(ops.slice(i,i+400));
+    return chunks.reduce(function(chain,chunk){
+      return chain.then(function(){
+        var b=fbDb.batch();
+        chunk.forEach(function(o){ if(o.set) b.set(o.ref,o.set); else b.update(o.ref,o.update); });
+        return b.commit();
+      });
+    },Promise.resolve()).then(function(){
+      return (typeof aosLoadEvents==='function')?aosLoadEvents():null;
+    }).then(function(){
+      showToast(made+' added'+(changed?', '+changed+' updated':'')+'.');
+      window._aosRepublish=null;
+      window._aosSchedPreview=null;
+      var box=document.getElementById('sched-csv'); if(box) box.value='';
+      if(typeof renderTeamHubForStaff==='function') renderTeamHubForStaff();
+    });
+  }).catch(function(e){
+    console.warn('AOS schedule import failed',e);
+    showToast('Import failed \u2014 nothing further was written.');
+  });
+};
+
+/* ── Export ───────────────────────────────────────────────────────── */
+function aosIcsEsc(s){
+  return String(s==null?'':s).replace(/\\/g,'\\\\').replace(/;/g,'\\;')
+    .replace(/,/g,'\\,').replace(/\r?\n/g,'\\n');
+}
+function aosIcsFold(line){
+  if(line.length<=73) return line;
+  var out=line.slice(0,73), rest=line.slice(73);
+  while(rest.length){ out+='\r\n '+rest.slice(0,72); rest=rest.slice(72); }
+  return out;
+}
+/* Times are written floating — no zone, no Z. The session happens at
+   six o'clock where the team is, and that is what every calendar app
+   shows. A zone-stamped file would be wrong the moment anyone travels. */
+function aosBuildIcs(evs,calName){
+  var stamp=new Date().toISOString().replace(/[-:]/g,'').replace(/\.\d{3}/,'');
+  var out=['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//AOS Athlete//Schedule//EN',
+           'CALSCALE:GREGORIAN','METHOD:PUBLISH','X-WR-CALNAME:'+aosIcsEsc(calName||'Team Schedule')];
+  (evs||[]).forEach(function(e){
+    if(!e.date) return;
+    var d=e.date.replace(/-/g,'');
+    out.push('BEGIN:VEVENT');
+    out.push('UID:'+(e.id||('ev'+d))+'@aos-athlete');
+    out.push('DTSTAMP:'+stamp);
+    if(e.start){
+      out.push('DTSTART:'+d+'T'+e.start.replace(':','')+'00');
+      var endT=e.end||aosAddMinutes(e.start,90);
+      out.push('DTEND:'+d+'T'+endT.replace(':','')+'00');
+    } else {
+      out.push('DTSTART;VALUE=DATE:'+d);
+      out.push('DTEND;VALUE=DATE:'+aosNextDayStr(e.date).replace(/-/g,''));
+    }
+    out.push('SUMMARY:'+aosIcsEsc(e.title||'Session'));
+    if(e.location) out.push('LOCATION:'+aosIcsEsc(e.location));
+    var desc=[];
+    if(e.type) desc.push('Type: '+e.type);
+    if(e.notes) desc.push(e.notes);
+    if(desc.length) out.push('DESCRIPTION:'+aosIcsEsc(desc.join('\n')));
+    if(e.cancelled) out.push('STATUS:CANCELLED');
+    out.push('END:VEVENT');
+  });
+  out.push('END:VCALENDAR');
+  return out.map(aosIcsFold).join('\r\n')+'\r\n';
+}
+function aosCsvCell(v){
+  var s=String(v==null?'':v);
+  return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;
+}
+function aosBuildScheduleCsv(evs){
+  var head=['Date','Start','End','Title','Type','Location','Notes','Status'];
+  var lines=[head.join(',')];
+  (evs||[]).forEach(function(e){
+    lines.push([e.date||'',e.start||'',e.end||'',e.title||'',e.type||'',
+                e.location||'',e.notes||'',e.cancelled?'Cancelled':'Scheduled']
+      .map(aosCsvCell).join(','));
+  });
+  return lines.join('\r\n')+'\r\n';
+}
+function aosDownloadFile(name,mime,text){
+  try{
+    var blob=new Blob([text],{type:mime});
+    var url=URL.createObjectURL(blob);
+    var a=document.createElement('a');
+    a.href=url; a.download=name; a.style.display='none';
+    document.body.appendChild(a); a.click();
+    setTimeout(function(){ URL.revokeObjectURL(url); a.remove(); },2000);
+  }catch(e){
+    console.warn('AOS download failed',e);
+    showToast('Couldn\u2019t create the file on this device.');
+  }
+}
+/* What this staff member actually hosts, optionally narrowed to the
+   team they've got picked and to what hasn't happened yet. */
+function aosSchedExportSet(){
+  var u=window.AOS_USER||{};
+  var teamId=window._staffTeam||'';
+  var scope=(document.getElementById('sched-ex-scope')||{}).value||'upcoming';
+  var today=(typeof aosDateKey==='function')?aosDateKey():todayStr();
+  return (scheduledEvents||[]).filter(function(e){
+    if(e.hostId!==u.userId) return false;
+    if(teamId&&e.teamId&&e.teamId!==teamId) return false;
+    if(scope==='upcoming'&&e.date<today) return false;
+    return true;
+  }).sort(function(a,b){ return (a.date+(a.start||'')).localeCompare(b.date+(b.start||'')); });
+}
+window.aosSchedExport=function(fmt){
+  var evs=aosSchedExportSet();
+  if(!evs.length){ showToast('No events to export.'); return; }
+  var nm=(window._staffTeamName||'Team').replace(/[^A-Za-z0-9]+/g,'-').replace(/^-|-$/g,'')||'Team';
+  var stamp=(typeof aosDateKey==='function')?aosDateKey():todayStr();
+  if(fmt==='ics') aosDownloadFile(nm+'-schedule-'+stamp+'.ics','text/calendar;charset=utf-8',aosBuildIcs(evs,(window._staffTeamName||'Team')+' Schedule'));
+  else aosDownloadFile(nm+'-schedule-'+stamp+'.csv','text/csv;charset=utf-8',aosBuildScheduleCsv(evs));
+  showToast(evs.length+' event'+(evs.length===1?'':'s')+' exported.');
+};
+
+/* ── Republish ────────────────────────────────────────────────────
+   An event carries its audience in the document, fixed when it was
+   posted. So a family who joins on Tuesday cannot see the game that
+   was posted on Monday, and nothing anywhere says so: the coach sees
+   a full roster, the family sees an empty calendar.
+
+   It has to be the host who fixes it. The rules let only the host
+   change an event, and that is right — an athlete who could add
+   themselves to a coach's event viewers could add themselves to
+   anyone's. So this finds the gap and hands the coach one button.
+
+   Only what hasn't happened yet. Backfilling a new athlete into last
+   month's practices would put absences on a record for sessions they
+   were never invited to. */
+function aosRepublishScan(g){
+  var u=window.AOS_USER||{};
+  if(!u.userId) return {events:[],people:[],ops:0};
+  var today=(typeof aosDateKey==='function')?aosDateKey():todayStr();
+  var events=[], people={};
+  (scheduledEvents||[]).forEach(function(ev){
+    if(ev.hostId!==u.userId||ev.cancelled) return;
+    if((ev.date||'')<today) return;
+    /* Recomputed per event, so a 14U Gold practice is re-addressed to
+       14U Gold and not to every athlete this coach has. */
+    var want=aosEventAudience(g,u.userId,u.role||'coach',ev.teamId);
+    var cur=ev.viewers||[];
+    var missing=want.filter(function(x){ return cur.indexOf(x)<0; });
+    if(!missing.length) return;
+    missing.forEach(function(id){ people[id]=1; });
+    events.push({ev:ev,viewers:_aosUniq(cur.concat(missing))});
+  });
+  return {events:events, people:Object.keys(people), ops:events.length};
+}
+window._aosRepublish=null;
+function aosRepublishRefresh(cb){
+  aosLoadGraph().then(function(g){
+    var scan=aosRepublishScan(g);
+    scan.names=scan.people.map(function(id){ return aosNameOf(g,id); });
+    window._aosRepublish=scan;
+    if(cb) cb(scan);
+  }).catch(function(e){ console.warn('AOS republish scan failed',e); if(cb) cb(null); });
+}
+window.aosRepublish=function(){
+  var scan=window._aosRepublish;
+  if(!scan||!scan.events.length){ showToast('Everyone on the team already has these.'); return; }
+  var u=window.AOS_USER||{};
+  showToast('Republishing '+scan.events.length+'\u2026');
+  var ops=scan.events.slice();
+  var chunks=[];
+  for(var i=0;i<ops.length;i+=400) chunks.push(ops.slice(i,i+400));
+  chunks.reduce(function(chain,chunk){
+    return chain.then(function(){
+      var b=fbDb.batch();
+      chunk.forEach(function(o){
+        b.update(fbDb.collection('scheduledEvents').doc(o.ev.id),{viewers:o.viewers,updatedAt:Date.now()});
+      });
+      return b.commit();
+    });
+  },Promise.resolve()).then(function(){
+    scan.events.forEach(function(o){ o.ev.viewers=o.viewers; });
+    var nP=scan.people.length;
+    showToast(scan.events.length+' event'+(scan.events.length===1?'':'s')+' now reach '+nP+' more '+(nP===1?'person':'people')+'.');
+    window._aosRepublish=null;
+    if(typeof renderTeamHubForStaff==='function') renderTeamHubForStaff();
+    if(typeof aosRefreshEventViews==='function') aosRefreshEventViews();
+  }).catch(function(e){
+    console.warn('AOS republish failed',e); showToast('Could not republish \u2014 nothing was changed.');
+  });
+};
+function aosRepublishCardHTML(){
+  var scan=window._aosRepublish;
+  if(!scan||!scan.events.length) return '';
+  var names=(scan.names||[]).slice(0,6).join(', ');
+  var more=(scan.names||[]).length>6?(' and '+((scan.names||[]).length-6)+' more'):'';
+  return '<div class="card" style="margin-bottom:12px;border:1px solid rgba(255,215,0,0.35)">'+
+    '<div style="font-weight:800;color:#FFD700;margin-bottom:4px;font-size:13px">\uD83D\uDD01 REPUBLISH TO THE TEAM</div>'+
+    '<div style="font-size:11px;color:#8899aa;margin-bottom:10px">'+
+      scan.people.length+' '+(scan.people.length===1?'person':'people')+' joined after you posted, so '+
+      scan.events.length+' upcoming event'+(scan.events.length===1?' is':'s are')+' not reaching '+
+      (scan.people.length===1?'them':'all of them')+(names?': '+escH(names)+escH(more):'')+'.'+
+    '</div>'+
+    '<button class="btn btn-primary btn-full btn-sm" onclick="aosRepublish()">Send '+scan.events.length+' event'+(scan.events.length===1?'':'s')+' to everyone</button>'+
+    '<div style="font-size:10px;color:#667;margin-top:8px">Upcoming only. Past sessions stay as they were \u2014 nobody should pick up an absence for a practice they were never invited to.</div>'+
+  '</div>';
+}
+function aosSchedPanelHTML(){
+  var u=window.AOS_USER||{};
+  var mine=(scheduledEvents||[]).filter(function(e){ return e.hostId===u.userId; }).length;
+  var h=aosRepublishCardHTML();
+  h+='<div class="card" style="margin-bottom:12px">';
+  h+='<div style="font-weight:800;color:#FFD700;margin-bottom:4px;font-size:13px">\uD83D\uDCE5 IMPORT A SCHEDULE</div>';
+  h+='<div style="font-size:11px;color:#8899aa;margin-bottom:10px">Paste the rows straight out of a spreadsheet, or pick a CSV file. Headings like Date, Start, End, Title, Location, Type and Notes are recognised in any order. Dates read as M/D/YYYY unless written 2026-04-11.</div>';
+  h+='<input type="file" id="sched-file" accept=".csv,.txt,text/csv,text/plain" onchange="aosSchedReadFile(this)" style="font-size:12px;color:#8899aa;margin-bottom:8px;width:100%">';
+  h+='<textarea id="sched-csv" rows="5" placeholder="Date,Start,End,Title,Location,Type&#10;4/11/2026,6:00 PM,8:00 PM,vs Thunder,Memorial Field,Game" style="width:100%;padding:9px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:12px;font-family:monospace;box-sizing:border-box;resize:vertical;margin-bottom:8px"></textarea>';
+  h+='<div style="display:flex;gap:8px;margin-bottom:8px;align-items:center">';
+  h+='<select id="sched-kind" style="flex:1;padding:8px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:12px"><option value="attendance">Everyone\u2019s expected \u2014 attendance</option><option value="signup">Limited spots \u2014 sign-up</option></select>';
+  h+='</div>';
+  h+='<div style="display:flex;gap:8px;margin-bottom:10px">';
+  h+='<button class="btn btn-sm" style="flex:1" onclick="aosSchedPreview()">Check it</button>';
+  h+='<button class="btn btn-sm" onclick="aosSchedClear()" style="font-size:11px">Clear</button>';
+  h+='</div>';
+  h+='<div id="sched-preview"></div>';
+  h+='<div style="font-size:10px;color:#667;margin-top:8px">Nothing is written until you confirm. Importing the same schedule again updates the events it already created rather than duplicating them.</div>';
+  h+='</div>';
+
+  h+='<div class="card">';
+  h+='<div style="font-weight:800;color:#FFD700;margin-bottom:4px;font-size:13px">\uD83D\uDCE4 EXPORT</div>';
+  h+='<div style="font-size:11px;color:#8899aa;margin-bottom:10px">'+mine+' event'+(mine===1?'':'s')+' you host'+(window._staffTeam?' (filtered to the team you have picked)':'')+'. The calendar file opens in Apple Calendar, Google Calendar or Outlook.</div>';
+  h+='<select id="sched-ex-scope" style="width:100%;padding:8px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:12px;margin-bottom:8px"><option value="upcoming">Upcoming only</option><option value="all">Everything, past included</option></select>';
+  h+='<div style="display:flex;gap:8px">';
+  h+='<button class="btn btn-primary btn-sm" style="flex:1" onclick="aosSchedExport(\'ics\')">Calendar file (.ics)</button>';
+  h+='<button class="btn btn-sm" style="flex:1" onclick="aosSchedExport(\'csv\')">Spreadsheet (.csv)</button>';
+  h+='</div>';
+  h+='<div style="font-size:10px;color:#667;margin-top:8px">This is a snapshot, not a live feed \u2014 a calendar that keeps itself updated needs a server AOS doesn\u2019t have yet. If the schedule changes, send the new file.</div>';
+  h+='</div>';
+  return h;
+}
+
 var myInvites=[];
 var AOS_INVITE_DAYS=30;
 function aosInviteCode(){
@@ -13454,13 +14136,7 @@ function renderTrainer(){
     html+='<div style="background:#0d2233;border:1px solid #334;border-radius:14px;padding:14px;margin-bottom:14px">';
     html+='<div style="font-weight:800;color:#00ff88;margin-bottom:8px;font-size:13px">🗓️ SEASON EVENTS</div>';
     html+='<div style="font-size:11px;color:#8899aa;margin-bottom:8px">Shows on every linked athlete\'s Team → Season tab.</div>';
-    html+='<div style="display:flex;gap:8px;margin-bottom:8px">';
-    html+='<input id="trainer-ev-title" placeholder="Event title" style="flex:2;padding:9px 12px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px">';
-    html+='<input id="trainer-ev-date" type="date" style="flex:1;padding:9px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px">';
-    html+='</div>';
-    html+='<select id="trainer-ev-type" style="width:100%;padding:9px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px;margin-bottom:8px">';
-    html+='<option value="practice">Training Session</option><option value="eval">Evaluation</option><option value="milestone">Milestone</option><option value="event">Event</option>';
-    html+='</select>';
+    html+=aosSeasonFormHTML('trainer','#00ff88','<option value="practice">Training Session</option><option value="eval">Evaluation</option><option value="milestone">Milestone</option><option value="event">Event</option>');
     html+='<label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#8899aa;margin-bottom:8px;cursor:pointer"><input type="checkbox" id="trainer-ev-recurring" onchange="document.getElementById(\'trainer-ev-recur-opts\').style.display=this.checked?\'block\':\'none\'"> Make this recurring</label>';
     html+='<div id="trainer-ev-recur-opts" style="display:none;background:rgba(255,255,255,0.03);border-radius:8px;padding:10px;margin-bottom:8px">';
     html+='<div style="font-size:11px;color:#8899aa;margin-bottom:6px">Starts on the date above. Repeats weekly on:</div>';
@@ -13498,7 +14174,7 @@ function renderTrainer(){
         var declNames=rsvps.filter(function(r){return r.status==='not_attending';}).map(function(r){return r.playerName;});
         html+='<div style="background:rgba(255,255,255,0.03);border-radius:8px;padding:8px 10px;margin-bottom:0">'+
           '<div style="display:flex;align-items:center;gap:8px">'+
-          '<div style="flex:1"><span style="font-size:12px;color:#e8f4fd;font-weight:600">'+escH(e.title)+'</span> <span style="font-size:10px;color:#8899aa">'+(e.date||'')+' · '+e.type+'</span></div>'+
+          '<div style="flex:1"><div style="font-size:12px;color:#e8f4fd;font-weight:600">'+escH(e.title)+'</div><div style="font-size:10px;color:#8899aa">'+aosSeasonWhenHTML(e)+'</div></div>'+
           '<button onclick="removeTrainerSeasonEvent(\''+e.id+'\')" style="background:rgba(231,76,60,0.12);border:1px solid rgba(231,76,60,0.5);color:#e74c3c;border-radius:6px;cursor:pointer;font-size:14px;font-weight:700;padding:6px 10px" title="Remove event" aria-label="Remove event">✕</button></div>'+
           '<div style="font-size:10px;margin-top:4px"><span style="color:#2ecc71">✅ '+attN+' attending</span>'+(attNames.length?': '+escH(attNames.join(', ')):'')+
           (declN?'<br><span style="color:#ff4466">❌ '+declN+' can\'t make it</span>: '+escH(declNames.join(', ')):'')+'</div>'+
@@ -13657,6 +14333,9 @@ window.addTrainerSeasonEvent=function(){
   var u=window.AOS_USER||{};
   var title=document.getElementById('trainer-ev-title').value.trim();
   var date=document.getElementById('trainer-ev-date').value;
+  var evStart=(document.getElementById('trainer-ev-start')||{}).value||'';
+  var evEnd=(document.getElementById('trainer-ev-end')||{}).value||'';
+  var evLoc=((document.getElementById('trainer-ev-loc')||{}).value||'').trim();
   var type=document.getElementById('trainer-ev-type').value;
   if(!title||!date){showToast('Enter a title and date.');return;}
   var isRecurring=document.getElementById('trainer-ev-recurring').checked;
@@ -13671,16 +14350,19 @@ window.addTrainerSeasonEvent=function(){
       if(!dates.length){showToast('No matching dates in that range.');return Promise.reject('novalidate');}
       var rid=uid();
       dates.forEach(function(d){
-        evs.push({id:uid(),recurringId:rid,coachId:u.userId,coachName:u.name||'Trainer',title:title,date:d,type:type,days:days,createdAt:Date.now()});
+        evs.push({id:uid(),recurringId:rid,coachId:u.userId,coachName:u.name||'Trainer',title:title,date:d,
+          start:evStart,end:evEnd,allDay:!evStart,location:evLoc,type:type,days:days,createdAt:Date.now()});
       });
     } else {
-      evs.push({id:uid(),coachId:u.userId,coachName:u.name||'Trainer',title:title,date:date,type:type,createdAt:Date.now()});
+      evs.push({id:uid(),coachId:u.userId,coachName:u.name||'Trainer',title:title,date:date,
+        start:evStart,end:evEnd,allDay:!evStart,location:evLoc,type:type,createdAt:Date.now()});
     }
     return AppSDK.setItem('aos_season_events',evs);
   }).then(function(){
     showToast(isRecurring?'Recurring event added to season calendar! ✅':'Event added to season calendar! ✅');
-    document.getElementById('trainer-ev-title').value='';
-    document.getElementById('trainer-ev-date').value='';
+    ['trainer-ev-title','trainer-ev-date','trainer-ev-start','trainer-ev-end','trainer-ev-loc'].forEach(function(id){
+      var f=document.getElementById(id); if(f) f.value='';
+    });
     document.getElementById('trainer-ev-recurring').checked=false;
     document.getElementById('trainer-ev-recur-opts').style.display='none';
     document.getElementById('trainer-ev-until').value='';
@@ -14323,6 +15005,38 @@ var AOS_AUTH = {
     });
   },
 
+  /* ── Password reset ──────────────────────────────────────────────
+     Firebase sends the email and hosts the page the link opens, so this
+     needs nothing on our side. The one thing it can't do is tell us
+     whether an account exists: replying "no account for that address"
+     to anyone who types one would hand out the membership list, so the
+     message reads the same either way. */
+  resetPassword: function(){
+    var email=((document.getElementById('local-signin-email')||{}).value||'').trim().toLowerCase();
+    var errEl=document.getElementById('signin-error');
+    var say=function(msg,bad){
+      if(!errEl) return;
+      errEl.textContent=msg;
+      errEl.style.color=bad?'':'#2ecc71';
+      errEl.classList.add('show');
+    };
+    if(!email||email.indexOf('@')<0){ say('Type your email address above, then tap this again.',true); return; }
+    if(!window.fbAuth||!fbAuth.sendPasswordResetEmail){ say('Password reset isn\u2019t available right now.',true); return; }
+    say('Sending\u2026');
+    fbAuth.sendPasswordResetEmail(email).then(function(){
+      say('If there\u2019s an account for '+email+', a reset link is on its way. Check your spam folder \u2014 it comes from a no-reply address.');
+    }).catch(function(err){
+      if(err&&(err.code==='auth/user-not-found')){
+        say('If there\u2019s an account for '+email+', a reset link is on its way. Check your spam folder \u2014 it comes from a no-reply address.');
+        return;
+      }
+      var msg=err&&err.code==='auth/invalid-email' ? 'That doesn\u2019t look like a valid email address.'
+        : err&&err.code==='auth/too-many-requests' ? 'Too many attempts \u2014 wait a few minutes and try again.'
+        : 'Could not send the reset email: '+((err&&err.message)||'unknown error');
+      say(msg,true);
+    });
+  },
+
   /* ── Manual Create Account ────────────────────────────────────── */
   localRegister: function(){
     var first   = (document.getElementById('reg-first')   ||{}).value || '';
@@ -14571,6 +15285,8 @@ var AOS_AUTH = {
     // ── Manual Sign In ────────────────────────────────────────────
     var localSigninBtn = document.getElementById('local-signin-btn');
     if(localSigninBtn) localSigninBtn.addEventListener('click', function(){ self.localSignIn(); });
+    var forgotBtn = document.getElementById('forgot-pass-btn');
+    if(forgotBtn) forgotBtn.addEventListener('click', function(){ self.resetPassword(); });
     var siEmail = document.getElementById('local-signin-email');
     var siPass  = document.getElementById('local-signin-pass');
     if(siPass) siPass.addEventListener('keydown', function(e){ if(e.key==='Enter') self.localSignIn(); });
