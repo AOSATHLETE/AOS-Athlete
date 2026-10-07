@@ -2523,6 +2523,8 @@ window.aosStartDemo=function(role){
   var byRole={player:'demo_a1',coach:'demo_coach',trainer:'demo_trainer',org:'demo_org',parent:'demo_parent'};
   var acc=_demoStore.accounts[byRole[role]||'demo_a1'];
   window.AOS_USER={userId:acc.userId,name:acc.name,role:acc.role,roles:acc.roles,email:acc.email,athleteCode:acc.athleteCode};
+  /* Anything that broke before sign-in can be written now. */
+  if(typeof aosFlushSupportQueue==='function') setTimeout(aosFlushSupportQueue,1200);
   profile=_demoStore.personal.sb_profile;
   recovery=_demoStore.personal.sb_recovery;
   training=_demoStore.personal.sb_training;
@@ -3152,6 +3154,197 @@ const SECONDARY_MAP = {
    date when you revise them, and update the numbers either here or —
    without touching the app — as documents in the Firestore `benchmarks`
    collection, one per metric key, holding any of p4/d1/d2/d3/juco/naia. */
+/* ══════════════════════════════════════════════════════════════════
+   SUPPORT AND CRASH REPORTING
+
+   Until now a JavaScript error killed a screen in silence: the person
+   saw a half-drawn page and no explanation, and nothing anywhere
+   recorded that it happened. With the app in other people's hands
+   that is the expensive kind of quiet.
+
+   Three parts: anyone can send a report, crashes send themselves, and
+   the owner has somewhere to read both. No backend, so a report lands
+   in Firestore and can also open the sender's own mail app.
+   ══════════════════════════════════════════════════════════════════ */
+var AOS_VERSION='AOS V.8.0.1';   /* HTML and the rules file carry the same number */
+var AOS_SUPPORT_TO='ekuvaas@icloud.com';
+
+/* Which screen they were on, by section id — never the raw URL, which
+   can carry an invite code. */
+function aosCurrentScreen(){
+  try{
+    var a=document.querySelector('.section.active, [id^="sec-"].active');
+    if(a&&a.id) return a.id.replace(/^sec-/,'');
+  }catch(e){}
+  return 'unknown';
+}
+function aosDeviceLine(){
+  try{
+    var w=window.innerWidth+'x'+window.innerHeight;
+    return w+' \u00B7 '+(navigator.userAgent||'').slice(0,180);
+  }catch(e){ return ''; }
+}
+/* Errors arrive before sign-in too, and the rules rightly refuse an
+   anonymous write. Those wait in memory and go out when auth lands. */
+var _aosSupportQueue=[];
+function aosSupportSend(doc){
+  var u=window.AOS_USER||{};
+  if(!u.userId||!window.fbDb){
+    if(_aosSupportQueue.length<10) _aosSupportQueue.push(doc);
+    return Promise.resolve(false);
+  }
+  var id='sup_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8);
+  var rec=Object.assign({
+    id:id, fromId:u.userId, fromName:u.name||'', fromEmail:u.email||'',
+    role:u.role||'', screen:aosCurrentScreen(), version:AOS_VERSION,
+    device:aosDeviceLine(), ts:Date.now(), handled:false
+  },doc);
+  return fbDb.collection('support').doc(id).set(rec).then(function(){ return true; })
+    .catch(function(e){ console.warn('AOS support write failed',e); return false; });
+}
+window.aosFlushSupportQueue=function(){
+  if(!_aosSupportQueue.length) return;
+  var q=_aosSupportQueue.slice(); _aosSupportQueue=[];
+  q.forEach(function(d){ aosSupportSend(d); });
+};
+
+/* ── Crashes ──────────────────────────────────────────────────────
+   Capped and deduplicated. A render loop that throws on every frame
+   would otherwise write thousands of identical rows and bill for it. */
+var _aosSeenErrors={}, _aosErrCount=0, AOS_ERR_CAP=6;
+function aosLogError(kind,msg,src,line,col,stack){
+  try{
+    msg=String(msg||'').slice(0,300);
+    stack=String(stack||'').split('\n').slice(0,6).join('\n').slice(0,900);
+    var key=msg+'|'+(stack.split('\n')[0]||'');
+    if(_aosSeenErrors[key]) return;
+    if(_aosErrCount>=AOS_ERR_CAP) return;
+    _aosSeenErrors[key]=1; _aosErrCount++;
+    aosSupportSend({kind:'error', subkind:kind, message:msg,
+      source:String(src||'').slice(0,160), line:line||0, col:col||0, stack:stack});
+    aosShowBrokenBar();
+  }catch(e){ /* the reporter must never be the thing that throws */ }
+}
+/* The person deserves to know too. One quiet bar, not an alert. */
+function aosShowBrokenBar(){
+  try{
+    if(document.getElementById('aos-broke')) return;
+    var d=document.createElement('div');
+    d.id='aos-broke';
+    d.style.cssText='position:fixed;left:8px;right:8px;bottom:70px;z-index:9998;background:#2a1520;'+
+      'border:1px solid #ff4466;border-radius:10px;padding:10px 12px;font-size:12px;color:#ffd2dc;'+
+      'display:flex;gap:8px;align-items:center;box-shadow:0 6px 20px rgba(0,0,0,0.4)';
+    d.innerHTML='<div style="flex:1">Something on this screen didn\u2019t load. It\u2019s been reported.</div>'+
+      '<button class="btn btn-sm" style="font-size:11px;flex-shrink:0" onclick="aosOpenSupport()">Tell us more</button>'+
+      '<button class="btn btn-sm" style="font-size:11px;flex-shrink:0" onclick="(function(){var e=document.getElementById(\'aos-broke\');if(e)e.remove();})()">\u00D7</button>';
+    document.body.appendChild(d);
+  }catch(e){}
+}
+window.addEventListener('error',function(ev){
+  aosLogError('onerror', ev&&ev.message, ev&&ev.filename, ev&&ev.lineno, ev&&ev.colno,
+    ev&&ev.error&&ev.error.stack);
+});
+window.addEventListener('unhandledrejection',function(ev){
+  var r=ev&&ev.reason;
+  aosLogError('rejection', (r&&r.message)||String(r), '', 0, 0, r&&r.stack);
+});
+
+/* ── Reporting a problem by hand ──────────────────────────────────── */
+window.aosOpenSupport=function(){
+  if(document.getElementById('aos-support-ov')) return;
+  var ov=document.createElement('div');
+  ov.id='aos-support-ov';
+  ov.style.cssText='position:fixed;inset:0;z-index:9999;background:rgba(5,12,22,0.86);'+
+    'display:flex;align-items:flex-end;justify-content:center;padding:12px';
+  ov.innerHTML='<div style="background:#0d1a2d;border:1px solid #334;border-radius:14px;padding:16px;'+
+      'width:100%;max-width:560px;max-height:88vh;overflow:auto;box-sizing:border-box">'+
+    '<div style="font-weight:800;color:#FFD700;font-size:14px;margin-bottom:4px">Report a problem</div>'+
+    '<div style="font-size:11px;color:#8899aa;margin-bottom:10px">What went wrong, or what you expected to happen. '+
+      'Which screen you\u2019re on and what device goes with it automatically.</div>'+
+    '<textarea id="sup-text" rows="5" placeholder="The schedule import said it worked but nothing showed up\u2026" '+
+      'style="width:100%;padding:10px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;'+
+      'font-size:14px;box-sizing:border-box;resize:vertical;margin-bottom:8px"></textarea>'+
+    '<div style="font-size:11px;color:#8899aa;margin-bottom:4px">How to reach you back (optional)</div>'+
+    '<input id="sup-contact" placeholder="email or phone" style="width:100%;padding:10px;border-radius:8px;'+
+      'border:1px solid #334;background:#0A1A2F;color:#fff;font-size:14px;box-sizing:border-box;margin-bottom:10px">'+
+    '<div id="sup-msg" style="font-size:11px;color:#8899aa;margin-bottom:8px"></div>'+
+    '<div style="display:flex;gap:8px">'+
+      '<button class="btn btn-primary btn-sm" style="flex:1" id="sup-send">Send it</button>'+
+      '<button class="btn btn-sm" id="sup-close">Close</button>'+
+    '</div></div>';
+  document.body.appendChild(ov);
+  document.getElementById('sup-close').onclick=function(){ ov.remove(); };
+  document.getElementById('sup-send').onclick=function(){
+    var txt=(document.getElementById('sup-text').value||'').trim();
+    var who=(document.getElementById('sup-contact').value||'').trim();
+    var msg=document.getElementById('sup-msg');
+    if(!txt){ msg.textContent='Write a line about what happened first.'; msg.style.color='#ff8899'; return; }
+    msg.textContent='Sending\u2026'; msg.style.color='#8899aa';
+    aosSupportSend({kind:'report', message:txt.slice(0,2000), contact:who.slice(0,120)})
+      .then(function(ok){
+        if(!ok){ msg.textContent='Couldn\u2019t send it from here \u2014 use the email button below.'; msg.style.color='#ff8899'; }
+        else { msg.textContent='Sent. Thank you.'; msg.style.color='#2ecc71'; }
+        /* Firestore has it; the mail app is how it reaches a person
+           who isn't watching an inbox in an app they built. */
+        var u=window.AOS_USER||{};
+        var body='\n\n---\nFrom: '+(u.name||'')+' ('+(u.role||'')+')\nContact: '+(who||u.email||'')+
+          '\nScreen: '+aosCurrentScreen()+'\nVersion: '+AOS_VERSION+'\nDevice: '+aosDeviceLine();
+        var href='mailto:'+AOS_SUPPORT_TO+'?subject='+encodeURIComponent('AOS problem report')+
+          '&body='+encodeURIComponent(txt+body);
+        var row=document.createElement('div');
+        row.style.cssText='margin-top:10px';
+        row.innerHTML='<a href="'+href+'" class="btn btn-sm btn-full" style="display:block;text-align:center;'+
+          'text-decoration:none">Also email it</a>';
+        document.getElementById('sup-msg').parentNode.insertBefore(row,document.getElementById('sup-msg').nextSibling);
+        document.getElementById('sup-send').disabled=true;
+      });
+  };
+};
+function aosSupportLinkHTML(){
+  return '<div class="card" style="margin-top:12px">'+
+    '<div style="font-size:12px;color:var(--white-dim);margin-bottom:8px">'+
+      'Something broken, or not behaving the way you expected?</div>'+
+    '<button class="btn btn-sm btn-full" onclick="aosOpenSupport()">Report a problem</button>'+
+    '<div style="font-size:10px;color:#667;margin-top:6px">'+escH(AOS_VERSION)+'</div>'+
+  '</div>';
+}
+
+/* ── The owner's inbox ────────────────────────────────────────────── */
+window.aosRenderSupportInbox=function(hostId){
+  var host=document.getElementById(hostId||'sup-admin'); if(!host) return;
+  if(!isOwner()){ host.innerHTML=''; return; }
+  host.innerHTML='<div class="card"><div style="font-size:12px;color:var(--white-dim)">Loading reports\u2026</div></div>';
+  fbDb.collection('support').orderBy('ts','desc').limit(60).get().then(function(sn){
+    var rows=[]; sn.forEach(function(d){ rows.push(d.data()); });
+    var reports=rows.filter(function(r){ return r.kind==='report'; });
+    var errors=rows.filter(function(r){ return r.kind==='error'; });
+    var h='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:2px">\uD83D\uDCE8 Support</div>'+
+      '<div style="font-size:11px;color:var(--white-dim);margin-bottom:10px">'+
+      reports.length+' report'+(reports.length===1?'':'s')+' \u00B7 '+errors.length+
+      ' crash'+(errors.length===1?'':'es')+', newest first</div>';
+    if(!rows.length) h+='<div style="font-size:12px;color:var(--white-dim)">Nothing yet.</div>';
+    rows.forEach(function(r){
+      var when=new Date(r.ts||0).toLocaleString();
+      var isErr=r.kind==='error';
+      h+='<div style="border-top:1px solid rgba(255,255,255,0.08);padding:8px 0">'+
+        '<div style="font-size:11px;color:'+(isErr?'#ff8899':'#FFD700')+';font-weight:700">'+
+          (isErr?'CRASH':'REPORT')+' \u00B7 '+escH(r.screen||'?')+' \u00B7 '+escH(r.version||'?')+'</div>'+
+        '<div style="font-size:12px;color:#e8f4fd;margin:3px 0;white-space:pre-wrap">'+escH(r.message||'')+'</div>'+
+        (r.stack?'<div style="font-size:10px;color:#8899aa;font-family:monospace;white-space:pre-wrap;max-height:90px;overflow:auto">'+escH(r.stack)+'</div>':'')+
+        '<div style="font-size:10px;color:#8899aa;margin-top:3px">'+
+          escH(r.fromName||r.fromId||'')+(r.role?' ('+escH(r.role)+')':'')+
+          (r.contact?' \u00B7 '+escH(r.contact):'')+' \u00B7 '+escH(when)+'</div>'+
+        (r.device?'<div style="font-size:9px;color:#556">'+escH(r.device)+'</div>':'')+
+      '</div>';
+    });
+    h+='</div>';
+    host.innerHTML=h;
+  }).catch(function(e){
+    console.warn('AOS support inbox failed',e);
+    host.innerHTML='<div class="card"><div style="font-size:12px;color:#ff8899">Could not load reports.</div></div>';
+  });
+};
+
 var AOS_BENCHMARK_REVIEW={reviewed:'2026-09', next:'2027-03'};
 /* The owner's twice-yearly review: edit the thresholds in the app,
    saved to Firestore so every athlete picks them up without a rebuild. */
@@ -4493,7 +4686,9 @@ function loadParentTab(tab,body,childName){
   else if(tab==='teamchat'){
     AppSDK.getItem('aos_team_feed').then(function(feed){
       feed=Array.isArray(feed)?feed:[];
-      var html=
+      var html='<div style="background:rgba(0,224,255,0.06);border:1px solid rgba(0,224,255,0.25);'+
+        'border-radius:8px;padding:9px 12px;margin-bottom:10px;font-size:11px;color:#bfe9f7">'+
+        '\uD83C\uDFC3 Everyone on the team reads this, athletes included.</div>'+
         '<div style="background:rgba(0,224,255,0.06);border:1px solid rgba(0,224,255,0.18);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:11px;color:#00E0FF;font-weight:600">&#128065;&#65039; View Only &mdash; Parents cannot post to team chat</div>'+
         '<div style="display:flex;flex-direction:column;gap:8px;max-height:420px;overflow-y:auto">';
       if(!feed.length){
@@ -4519,38 +4714,8 @@ function loadParentTab(tab,body,childName){
 
   // ── PARENT CHAT (full read/write) ────────────────────────────────────────────
   else if(tab==='parentchat'){
-    AppSDK.getItem('aos_parent_chat').then(function(chat){
-      chat=Array.isArray(chat)?chat:[];
-      var myName=((profile.firstName||'')+(profile.lastName?' '+profile.lastName:'')).trim()||'Parent';
-      var html=
-        '<div style="font-size:11px;color:#8899aa;margin-bottom:10px">&#128106; Parent-to-parent + coach channel. Coach can read and reply from Team Hub.</div>'+
-        '<div id="pchat-msgs" style="display:flex;flex-direction:column;gap:8px;max-height:360px;overflow-y:auto;margin-bottom:12px">';
-      if(!chat.length){
-        html+='<div style="text-align:center;color:#8899aa;font-size:13px;padding:20px">No messages yet &mdash; start the conversation!</div>';
-      } else {
-        chat.slice(-50).reverse().forEach(function(msg){
-          var isMe=msg.author===myName;
-          html+=
-            '<div style="background:'+(isMe?'rgba(0,224,255,0.08)':'rgba(255,255,255,0.04)')+';border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:10px">'+
-            '<div style="display:flex;justify-content:space-between;margin-bottom:4px">'+
-              '<span style="font-weight:700;font-size:12px;color:'+(msg.isCoach?'#2ecc71':isMe?'#00E0FF':'#f39c12')+'">'+
-                (msg.isCoach?'&#127979; Coach: ':msg.isTrainer?'&#129464; Trainer: ':'')+escH(msg.author||'Parent')+
-              '</span>'+
-              '<span style="font-size:10px;color:#8899aa">'+escH((msg.date||'')+' '+(msg.time||''))+'</span>'+
-            '</div>'+
-            '<div style="font-size:13px;color:#F5FAFF">'+escH(msg.text||'')+'</div>'+
-            '</div>';
-        });
-      }
-      html+='</div>'+
-        '<div style="display:flex;gap:8px">'+
-          '<input id="pchat-input" type="text" placeholder="Message parents &amp; coach..." style="flex:1;padding:10px 12px;border-radius:8px;border:1px solid rgba(0,224,255,0.2);background:rgba(255,255,255,0.04);color:#F5FAFF;font-size:13px">'+
-          '<button class="btn btn-primary" style="padding:10px 14px;white-space:nowrap;touch-action:manipulation" onclick="sendParentChatMsg()">Send</button>'+
-        '</div>';
-      body.innerHTML=html;
-      var inp=document.getElementById('pchat-input');
-      if(inp) inp.addEventListener('keydown',function(e){if(e.key==='Enter')sendParentChatMsg();});
-    });
+    body.innerHTML='<div style="font-size:12px;color:#8899aa;padding:14px">Loading\u2026</div>';
+    aosLoadParentChat().then(function(){ aosRenderParentChat(body); });
   }
 
   // ── CONNECTIONS (auto-linked from child) ─────────────────────────────────────
@@ -4607,7 +4772,7 @@ function loadParentTab(tab,body,childName){
         }
         html+='<div style="background:rgba(46,204,113,0.06);border:1px solid rgba(46,204,113,0.18);border-radius:10px;padding:12px;margin-top:14px">'+
           '<div style="font-size:11px;font-weight:700;color:#2ecc71;margin-bottom:6px">&#9989; How Connections Work</div>'+
-          '<div style="font-size:11px;color:#8899aa;line-height:1.7">When '+escH(childName)+' joins a team, is assigned a coach, or gets a trainer, you are automatically linked to the same network. You can view their profiles and message them in Parent Chat.</div>'+
+          '<div style="font-size:11px;color:#8899aa;line-height:1.7">When '+escH(childName)+' joins a team, is assigned a coach, or gets a trainer, you are automatically linked to the same network. You can view their profiles, message the other parents and staff in Parent Chat, or post to the whole team in Team Chat.</div>'+
         '</div>';
       }
       body.innerHTML=html;
@@ -4616,6 +4781,151 @@ function loadParentTab(tab,body,childName){
 }
 
 // ── Parent Chat send ──────────────────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════════════════
+   PARENT CHAT
+
+   The old thread lived under one shared key that every signed-in role
+   read and wrote, the Messages screen included. So a channel labelled
+   "Parent-to-parent + coach" was readable by every athlete on the
+   roster, and the parents using it had no way to know.
+
+   This one carries its audience in each message, the way events and
+   records do, so the rules enforce who reads it rather than the label
+   implying it. Parents of athletes who share a team, plus the staff
+   linked to those athletes. No athletes.
+
+   The old thread is not migrated. Those messages were written in a
+   room everyone could see; moving them somewhere marked private
+   would misrepresent who had already read them.
+   ══════════════════════════════════════════════════════════════════ */
+var parentChatMsgs=[];
+
+/* Everyone this message should reach. Built from the hubs the viewer
+   already belongs to — the coach, trainer or club their children are
+   attached to — then every athlete in those hubs taken back out. The
+   athletes are the whole reason this collection exists. */
+function aosParentChatAudience(g){
+  var u=window.AOS_USER||{};
+  if(!u.userId) return [];
+  var hubs=aosHubsOf(g,u.userId,u.role||'parent')||[];
+  var people=[u.userId], athletes=[];
+  hubs.forEach(function(hub){
+    people=people.concat(aosTeam(g,hub)||[]);
+    athletes=athletes.concat(aosAthletesOf(g,hub)||[]);
+  });
+  if(u.role==='org'){
+    people=people.concat(aosOrgAll(g,u.userId)||[]);
+    athletes=athletes.concat(aosOrgAthletes(g,u.userId)||[]);
+  }
+  var isAthlete={};
+  _aosUniq(athletes).forEach(function(a){ isAthlete[a]=1; });
+  /* Staff stay: this channel was always "parents and coach", and only
+     the athletes were the mistake. Dropping staff is one line here. */
+  return _aosUniq(people).filter(function(id){ return id===u.userId||!isAthlete[id]; });
+}
+
+function aosLoadParentChat(){
+  var u=window.AOS_USER||{};
+  if(!u.userId||!window.fbDb) return Promise.resolve([]);
+  return fbDb.collection('parentChat').where('viewers','array-contains',u.userId).get()
+    .then(function(snap){
+      var out=[];
+      snap.forEach(function(d){ out.push(d.data()); });
+      out.sort(function(a,b){ return (a.ts||0)-(b.ts||0); });
+      parentChatMsgs=out;
+      return out;
+    }).catch(function(e){ console.warn('AOS parent chat load failed',e); return []; });
+}
+
+window.aosSendParentChat=function(){
+  var inp=document.getElementById('pchat-input');
+  if(!inp||!inp.value.trim()) return;
+  var u=window.AOS_USER||{};
+  if(!u.userId){ showToast('Sign in first.'); return; }
+  if(u.role==='player'){ showToast('This channel is for parents and staff.'); return; }
+  var txt=inp.value.trim().slice(0,2000);
+  inp.disabled=true;
+  aosLoadGraph().then(function(g){
+    var viewers=aosParentChatAudience(g);
+    if(viewers.length<2){
+      showToast('Nobody else is linked to this team yet.');
+      inp.disabled=false; return;
+    }
+    if(viewers.length>500){ showToast('That group is too large to post to.'); inp.disabled=false; return; }
+    var id='pc_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8);
+    var msg={id:id, text:txt, authorId:u.userId, authorName:u.name||'Parent',
+             authorRole:u.role||'parent', ts:Date.now(), viewers:viewers};
+    return fbDb.collection('parentChat').doc(id).set(msg).then(function(){
+      parentChatMsgs.push(msg);
+      inp.value=''; inp.disabled=false;
+      var body=document.getElementById('ptab-body');
+      if(body) aosRenderParentChat(body);
+    });
+  }).catch(function(e){
+    console.warn('AOS parent chat send failed',e);
+    showToast('Could not send that.');
+    var i2=document.getElementById('pchat-input'); if(i2) i2.disabled=false;
+  });
+};
+
+window.aosDeleteParentChat=function(id){
+  var u=window.AOS_USER||{};
+  var m=parentChatMsgs.filter(function(x){ return x.id===id; })[0];
+  if(!m||m.authorId!==u.userId) return;
+  fbDb.collection('parentChat').doc(id).delete().then(function(){
+    parentChatMsgs=parentChatMsgs.filter(function(x){ return x.id!==id; });
+    var body=document.getElementById('ptab-body');
+    if(body) aosRenderParentChat(body);
+  }).catch(function(e){ console.warn('AOS parent chat delete failed',e); showToast('Could not remove it.'); });
+};
+
+function aosRenderParentChat(body){
+  var u=window.AOS_USER||{};
+  var h='<div style="background:rgba(243,156,18,0.08);border:1px solid rgba(243,156,18,0.3);'+
+      'border-radius:8px;padding:9px 12px;margin-bottom:10px;font-size:11px;color:#f8d9a8">'+
+      '\uD83D\uDC6A Parents and staff only. Athletes cannot see this channel. '+
+      'For something the whole team should read, use Team Chat.</div>';
+  h+='<div id="pchat-msgs" style="display:flex;flex-direction:column;gap:8px;max-height:360px;'+
+     'overflow-y:auto;margin-bottom:12px">';
+  if(!parentChatMsgs.length){
+    h+='<div style="text-align:center;color:#8899aa;font-size:13px;padding:20px">No messages yet.</div>';
+  } else {
+    parentChatMsgs.slice(-60).reverse().forEach(function(m){
+      var isMe=m.authorId===u.userId;
+      var tag=m.authorRole==='coach'?'\uD83C\uDFFD Coach: ':m.authorRole==='trainer'?'\uD83E\uDDBE Trainer: ':
+              m.authorRole==='org'?'\uD83C\uDFDB Club: ':'';
+      var when=new Date(m.ts||0).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+      h+='<div style="background:'+(isMe?'rgba(0,224,255,0.08)':'rgba(255,255,255,0.04)')+
+          ';border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:10px">'+
+        '<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:4px">'+
+          '<span style="font-weight:700;font-size:12px;color:'+(isMe?'#00E0FF':'#f39c12')+'">'+
+            tag+escH(m.authorName||'Parent')+'</span>'+
+          '<span style="font-size:10px;color:#8899aa;flex-shrink:0">'+escH(when)+
+            (isMe?' <button onclick="aosDeleteParentChat(\''+m.id+'\')" style="background:none;border:none;'+
+              'color:#8899aa;cursor:pointer;font-size:11px;padding:0 2px">\u00D7</button>':'')+'</span>'+
+        '</div>'+
+        '<div style="font-size:13px;color:#F5FAFF;white-space:pre-wrap">'+escH(m.text||'')+'</div>'+
+      '</div>';
+    });
+  }
+  h+='</div>';
+  if(u.role!=='player'){
+    h+='<div style="display:flex;gap:8px">'+
+      '<input id="pchat-input" type="text" placeholder="Message the other parents\u2026" '+
+        'style="flex:1;padding:10px 12px;border-radius:8px;border:1px solid #334;background:#0A1A2F;'+
+        'color:#fff;font-size:14px">'+
+      '<button class="btn btn-primary" style="padding:10px 14px;white-space:nowrap" '+
+        'onclick="aosSendParentChat()">Send</button>'+
+    '</div>';
+  }
+  body.innerHTML=h;
+  var inp=document.getElementById('pchat-input');
+  if(inp) inp.addEventListener('keydown',function(e){ if(e.key==='Enter') aosSendParentChat(); });
+}
+
+/* Superseded by aosSendParentChat. The old shared thread is still read
+   on the Messages screen as Team Chat; nothing writes to it from the
+   Parent Portal any more. */
 function sendParentChatMsg(){
   var inp=document.getElementById('pchat-input');
   if(!inp||!inp.value.trim()) return;
@@ -4645,6 +4955,8 @@ function renderChatHub(){
   var myName=(u.name||((profile.firstName||'')+(profile.lastName?' '+profile.lastName:''))).trim()||'You';
   var tab=window._chTab||'chat';
   var tabs=[['chat','Team Chat'],['inbox','Inbox'],['new','New'],['sent','Sent'],['requests','Requests']];
+  /* Everyone on the team reads this one, athletes included. The
+     parents-only channel is a different collection entirely. */
   el.innerHTML='<div class="section-title">&#128172; Messages</div>'+
     '<div class="tab-pills" style="margin-bottom:12px">'+tabs.map(function(t){
       return '<button class="tab-pill ch-tab'+(tab===t[0]?' active':'')+'" data-ch="'+t[0]+'">'+t[1]+'</button>';
@@ -11033,6 +11345,7 @@ function renderAdmin(){
   '<div class="stat-grid"><div class="stat-card"><div class="stat-value">'+roster.length+'</div><div class="stat-label">Players Tracked</div></div><div class="stat-card"><div class="stat-value">'+totalSess+'</div><div class="stat-label">Sessions Logged</div></div><div class="stat-card"><div class="stat-value">'+totalGoals+'</div><div class="stat-label">Goals Created</div></div></div>'+
   '<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:6px">Recent Activity</div>'+(adminLog.length?adminLog.slice(0,8).map(function(a){var t=new Date(a.time);return '<div style="font-size:11px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.04);color:var(--white-dim)"><span style="color:var(--gold)">'+t.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})+'</span> '+escH(a.action)+'</div>'}).join(''):'<div style="font-size:12px;color:var(--white-dim)">No activity yet</div>')+'</div>'+
   '<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Data Management</div><button class="btn btn-secondary btn-full btn-sm" id="admin-export" style="margin-bottom:8px">📦 Export All Data (JSON)</button><button class="btn btn-danger btn-full btn-sm" id="admin-clear">🗑️ Clear All Data</button></div>'+
+  '<div id="sup-admin"></div>'+
   '<div id="bm-admin"></div>'+
   '<div id="admin-export-area"></div>'+
   '<button class="btn btn-danger btn-full" style="margin-top:16px" id="admin-exit">Exit Admin Mode</button>';
@@ -11051,6 +11364,7 @@ function renderAdmin(){
   });
   var exitBtn=safeGet('admin-exit');if(exitBtn)exitBtn.addEventListener('click',function(){setMode('player');navigateTo('home')});
   if(typeof aosRenderBenchmarkAdmin==='function') aosRenderBenchmarkAdmin('bm-admin');
+  if(typeof aosRenderSupportInbox==='function') aosRenderSupportInbox('sup-admin');
 }
 
 /* ========== WIRE NAV ========== */
@@ -13818,7 +14132,8 @@ function renderProfile() {
     '</div>' +
 
     // --- Save Button ---
-    '<button class="btn btn-primary btn-full" id="pf-save-btn" style="margin-bottom:24px">💾 Save Profile</button>';
+    '<button class="btn btn-primary btn-full" id="pf-save-btn" style="margin-bottom:24px">💾 Save Profile</button>'+
+    aosSupportLinkHTML();
 
   // ── Connection Request / Approval System — generic, both directions ──
   function _renderConnectionSystem(){
