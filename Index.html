@@ -665,7 +665,7 @@ function aosRoleOf(g,id){
   var r=''; Object.keys(g.sl).forEach(function(k){ if(g.sl[k]&&g.sl[k][id]&&g.sl[k][id].role) r=g.sl[k][id].role; });
   return r;
 }
-function aosNameOf(g,id){ var a=g.accs[id]; return (a&&a.name)||'Member'; }
+function aosNameOf(g,id){ var a=(g&&g.accs)?g.accs[id]:null; return (a&&a.name)||'Member'; }
 function aosAthletesOf(g,staffId){ return Object.keys(g.pl).filter(function(pid){ var l=g.pl[pid]&&g.pl[pid][staffId]; return !!l && l.linkerRole!=='parent'; }); }
 function aosParentsOf(g,pid){
   var out=Object.keys(g.parl).filter(function(par){ return g.parl[par]&&g.parl[par][pid]; });
@@ -1006,7 +1006,7 @@ function aosWeekStripHTML(events,athleteIds,names){
   var row=function(item,action){
     var ev=item.ev;
     return '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
-      '<div><div style="font-size:12px;color:#e8f4fd">'+escH(ev.title)+who(item.aid)+'</div>'+
+      '<div><div style="font-size:12px;color:#e8f4fd">'+escH(ev.title)+who(item.aid)+aosMovedBadgeHTML(ev)+'</div>'+
       '<div style="font-size:10px;color:var(--white-dim)">'+escH(ev.date)+' \u00B7 '+escH(aosEventTimeLabel(ev))+
         (ev.location?' \u00B7 '+escH(ev.location):'')+' \u00B7 '+escH(ev.hostName||'')+'</div></div>'+
       (action||'')+'</div>';
@@ -1064,16 +1064,37 @@ window.aosRefreshEventViews=function(){
     }
   });
 };
+/* "Moved from Sat 11 Apr, 6:00 PM" — shown until the event has been
+   and gone, then it stops being news. */
+function aosMovedBadgeHTML(ev){
+  if(!ev||!ev.movedFrom||!ev.movedFrom.date) return '';
+  var today=(typeof aosDateKey==='function')?aosDateKey():todayStr();
+  if((ev.date||'')<today) return '';
+  var was=ev.movedFrom.date;
+  var pretty=was;
+  try{
+    var pp=was.split('-');
+    pretty=new Date(+pp[0],+pp[1]-1,+pp[2]).toLocaleDateString([],{weekday:'short',month:'short',day:'numeric'});
+  }catch(e){}
+  var t=ev.movedFrom.start?(' , '+aosEventTimeLabel({start:ev.movedFrom.start,end:''})).replace(' , ',', '):'';
+  return '<span style="display:inline-block;font-size:9px;font-weight:700;color:#0A1A2F;'+
+    'background:#f39c12;border-radius:4px;padding:1px 5px;margin-left:5px;vertical-align:middle">'+
+    'MOVED</span><span style="font-size:10px;color:#f39c12;margin-left:4px">was '+escH(pretty)+escH(t)+'</span>';
+}
 /* Everything on one day: club, coach, trainer and their own entries. */
 function aosDayEventsHTML(dateKey,athleteIds,names){
   var me=(window.AOS_USER||{}).userId;
   var rows=[];
   (scheduledEvents||[]).forEach(function(ev){
     if(ev.cancelled||ev.date!==dateKey) return;
-    /* Whoever posted it gets one row with the controls, not a row per
-       athlete asking them whether they're going to their own practice. */
-    if(ev.hostId===me){ rows.push({ev:ev,aid:me,host:true}); return; }
+    /* Whoever posted it gets a row with the controls rather than being
+       asked whether they are going to their own practice. It is an
+       extra row, not a replacement: a coach who is also a parent on
+       this team still needs to answer for their own child, and the
+       early return used to take that away from them. */
+    if(ev.hostId===me) rows.push({ev:ev,aid:me,host:true});
     athleteIds.forEach(function(aid){
+      if(aid===me&&ev.hostId===me) return;   /* already have the host row */
       rows.push({ev:ev,aid:aid,status:aosEventStatusFor(ev,aid)});
     });
   });
@@ -1094,7 +1115,8 @@ function aosDayEventsHTML(dateKey,athleteIds,names){
     var label=r.status==='in'?'\u2713 in':r.status==='out'?'not going':r.ev.kind==='signup'?'open':'needs answer';
     return '<div style="display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.06)">'+
       '<div><div style="font-size:12px;color:#e8f4fd">'+escH(r.ev.title)+
-        (athleteIds.length>1&&names&&names[r.aid]?' \u00B7 '+escH(names[r.aid]):'')+'</div>'+
+        (athleteIds.length>1&&names&&names[r.aid]?' \u00B7 '+escH(names[r.aid]):'')+
+        aosMovedBadgeHTML(r.ev)+'</div>'+
       '<div style="font-size:10px;color:var(--white-dim)">'+escH(aosEventTimeLabel(r.ev))+
         (r.ev.location?' \u00B7 '+escH(r.ev.location):'')+' \u00B7 '+escH(r.ev.hostName||'')+'</div></div>'+
       '<div style="text-align:right;flex-shrink:0"><div style="font-size:11px;color:'+col+'">'+label+'</div>'+
@@ -1265,16 +1287,23 @@ function aosEventTimeLabel(ev){
   return fmt(ev.start)+(ev.end?'\u2013'+fmt(ev.end):'');
 }
 /* Who this event reaches, from the links that already exist. */
+/* Picking a team NARROWS who gets this, the same as it does in chat.
+   It used to widen: the whole hub, plus the team on top, so a coach
+   running two teams reached both whichever one they had selected.
+   Same word, opposite behaviour, in two parts of one app.
+
+   Only new posts are affected — an event already out there keeps the
+   audience stored on it, and republish only ever adds people. */
 function aosEventAudience(g,me,role,teamId){
+  if(teamId&&typeof aosTeamMembers==='function'){
+    var scoped=aosTeamMembers(g,me,teamId)||[];
+    return _aosUniq([me].concat(scoped));
+  }
   var out=[me];
   if(role==='org'){
     out=out.concat(aosOrgAll(g,me));
   } else if(role==='coach'||role==='trainer'){
     out=out.concat(aosTeam(g,me));
-  }
-  if(teamId&&typeof aosTeamAthletes==='function'){
-    var t=aosTeamAthletes(g,teamId)||[];
-    t.forEach(function(a){ out.push(a); aosParentsOf(g,a).forEach(function(p){ out.push(p); }); });
   }
   return _aosUniq(out);
 }
@@ -1307,7 +1336,12 @@ window.aosCreateEvent=function(fields,cb){
     };
     return fbDb.collection('scheduledEvents').doc(ev.id).set(ev).then(function(){
       scheduledEvents.unshift(ev);
-      showToast(ev.kind==='signup'?'Posted \u2014 athletes can sign up.':'Posted to the team.');
+      /* Named, not implied: with team scoping a coach should see the
+         number before wondering why nobody answered. */
+      var reach=Math.max(0,(ev.viewers||[]).length-1);
+      showToast((ev.kind==='signup'?'Posted \u2014 ':'Posted \u2014 ')+
+        (reach?('reaches '+reach+' '+(reach===1?'person':'people')+'.')
+              :'nobody else can see it yet.'));
       if(cb) cb(ev);
     });
   }).catch(function(e){ console.warn('AOS event create failed',e); showToast('Could not post.'); });
@@ -1349,7 +1383,21 @@ window.aosUpdateEvent=function(eventId,fields,cb){
     capacity:Number(fields.capacity)||0,
     cancelled:false, updatedAt:Date.now(), editedAt:Date.now()
   };
-  if(moved) patch.responses={};
+  if(moved){
+    patch.responses={};
+    /* A cleared RSVP with no explanation is the thing families actually
+       notice: they answered, and now the app is asking again. Record
+       what it moved from so every screen can say so. This reaches
+       whoever opens the app — there is no notification path, and
+       pretending otherwise would be worse than saying it plainly. */
+    /* The slot the family first answered for, not the middle one. A
+       league that reschedules twice would otherwise have the badge say
+       "was Sunday" to someone who had booked the Saturday. */
+    patch.movedFrom=(ev.movedFrom&&ev.movedFrom.date)
+      ? ev.movedFrom
+      : {date:ev.date||'',start:ev.start||''};
+    patch.movedAt=Date.now();
+  }
   /* An imported event that gets moved by hand keeps answering to the
      key it came in under as well as its new one, so a re-import of
      either version of the sheet finds this row instead of making a
@@ -3029,7 +3077,10 @@ let nutritionLog={},tasks=[],tasksDate='';
 let gameday={items:[],custom:[]};
 let timerInterval=null,timerRunning=false,timerSeconds=0,timerTotal=0;
 // ── Global utility functions needed by all render fns ──
-function getTodayKey(){var d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+/* The device's own date ignored the time-zone picker, so a snapshot
+   could be filed under a different day than everything else that
+   athlete logged. One date function for the whole app. */
+function getTodayKey(){ return (typeof aosDateKey==='function')?aosDateKey():(function(){var d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');})(); }
 function escH(s){if(!s)return '';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function safeGet(id){return document.getElementById(id);}
 function showToast(msg,dur){var t=document.getElementById('toast');if(!t){t=document.createElement('div');t.id='toast-b';t.style.cssText='position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:#00E0FF;color:#0A1A2F;padding:10px 20px;border-radius:20px;font-weight:700;font-size:13px;z-index:9999;transition:opacity 0.3s;pointer-events:none';document.body.appendChild(t);}t.textContent=msg;t.style.opacity='1';clearTimeout(t._t);t._t=setTimeout(function(){t.style.opacity='0';},dur||2500);}
@@ -3166,7 +3217,7 @@ const SECONDARY_MAP = {
    the owner has somewhere to read both. No backend, so a report lands
    in Firestore and can also open the sender's own mail app.
    ══════════════════════════════════════════════════════════════════ */
-var AOS_VERSION='AOS V.8.0.1';   /* HTML and the rules file carry the same number */
+var AOS_VERSION='AOS V.8.0.3';   /* HTML and the rules file carry the same number */
 var AOS_SUPPORT_TO='ekuvaas@icloud.com';
 
 /* Which screen they were on, by section id — never the raw URL, which
@@ -3435,6 +3486,74 @@ const BENCHMARKS=[
   {m:"GPA",u:"",hb:true,p4:3.5,d1:3.0,d2:2.8,d3:2.5,juco:2.0,naia:2.5,key:"gpa"}
 ];
 
+/* ── Baseball thresholds ──────────────────────────────────────────
+   Four rows, not fourteen. These are the ones several independent
+   recruiting sources agreed on; the rest of the softball table has no
+   baseball equivalent that could be sourced rather than guessed.
+   Bat speed, pro agility and the Fly10 splits are deliberately absent
+   — baseball measures speed with the 60, and inventing the others
+   would recreate the exact problem this fixes.
+
+   Convention: RECRUITING MINIMUM — the number that gets a player into
+   the conversation at that level, not the average of players who
+   committed there. Those two differ by 5 to 8 mph, which is wider
+   than the gap between two divisions, so the choice is stated rather
+   than left implied.
+
+   Caveats a reader deserves: baseball is far more position-dependent
+   than one column can carry (corner infield runs several mph above
+   middle infield at the same level), and left-handed pitchers draw
+   equal interest 2 to 4 mph lower. Both are shown under the table. */
+var AOS_BENCH_BASEBALL=[
+  {m:"Exit Velo (max)",u:"mph",hb:true,p4:93,d1:88,d2:85,d3:80,juco:85,naia:82,key:"exitVeloMax"},
+  {m:"Fastball Velo",u:"mph",hb:true,p4:92,d1:88,d2:84,d3:80,juco:82,naia:82,key:"fastballVelo"},
+  {m:"60-Yd Dash",u:"sec",hb:false,p4:6.7,d1:6.9,d2:7.1,d3:7.3,juco:7.3,naia:7.3,key:"dash60"},
+  {m:"Pop Time 2B",u:"sec",hb:false,p4:1.90,d1:1.95,d2:2.00,d3:2.05,juco:2.10,naia:2.10,key:"popTime"}
+];
+/* Metrics that belong to any athlete, whatever the sport. Their
+   thresholds came from the softball work, so they are loggable
+   everywhere but only scored against a division where the sport
+   actually has a sourced table. */
+var AOS_BENCH_GENERAL_KEYS=['cmj','vertJump','maxF','maxLF','avgRFD','gpa'];
+
+function aosBenchSport(){
+  var sp=(typeof aosActiveSport==='function')?aosActiveSport():((typeof profile!=='undefined'&&profile.sport)||'');
+  return sp||'';
+}
+/* The rows that carry division thresholds for this athlete's sport.
+   Empty for every sport without a sourced table — which is the gate:
+   no table, no division read, rather than softball numbers shown to
+   someone who does not play softball. */
+function aosBenchSet(sport){
+  var sp=sport||aosBenchSport();
+  if(sp==='Softball') return BENCHMARKS;
+  if(sp==='Baseball') return AOS_BENCH_BASEBALL.concat(
+    BENCHMARKS.filter(function(b){ return AOS_BENCH_GENERAL_KEYS.indexOf(b.key)>=0; }));
+  return [];
+}
+/* What an athlete may log. Everyone gets the general physical set even
+   where no division table exists, so the metrics screen still works. */
+function aosLoggableMetrics(sport){
+  var set=aosBenchSet(sport);
+  if(set.length) return set;
+  return BENCHMARKS.filter(function(b){ return AOS_BENCH_GENERAL_KEYS.indexOf(b.key)>=0; })
+    .map(function(b){ return {m:b.m,u:b.u,hb:b.hb,key:b.key}; });
+}
+function aosBenchNoteHTML(){
+  var sp=aosBenchSport();
+  if(sp==='Baseball'){
+    return '<div style="font-size:10px;color:#8899aa;margin-top:8px;line-height:1.5">'+
+      'Recruiting minimums \u2014 the number that starts a conversation, not the average of players who committed. '+
+      'Baseball is strongly position-dependent: corner infield sits several mph above middle infield at the same level, '+
+      'and left-handed pitchers draw equal interest 2\u20134 mph lower. Treat a row as a range, not a line.</div>';
+  }
+  if(sp==='Softball') return '';
+  return '<div style="font-size:11px;color:#8899aa;padding:14px;text-align:center">'+
+    'No division benchmarks for '+escH(sp||'this sport')+' yet. '+
+    'Your metrics are still logged and charted \u2014 there is just nothing honest to measure them against.</div>';
+}
+
+
 const QUOTES = [
   "The operating system for human performance. 🔷",
   "Consistency is the algorithm. Show up and execute. 📊",
@@ -3576,6 +3695,24 @@ function aosRollDay(){
 document.addEventListener('visibilitychange',function(){
   if(!document.hidden && window._aosDayKey && todayStr()!==window._aosDayKey) aosRollDay();
 });
+/* A day's water, in ounces. Written out by hand in eight places before
+   this, and three of them read hydration[d].oz — a field that has never
+   existed, because entries are kept as a list. Those three silently
+   reported zero: the analytics average, its sparkline, and the weekly
+   chart, which is why a parent could see 0oz on a day the athlete had
+   logged seventy. Same shape of mistake as the date keys. */
+function aosHydrationOz(dateKey){
+  var d=(typeof hydration!=='undefined'&&hydration)?hydration[dateKey]:null;
+  if(!d) return 0;
+  var list=Array.isArray(d.entries)?d.entries:[];
+  var sum=0;
+  for(var i=0;i<list.length;i++) sum+=Number(list[i]&&list[i].oz)||0;
+  return Math.round(sum);
+}
+function aosHydrationGoal(dateKey){
+  var d=(typeof hydration!=='undefined'&&hydration)?hydration[dateKey]:null;
+  return (d&&Number(d.goal))||64;
+}
 function todayStr(){ return aosDateKey(); }
 function fmt(n,d){d=d||3;return isNaN(n)?'.'+('0'.repeat(d)):Number(n).toFixed(d)}
 function safeGet(id){return document.getElementById(id)}
@@ -3724,7 +3861,7 @@ async function syncProfileToAccounts(){
       completedGoals:(goals||[]).filter(function(g){return g.completed;}).length,
       recoveryDays:Object.keys(recovery||{}).filter(function(d){var r=recovery[d]||{};return r.readiness||r.sleep;}).length,
       readiness:recToday.readiness||0,
-      hydrationToday:(function(){var h=hydration&&hydration[td]||{};return Math.round((h.entries||[]).reduce(function(s,e){return s+(e.oz||0);},0));})(),
+      hydrationToday:aosHydrationOz(td),
       taskPoints:profile.taskPoints||0
     });
     /* Sync into aos_local_accounts — the canonical store everything
@@ -3931,8 +4068,8 @@ function buildAthleteStats(days){
     totalSess+=(training[d]||[]).length;
     var r=recovery[d]||{};
     if(r.sleep||r.readiness){totalRec++;if(r.readiness){readinessSum+=r.readiness;readinessCnt++;}}
-    var h=hydration[d]||{};
-    if(h.oz){hydSum+=h.oz/33.8;hydDays++;}
+    var hOz=aosHydrationOz(d);
+    if(hOz){hydSum+=hOz;hydDays++;}
   });
   goalsDone=(goals||[]).filter(function(g){return g.completed;}).length;
   return {
@@ -4165,11 +4302,26 @@ function aosBuildDigest(name,d){
   /* Only the things a parent would actually want raised. */
   var flags=[];
   if(openInj.length) flags.push(openInj.map(function(i){ return i.part+' ('+i.status+')'; }).join(', '));
-  if(!sessions&&!reads.length) flags.push('Nothing logged this week');
+  /* A moved session is the one thing here that costs a family a missed
+     Saturday, so it leads the flags rather than sitting in a list. */
+  var moved=[];
+  (d.events||[]).forEach(function(ev){
+    if(!ev.movedFrom||!ev.movedFrom.date||ev.cancelled) return;
+    if((ev.date||'')<todayStr()) return;
+    if(d.childId&&(ev.viewers||[]).indexOf(d.childId)<0) return;
+    moved.push(ev);
+    flags.unshift((ev.title||'Session')+' moved to '+ev.date+
+      (ev.start?' '+aosEventTimeLabel(ev):'')+' \u2014 was '+ev.movedFrom.date+
+      (ev.movedFrom.start?' '+aosEventTimeLabel({start:ev.movedFrom.start,end:''}):''));
+  });
+  if(!sessions&&!reads.length&&!flags.length) flags.push('Nothing logged this week');
   if(att.invited&&att.missed) flags.push('Missed '+att.missed+' of '+att.invited+' team sessions');
   return {name:name, sessions:sessions, hours:Math.round(minutes/60*10)/10,
     checkIns:reads.length, avgReady:avgReady, attendance:att, upcoming:upcoming,
-    flags:flags, empty:(!sessions&&!reads.length&&!att.invited&&!upcoming.length&&!openInj.length)};
+    flags:flags,
+    /* A moved session is news on its own, even in a week with nothing
+       else in it — that is exactly the week a family needs telling. */
+    empty:(!sessions&&!reads.length&&!att.invited&&!upcoming.length&&!openInj.length&&!moved.length)};
 }
 function aosDigestHTML(dg){
   var h='<div style="font-weight:800;font-size:16px;color:var(--gold);margin-bottom:2px">'+
@@ -4206,7 +4358,16 @@ function aosShowDigest(dg,kind){
   var wrap=document.createElement('div');
   wrap.id='aos-digest';
   wrap.style.cssText='position:fixed;inset:0;z-index:9999;background:rgba(3,10,20,0.82);display:flex;align-items:flex-end;justify-content:center;padding:16px;padding-bottom:calc(16px + env(safe-area-inset-bottom,0px))';
-  var body=(kind==='staff')?aosStaffDigestHTML(dg):aosDigestHTML(dg);
+  /* One child or several: the parent digest can carry a list now. */
+  var body=(kind==='staff')?aosStaffDigestHTML(dg)
+    :(Array.isArray(dg)
+           ?dg.map(function(d,i){
+          return (i?'<div style="height:1px;background:rgba(255,255,255,0.1);margin:14px 0"></div>':'')+
+            aosDigestHTML(d)+
+            (d.more?'<div style="font-size:10px;color:var(--white-dim);margin-top:6px">'+
+              'and '+d.more+' more not shown</div>':'');
+        }).join('')
+      :aosDigestHTML(dg));
   var dest=(kind==='staff')?'reports':(kind==='player'?'record':'parent');
   wrap.innerHTML='<div style="background:#0B1A2E;border:1px solid rgba(255,255,255,0.12);border-radius:16px;padding:16px;max-width:460px;width:100%;max-height:82vh;overflow:auto">'+
     body+
@@ -4318,15 +4479,33 @@ window.aosMaybeWeeklyDigest=function(force){
     return aosLoadGraph().then(function(g){
       var kids=aosChildrenOf(g,u.userId)||[];
       if(!kids.length) return false;
-      var cid=kids[0];
-      return Promise.all([
-        aosChildData(cid,'sb_training'), aosChildData(cid,'sb_recovery'), aosChildData(cid,'sb_injuries')
-      ]).then(function(r){
-        var dg=aosBuildDigest(aosNameOf(g,cid),{training:r[0]||{},recovery:r[1]||{},
-          injuries:Array.isArray(r[2])?r[2]:[], events:scheduledEvents, childId:cid});
-        /* Nothing to report is not a report — and not a week used up. */
-        if(dg.empty&&!force) return false;
-        aosShowDigest(dg,'parent');
+      /* Every child, not kids[0]. A parent with two athletes used to get
+         a digest about one of them, every week, with nothing anywhere
+         saying the other had been skipped. Capped at four so a large
+         family cannot stack an unreadable overlay. */
+      var picked=kids.slice(0,4);
+      return Promise.all(picked.map(function(cid){
+        return Promise.all([
+          aosChildData(cid,'sb_training'), aosChildData(cid,'sb_recovery'), aosChildData(cid,'sb_injuries')
+        ]).then(function(r){
+          return aosBuildDigest(aosNameOf(g,cid),{training:r[0]||{},recovery:r[1]||{},
+            injuries:Array.isArray(r[2])?r[2]:[], events:scheduledEvents, childId:cid});
+        });
+      })).then(function(all){
+        /* Nothing to report is not a report — and not a week used up.
+           Silent for every child means silent; one with news is news. */
+        var withNews=all.filter(function(d){ return !d.empty; });
+        if(!withNews.length&&!force) return false;
+        /* If any child has news the whole family is shown, quiet ones
+           included. A week where one athlete trained and the other
+           logged nothing is precisely the week a parent needs both
+           lines — hiding the silent child hides the thing worth
+           knowing. Only a silent week for everybody stays silent. */
+        var show=all;
+        if(kids.length>picked.length){
+          show[show.length-1].more=kids.length-picked.length;
+        }
+        aosShowDigest(show,'parent');
         return true;
       });
     });
@@ -4483,7 +4662,7 @@ function renderPlayerReport(rc){
   var range7=getDateRange(7);
   var sessWeek=range7.map(function(d){return (training[d]||[]).length;});
   var readWeek=range7.map(function(d){return (recovery[d]||{}).readiness||0;});
-  var hydWeek=range7.map(function(d){var h=hydration[d]||{};return h.oz?Math.round(h.oz/33.8*10)/10:0;});
+  var hydWeek=range7.map(function(d){return aosHydrationOz(d);});
 
   rc.innerHTML=
   // Period selector
@@ -4647,8 +4826,7 @@ function loadParentTab(tab,body,childName){
     var stats=buildAthleteStats(30);
     var todayRec=recovery[td]||{};
     var todayTrain=(training[td]||[]);
-    var hydToday=(hydration[td])||{};
-    var hydOz=(Array.isArray(hydToday.entries)?hydToday.entries:[]).reduce(function(s,e){return s+(e.oz||0);},0);
+    var hydOz=aosHydrationOz(td);
     var rc=todayRec.readiness>=8?'#2ecc71':todayRec.readiness>=5?'#f39c12':'#e74c3c';
     body.innerHTML=
       '<div style="background:rgba(255,165,0,0.06);border:1px solid rgba(255,165,0,0.2);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:11px;color:#f39c12;font-weight:600">&#128274; Read-Only View &mdash; '+escH(childName)+'&#39;s data cannot be edited from here</div>'+
@@ -4715,7 +4893,7 @@ function loadParentTab(tab,body,childName){
   // ── PARENT CHAT (full read/write) ────────────────────────────────────────────
   else if(tab==='parentchat'){
     body.innerHTML='<div style="font-size:12px;color:#8899aa;padding:14px">Loading\u2026</div>';
-    aosLoadParentChat().then(function(){ aosRenderParentChat(body); });
+    Promise.all([aosLoadParentChat(),aosLoadChatTeams()]).then(function(){ aosRenderParentChat(body); });
   }
 
   // ── CONNECTIONS (auto-linked from child) ─────────────────────────────────────
@@ -4798,13 +4976,177 @@ function loadParentTab(tab,body,childName){
    room everyone could see; moving them somewhere marked private
    would misrepresent who had already read them.
    ══════════════════════════════════════════════════════════════════ */
+/* ── Parents roster ───────────────────────────────────────────────
+   What used to sit on this tab was a chat: a third surface onto parent
+   messaging, on a screen an athlete is looking at. This is the honest
+   version — who is linked to whom, and nothing to type into.
+
+   Names only. No email, no phone, no way to start a conversation. A
+   team program hands round a roster; this is that, and no more. */
+function aosParentsRosterHTML(g,teamId){
+  var u=window.AOS_USER||{};
+  var ath=teamId?(aosTeamAthletes(g,teamId)||[])
+                :_aosUniq((aosHubsOf(g,u.userId,u.role||'player')||[])
+                    .reduce(function(acc,h){ return acc.concat(aosAthletesOf(g,h)||[]); },[u.userId]));
+  ath=_aosUniq(ath).sort(function(a,b){ return aosNameOf(g,a).localeCompare(aosNameOf(g,b)); });
+  var h='<div style="font-size:11px;color:#8899aa;margin-bottom:10px">'+
+    '\uD83D\uDC6A Who is linked to whom. Names only \u2014 no contact details, and nothing to send.</div>';
+  if(!ath.length) return h+'<div style="text-align:center;color:#8899aa;padding:20px;font-size:13px">Nobody on this team yet.</div>';
+  var unlinked=0;
+  h+='<div style="display:flex;flex-direction:column;gap:8px">';
+  ath.forEach(function(a){
+    var parents=_aosUniq(aosParentsOf(g,a)||[]);
+    var isMe=a===u.userId;
+    if(!parents.length) unlinked++;
+    h+='<div class="card" style="padding:10px'+(isMe?';border:1px solid rgba(0,224,255,0.35)':'')+'">'+
+      '<div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline">'+
+        '<span style="font-weight:700;font-size:13px;color:'+(isMe?'#00E0FF':'#e8f4fd')+'">'+
+          escH(aosNameOf(g,a))+(isMe?' <span style="font-size:10px;color:#8899aa">(you)</span>':'')+'</span>'+
+        (parents.length>1?'<span style="font-size:10px;color:#f39c12;flex-shrink:0">Two guardians</span>':'')+
+      '</div>';
+    if(parents.length){
+      h+='<div style="font-size:12px;color:#cfd8e3;margin-top:3px">'+
+        parents.map(function(pid){ return escH(aosNameOf(g,pid)); }).join(' \u00B7 ')+'</div>';
+    } else {
+      h+='<div style="font-size:11px;color:#8899aa;margin-top:3px">No parent or guardian linked yet</div>';
+    }
+    h+='</div>';
+  });
+  h+='</div>';
+  if(unlinked){
+    h+='<div style="font-size:10px;color:#667;margin-top:10px">'+unlinked+
+       ' of '+ath.length+' have nobody linked. A parent links with the athlete\u2019s AOS ID.</div>';
+  }
+  return h;
+}
+
+/* ── Chat scoping ─────────────────────────────────────────────────
+   Both threads used to merge every hub a person belonged to, so a
+   coach running two teams posted once and both got it, and an athlete
+   with a club coach and a private trainer saw one blended stream.
+   A message now records the team it was sent to, and the audience is
+   narrowed to that team rather than widened by it — note that
+   aosEventAudience adds a team on top of the hub; this does not. */
+function aosChatTeams(g){
+  var u=window.AOS_USER||{};
+  var staffTeams=aosTeamsFor(g,u.userId)||[];
+  if(staffTeams.length) return staffTeams;
+  var subjects=(u.role==='parent')?(aosChildrenOf(g,u.userId)||[]):[u.userId];
+  var ids=[], tm=g.tm||{};
+  Object.keys(tm).forEach(function(tid){
+    var m=tm[tid]||{};
+    for(var i=0;i<subjects.length;i++) if(m[subjects[i]]){ ids.push(tid); break; }
+  });
+  /* Teams from before membership moved off the coach link. */
+  Object.keys(g.pl||{}).forEach(function(pid){
+    if(subjects.indexOf(pid)<0) return;
+    var l=g.pl[pid]||{};
+    Object.keys(l).forEach(function(k){
+      var t=l[k]&&l[k].teamId; if(t&&ids.indexOf(t)<0) ids.push(t);
+    });
+  });
+  var T=g.teams||{};
+  return _aosUniq(ids).map(function(id){ return T[id]||{id:id,name:'Team'}; })
+    .sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); });
+}
+/* Does this person stand in the room as an adult as well as appearing
+   in it as an athlete? True if a child is linked to them, or if any
+   athlete has them as staff. Graph-backed, not self-declared. */
+function aosHasAdultRole(g,id){
+  if(!g||!id) return false;
+  var kids=(typeof aosChildrenOf==='function')?(aosChildrenOf(g,id)||[]):[];
+  if(kids.length) return true;
+  var mine=(typeof aosAthletesOf==='function')?(aosAthletesOf(g,id)||[]):[];
+  return mine.length>0;
+}
+/* One audience for both threads. A team narrows it; excludeAthletes
+   is what makes parentChat a different room from teamChat. */
+function aosChatAudience(g,teamId,excludeAthletes){
+  var u=window.AOS_USER||{};
+  if(!u.userId) return [];
+  var people=[u.userId], athletes=[];
+  if(teamId){
+    var t=aosTeamAthletes(g,teamId)||[];
+    athletes=t.slice();
+    people=people.concat(aosTeamMembers(g,u.userId,teamId)||[]);
+  } else {
+    var hubs=aosHubsOf(g,u.userId,u.role||'player')||[];
+    hubs.forEach(function(hub){
+      people=people.concat(aosTeam(g,hub)||[]);
+      athletes=athletes.concat(aosAthletesOf(g,hub)||[]);
+    });
+    if(u.role==='org'){
+      people=people.concat(aosOrgAll(g,u.userId)||[]);
+      athletes=athletes.concat(aosOrgAthletes(g,u.userId)||[]);
+    }
+  }
+  if(excludeAthletes){
+    var isA={}; _aosUniq(athletes).forEach(function(a){ isA[a]=1; });
+    /* One person can be both. A coach who is also a parent on the team,
+       or — in testing — one account wearing both hats, is in the
+       athlete list and would be filtered straight out of the room they
+       belong to as a parent. Anyone with a parent link of their own, or
+       any staff link, stays. */
+    people=people.filter(function(id){
+      if(id===u.userId||!isA[id]) return true;
+      return aosHasAdultRole(g,id);
+    });
+  }
+  return _aosUniq(people);
+}
+window._chatTeamList=[];
+function aosLoadChatTeams(){
+  return aosLoadGraph().then(function(g){
+    window._chatTeamList=aosChatTeams(g)||[];
+    /* A team they have left should not stay selected. */
+    ['team','parent'].forEach(function(k){
+      var cur=(window._chatTeam||{})[k];
+      if(cur&&!window._chatTeamList.some(function(t){ return t.id===cur; })) window._chatTeam[k]='';
+    });
+    return window._chatTeamList;
+  }).catch(function(){ window._chatTeamList=[]; return []; });
+}
+/* Which team the person is reading. Kept per thread so Team Chat and
+   Parent Chat can sit on different teams without fighting. */
+window._chatTeam={team:'',parent:''};
+window.aosPickChatTeam=function(which,teamId){
+  window._chatTeam[which]=teamId||'';
+  if(which==='parent'){
+    var pb=document.getElementById('ptab-body');
+    if(pb) aosRenderParentChat(pb);
+  } else if(typeof renderChatHub==='function') renderChatHub();
+};
+function aosChatTeamPickerHTML(which){
+  var teams=window._chatTeamList||[];
+  if(teams.length<2) return '';
+  var cur=window._chatTeam[which]||'';
+  var h='<select onchange="aosPickChatTeam(\''+which+'\',this.value)" '+
+    'style="width:100%;padding:9px;border-radius:8px;border:1px solid #334;'+
+    'background:#0A1A2F;color:#fff;font-size:13px;margin-bottom:10px">';
+  h+='<option value=""'+(cur?'':' selected')+'>Everyone I\u2019m connected to</option>';
+  teams.forEach(function(t){
+    h+='<option value="'+escH(t.id)+'"'+(cur===t.id?' selected':'')+'>'+escH(t.name||'Team')+'</option>';
+  });
+  return h+'</select>';
+}
+/* Only the picked team's messages. Untagged ones predate scoping and
+   belong to "everyone", so they show there and nowhere else. */
+function aosChatFilter(list,teamId){
+  return (list||[]).filter(function(m){
+    return teamId ? (m.teamId===teamId) : !m.teamId;
+  });
+}
+
 var parentChatMsgs=[];
 
 /* Everyone this message should reach. Built from the hubs the viewer
    already belongs to — the coach, trainer or club their children are
    attached to — then every athlete in those hubs taken back out. The
    athletes are the whole reason this collection exists. */
-function aosParentChatAudience(g){
+function aosParentChatAudience(g,teamId){
+  return aosChatAudience(g,teamId,true);
+}
+function _aosParentChatAudienceLegacy(g){
   var u=window.AOS_USER||{};
   if(!u.userId) return [];
   var hubs=aosHubsOf(g,u.userId,u.role||'parent')||[];
@@ -4846,7 +5188,8 @@ window.aosSendParentChat=function(){
   var txt=inp.value.trim().slice(0,2000);
   inp.disabled=true;
   aosLoadGraph().then(function(g){
-    var viewers=aosParentChatAudience(g);
+    var teamId=(window._chatTeam||{}).parent||'';
+    var viewers=aosParentChatAudience(g,teamId);
     if(viewers.length<2){
       showToast('Nobody else is linked to this team yet.');
       inp.disabled=false; return;
@@ -4854,7 +5197,7 @@ window.aosSendParentChat=function(){
     if(viewers.length>500){ showToast('That group is too large to post to.'); inp.disabled=false; return; }
     var id='pc_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8);
     var msg={id:id, text:txt, authorId:u.userId, authorName:u.name||'Parent',
-             authorRole:u.role||'parent', ts:Date.now(), viewers:viewers};
+             authorRole:u.role||'parent', teamId:teamId, ts:Date.now(), viewers:viewers};
     return fbDb.collection('parentChat').doc(id).set(msg).then(function(){
       parentChatMsgs.push(msg);
       inp.value=''; inp.disabled=false;
@@ -4881,16 +5224,20 @@ window.aosDeleteParentChat=function(id){
 
 function aosRenderParentChat(body){
   var u=window.AOS_USER||{};
+  var teamId=(window._chatTeam||{}).parent||'';
+  var shown=aosChatFilter(parentChatMsgs,teamId);
   var h='<div style="background:rgba(243,156,18,0.08);border:1px solid rgba(243,156,18,0.3);'+
       'border-radius:8px;padding:9px 12px;margin-bottom:10px;font-size:11px;color:#f8d9a8">'+
       '\uD83D\uDC6A Parents and staff only. Athletes cannot see this channel. '+
       'For something the whole team should read, use Team Chat.</div>';
+  h+=aosChatTeamPickerHTML('parent');
   h+='<div id="pchat-msgs" style="display:flex;flex-direction:column;gap:8px;max-height:360px;'+
      'overflow-y:auto;margin-bottom:12px">';
-  if(!parentChatMsgs.length){
-    h+='<div style="text-align:center;color:#8899aa;font-size:13px;padding:20px">No messages yet.</div>';
+  if(!shown.length){
+    h+='<div style="text-align:center;color:#8899aa;font-size:13px;padding:20px">'+
+       (teamId?'No messages for this team yet.':'No messages yet.')+'</div>';
   } else {
-    parentChatMsgs.slice(-60).reverse().forEach(function(m){
+    shown.slice(-60).reverse().forEach(function(m){
       var isMe=m.authorId===u.userId;
       var tag=m.authorRole==='coach'?'\uD83C\uDFFD Coach: ':m.authorRole==='trainer'?'\uD83E\uDDBE Trainer: ':
               m.authorRole==='org'?'\uD83C\uDFDB Club: ':'';
@@ -5083,14 +5430,8 @@ function renderChatHub(){
    ══════════════════════════════════════════════════════════════════ */
 var teamChatMsgs=[], teamChatLegacy=[];
 
-function aosTeamChatAudience(g){
-  var u=window.AOS_USER||{};
-  if(!u.userId) return [];
-  var hubs=aosHubsOf(g,u.userId,u.role||'player')||[];
-  var out=[u.userId];
-  hubs.forEach(function(hub){ out=out.concat(aosTeam(g,hub)||[]); });
-  if(u.role==='org') out=out.concat(aosOrgAll(g,u.userId)||[]);
-  return _aosUniq(out);
+function aosTeamChatAudience(g,teamId){
+  return aosChatAudience(g,teamId,false);
 }
 
 function aosLoadTeamChat(){
@@ -5128,12 +5469,13 @@ window.aosSendTeamChat=function(){
   var txt=inp.value.trim().slice(0,2000);
   inp.disabled=true;
   aosLoadGraph().then(function(g){
-    var viewers=aosTeamChatAudience(g);
+    var teamId=(window._chatTeam||{}).team||'';
+    var viewers=aosTeamChatAudience(g,teamId);
     if(viewers.length<2){ showToast('Nobody is linked to you yet.'); inp.disabled=false; return; }
     if(viewers.length>1000){ showToast('That team is too large to post to.'); inp.disabled=false; return; }
     var id='tc_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8);
     var msg={id:id, text:txt, authorId:u.userId, authorName:u.name||'Team',
-             authorRole:u.role||'player', ts:Date.now(), viewers:viewers};
+             authorRole:u.role||'player', teamId:teamId, ts:Date.now(), viewers:viewers};
     return fbDb.collection('teamChat').doc(id).set(msg).then(function(){
       teamChatMsgs.push(msg);
       inp.value=''; inp.disabled=false;
@@ -5158,16 +5500,20 @@ window.aosDeleteTeamChat=function(id){
 
 function aosTeamChatBodyHTML(){
   var u=window.AOS_USER||{};
+  var teamId=(window._chatTeam||{}).team||'';
+  var shown=aosChatFilter(teamChatMsgs,teamId);
   var roleColor={coach:'#2ecc71',trainer:'#e67e22',org:'#9b59b6',parent:'#f39c12',player:'#00E0FF'};
   var roleLabel={coach:'\uD83C\uDFC6 Coach: ',trainer:'\uD83C\uDFCB\uFE0F Trainer: ',org:'\uD83C\uDFE2 Club: ',parent:'\uD83D\uDC6A Parent: ',player:''};
   var h='<div style="background:rgba(0,224,255,0.06);border:1px solid rgba(0,224,255,0.25);'+
     'border-radius:8px;padding:9px 12px;margin-bottom:10px;font-size:11px;color:#bfe9f7">'+
     '\uD83C\uDFC3 Everyone on the team reads this, athletes included.</div>';
+  h+=aosChatTeamPickerHTML('team');
   h+='<div id="chathub-msgs" style="display:flex;flex-direction:column;gap:8px;max-height:60vh;'+
      'overflow-y:auto;margin-bottom:12px">';
-  var any=teamChatMsgs.length||teamChatLegacy.length;
-  if(!any) h+='<div style="text-align:center;color:#8899aa;font-size:13px;padding:24px">No messages yet.</div>';
-  teamChatMsgs.slice(-60).reverse().forEach(function(m){
+  var any=shown.length||(!teamId&&teamChatLegacy.length);
+  if(!any) h+='<div style="text-align:center;color:#8899aa;font-size:13px;padding:24px">'+
+    (teamId?'No messages for this team yet.':'No messages yet.')+'</div>';
+  shown.slice(-60).reverse().forEach(function(m){
     var isMe=m.authorId===u.userId;
     var when=new Date(m.ts||0).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
     h+='<div style="background:'+(isMe?'rgba(0,224,255,0.08)':'rgba(255,255,255,0.04)')+
@@ -5182,7 +5528,7 @@ function aosTeamChatBodyHTML(){
       '<div style="font-size:13px;color:#F5FAFF;white-space:pre-wrap">'+escH(m.text||'')+'</div>'+
     '</div>';
   });
-  if(teamChatLegacy.length){
+  if(teamChatLegacy.length&&!teamId){
     h+='<div style="text-align:center;font-size:10px;color:#667;padding:8px 0;border-top:1px solid rgba(255,255,255,0.08)">'+
        'Earlier messages, from before Team Chat and Parent Chat were separated</div>';
     teamChatLegacy.slice(-30).reverse().forEach(function(m){
@@ -5215,7 +5561,7 @@ function aosTeamChatBodyHTML(){
 }
 function aosRenderTeamChat(body){
   body.innerHTML='<div style="font-size:12px;color:#8899aa;padding:14px">Loading\u2026</div>';
-  Promise.all([aosLoadTeamChat(),aosLoadTeamChatLegacy()]).then(function(){
+  Promise.all([aosLoadTeamChat(),aosLoadTeamChatLegacy(),aosLoadChatTeams()]).then(function(){
     body.innerHTML=aosTeamChatBodyHTML();
     var sendBtn=document.getElementById('chathub-send');
     if(sendBtn) sendBtn.addEventListener('click',aosSendTeamChat);
@@ -5868,9 +6214,8 @@ function renderHome(){
   var td=todayStr();
   var now=new Date();
   var dateStr=now.toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'});
-  var hydToday=hydration[td]||{entries:[],goal:64};
-  var hydOz=hydToday.entries.reduce(function(s,e){return s+e.oz},0);
-  var hydGoal=hydToday.goal||64;
+  var hydOz=aosHydrationOz(td);
+  var hydGoal=aosHydrationGoal(td);
   var daySessions=(training[td]||[]);
   var doneCount=daySessions.filter(function(s){return s.done}).length;
   var activeGoals=goals.filter(function(g){return !g.completed}).length;
@@ -6592,16 +6937,9 @@ function openChallengeBuilder(existingChs){
 
 
 // ── Coach replies to parent chat from Team Hub ───────────────────────────────
-function coachReplyParentChat(){
-  var inp=document.getElementById('coach-pchat-input');
-  if(!inp||!inp.value.trim()) return;
-  var coachName=((profile.firstName||'')+(profile.lastName?' '+profile.lastName:'')).trim()||'Coach';
-  AppSDK.getItem('aos_parent_chat').then(function(chat){
-    chat=Array.isArray(chat)?chat:[];
-    chat.push({author:coachName,text:inp.value.trim(),date:getTodayKey(),time:new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),isCoach:true,role:'coach'});
-    AppSDK.setItem('aos_parent_chat',chat).then(function(){inp.value='';showToast('Reply sent to parents \u2705');renderTeam();});
-  });
-}
+/* coachReplyParentChat removed with the Team → Parents tab. Staff
+   reach parents through Parent Chat in the Parent Portal, which is
+   the channel athletes cannot read. */
 
 
 /* ─── CAPTAIN TOOLS ──────────────────────────────────────────────── */
@@ -6823,7 +7161,7 @@ function renderTeam(){
     {k:'challenges', lbl:'&#127942; Challenges'},
     {k:'feed',       lbl:'&#128226; Feed'},
     {k:'captain',    lbl:'&#128081; Captain'},
-    {k:'parentchat', lbl:'&#128106; Parents'}
+    {k:'parents',    lbl:'&#128106; Parents'}
   ];
   var sc={'Active':'#2ecc71','Injured':'#e74c3c','On Leave':'#f39c12','Developing':'#3498db'};
   /* tier colors removed */
@@ -7192,6 +7530,14 @@ function renderTeam(){
                 '<button class="btn btn-primary" style="padding:10px 14px;white-space:nowrap" onclick="postToTeamFeedAsPlayer()">Post</button>'+
               '</div>';
           }
+          else if(tab==='parents'){
+            tb.innerHTML='<div style="font-size:12px;color:#8899aa;padding:14px">Loading\u2026</div>';
+            aosLoadGraph().then(function(g){
+              tb.innerHTML=aosParentsRosterHTML(g,(window._chatTeam||{}).team||'');
+            }).catch(function(){
+              tb.innerHTML='<div style="font-size:12px;color:#ff8899;padding:14px">Could not load the roster.</div>';
+            });
+          }
           else if(tab==='captain'){
             /* A coach names captains on their roster; this used to be a
                label an athlete set on themselves. */
@@ -7207,18 +7553,6 @@ function renderTeam(){
               '<script>setTimeout(renderCaptainPollResults,100);<\/script>':
               '<div style="font-size:13px;color:#8899aa;text-align:center;padding:10px">&#128274; Restricted access</div>')+
               '</div>';
-          }
-          else if(tab==='parentchat'){
-            tb.innerHTML='<div style="font-size:11px;color:#8899aa;margin-bottom:10px">&#128106; Parent channel &#8212; read &amp; reply as Coach/Staff</div>'+
-              '<div style="display:flex;flex-direction:column;gap:8px;max-height:320px;overflow-y:auto;margin-bottom:10px">'+
-              (pc2.length?pc2.slice(-30).reverse().map(function(msg){return '<div class="card" style="padding:9px"><div style="display:flex;justify-content:space-between;margin-bottom:3px"><span style="font-weight:700;font-size:11px;color:'+(msg.isCoach?'#2ecc71':'#f39c12')+'">'+escH(msg.author||'Parent')+'</span><span style="font-size:10px;color:#8899aa">'+(msg.time||'')+'</span></div><div style="font-size:12px;color:#F5FAFF">'+escH(msg.text||'')+'</div></div>';}).join(''):'<div style="text-align:center;color:#8899aa;padding:20px;font-size:13px">No parent messages yet</div>')+
-              '</div>'+
-              '<div style="display:flex;gap:8px">'+
-                '<input id="cpchat-inp" type="text" placeholder="Reply to parents..." style="flex:1;padding:9px 12px;border-radius:8px;border:1px solid rgba(0,224,255,0.2);background:rgba(255,255,255,0.04);color:#F5FAFF;font-size:13px">'+
-                '<button class="btn btn-primary" style="padding:9px 12px;white-space:nowrap" onclick="coachReplyParentChat()">Reply</button>'+
-              '</div>';
-            var ci2=document.getElementById('cpchat-inp');
-            if(ci2) ci2.addEventListener('keydown',function(e){if(e.key==='Enter')coachReplyParentChat();});
           }
         });
       });
@@ -8446,11 +8780,12 @@ function renderMetrics(){
 function renderMetricsPhysical(){
   var c=safeGet('metrics-content');if(!c)return;
   var el=safeGet('sec-metrics');
-  var physKeys=BENCHMARKS.map(function(b){return b.key});
-  var html='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Log Physical Metric</div><div class="form-row"><div class="form-group"><label>Metric</label><select id="mp-key">'+BENCHMARKS.map(function(b){return '<option value="'+b.key+'">'+escH(b.m)+'</option>'}).join('')+'</select></div><div class="form-group"><label>Value</label><input type="number" step="0.01" id="mp-val" placeholder="Value"></div></div><div class="form-group"><label>Date</label><input type="date" id="mp-date" value="'+todayStr()+'"></div>'+aosContextFieldsHTML('mp')+'<button class="btn btn-primary btn-full btn-sm" id="mp-save">+ Log Metric</button></div>';
+  var _loggable=aosLoggableMetrics();
+  var physKeys=_loggable.map(function(b){return b.key});
+  var html='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Log Physical Metric</div><div class="form-row"><div class="form-group"><label>Metric</label><select id="mp-key">'+_loggable.map(function(b){return '<option value="'+b.key+'">'+escH(b.m)+'</option>'}).join('')+'</select></div><div class="form-group"><label>Value</label><input type="number" step="0.01" id="mp-val" placeholder="Value"></div></div><div class="form-group"><label>Date</label><input type="date" id="mp-date" value="'+todayStr()+'"></div>'+aosContextFieldsHTML('mp')+'<button class="btn btn-primary btn-full btn-sm" id="mp-save">+ Log Metric</button></div>';
   // PB display with entries
   var pbHTML='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Personal Bests & Entries</div>';
-  BENCHMARKS.forEach(function(b){
+  _loggable.forEach(function(b){
     var entries=(metricsPhysical[b.key]||[]);
     var best=null;
     entries.forEach(function(e){
@@ -8473,8 +8808,17 @@ function renderMetricsPhysical(){
   });
   pbHTML+='</div>';
   // Benchmark table
-  var tableHTML='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Division Benchmarks</div><div style="overflow-x:auto"><table class="benchmark-table"><thead><tr><th>Metric</th><th style="color:var(--danger)">⚡P4</th><th>D1</th><th>D2</th><th>D3</th><th style="color:var(--warning)">JUCO</th><th>NAIA</th><th style="color:var(--gold)">My Best</th><th>Status</th></tr></thead><tbody>';
-  BENCHMARKS.forEach(function(b){
+  var _benchSet=aosBenchSet();
+  var tableHTML='';
+  if(!_benchSet.length){
+    /* No sourced table for this sport. Showing softball thresholds here
+       told a baseball player throwing 78 that he was above Power 4,
+       against an underhand pitching number. Better to show nothing. */
+    tableHTML='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">Division Benchmarks</div>'+
+      aosBenchNoteHTML()+'</div>';
+  } else {
+  tableHTML='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Division Benchmarks</div><div style="overflow-x:auto"><table class="benchmark-table"><thead><tr><th>Metric</th><th style="color:var(--danger)">⚡P4</th><th>D1</th><th>D2</th><th>D3</th><th style="color:var(--warning)">JUCO</th><th>NAIA</th><th style="color:var(--gold)">My Best</th><th>Status</th></tr></thead><tbody>';
+  _benchSet.forEach(function(b){
     var entries=(metricsPhysical[b.key]||[]);
     var best=null;entries.forEach(function(e){if(best===null)best=e.value;else if(b.hb&&e.value>best)best=e.value;else if(!b.hb&&e.value<best)best=e.value});
     var status='⚪';
@@ -8487,7 +8831,8 @@ function renderMetricsPhysical(){
     }
     tableHTML+='<tr><td style="text-align:left;font-weight:600">'+escH(b.m)+'</td><td>'+b.p4+'</td><td>'+b.d1+'</td><td>'+b.d2+'</td><td>'+b.d3+'</td><td>'+b.juco+'</td><td>'+b.naia+'</td><td style="color:var(--gold);font-weight:700">'+(best!==null?best:'—')+'</td><td>'+status+'</td></tr>';
   });
-  tableHTML+='</tbody></table></div></div>';
+  tableHTML+='</tbody></table></div>'+aosBenchNoteHTML()+'</div>';
+  }
   c.innerHTML=html+pbHTML+tableHTML;
   var mpSave=safeGet('mp-save');if(mpSave)mpSave.addEventListener('click',function(){
     var key=safeVal('mp-key'),val=parseFloat(safeVal('mp-val')),date=safeVal('mp-date');
@@ -8833,8 +9178,7 @@ function syncHydrationToLinkedAccount(){
     var key=Object.keys(accs).find(function(k){return accs[k]&&accs[k].userId===u.userId;});
     if(!key)return;
     var td=getTodayKey();
-    var h=(hydration&&hydration[td])||{entries:[]};
-    accs[key].hydrationToday=Math.round((h.entries||[]).reduce(function(s,e){return s+(e.oz||0);},0));
+    accs[key].hydrationToday=aosHydrationOz(td);
     accs[key].hydrationUpdated=td;
     return AppSDK.setItem('aos_local_accounts',accs);
   });
@@ -8908,14 +9252,14 @@ function updateLastDrink(){
 function renderHydration(){
   var el=safeGet('sec-hydration');if(!el)return;
   var td=todayStr();var hd=hydration[td]||{entries:[],goal:64};
-  var total=hd.entries.reduce(function(s,e){return s+e.oz},0);
-  var goal=hd.goal||64;var pct=Math.min(100,Math.round(total/goal*100));
+  var total=aosHydrationOz(td);
+  var goal=aosHydrationGoal(td);var pct=Math.min(100,Math.round(total/goal*100));
   var circumference=2*Math.PI*80;var offset=circumference-(pct/100)*circumference;
   var lastE=hd.entries.length?hd.entries[hd.entries.length-1]:null;
   var lastStr=lastE?Math.round((Date.now()-lastE.time)/60000)+' min ago':'—';
   // 7-day bars
   var barHTML='<div class="mini-bars">';var maxOz=goal;
-  for(var d=6;d>=0;d--){var dt=new Date();dt.setDate(dt.getDate()-d);var ds=aosDateKey(dt);var dh=hydration[ds]||{entries:[]};var dOz=dh.entries.reduce(function(s,e){return s+e.oz},0);if(dOz>maxOz)maxOz=dOz;
+  for(var d=6;d>=0;d--){var dt=new Date();dt.setDate(dt.getDate()-d);var ds=aosDateKey(dt);var dOz=aosHydrationOz(ds);if(dOz>maxOz)maxOz=dOz;
   barHTML+='<div class="mini-bar-col"><div class="mini-bar-val">'+dOz+'</div><div class="mini-bar-fill" style="height:'+Math.max(3,Math.round(dOz/maxOz*60))+'px;background:'+(dOz>=goal?'var(--green)':'var(--gold)')+'"></div><div class="mini-bar-lbl">'+ds.slice(5)+'</div></div>'}
   barHTML+='</div>';
   el.innerHTML='<div class="section-title">💧 Hydration</div>'+
@@ -9145,7 +9489,7 @@ function renderAnalyticsPlayer(){
   var labels7=days7.map(function(d){var dt=new Date(d);return ['Su','Mo','Tu','We','Th','Fr','Sa'][dt.getUTCDay()];});
   var sessData=days7.map(function(d){return (training[d]||[]).length;});
   var recData=days7.map(function(d){var r=recovery[d]||{};return r.readiness||0;});
-  var hydData=days7.map(function(d){var h=hydration[d]||{};return h.oz?Math.round(h.oz/33.8*10)/10:0;});
+  var hydData=days7.map(function(d){return aosHydrationOz(d);});
   var maxSess=Math.max(1,...sessData); var maxHyd=Math.max(1,...hydData);
 
   // SVG bar chart helper
@@ -9953,8 +10297,12 @@ window.aosTogglePathItem=function(id){
 /* Which metrics already clear the target, from her own bests. */
 function aosPathMetrics(div){
   if(typeof BENCHMARKS==='undefined') return [];
+  /* Same gate as the table: a sport with no sourced thresholds gets no
+     division read, rather than one borrowed from another sport. */
+  var set=(typeof aosBenchSet==='function')?aosBenchSet():BENCHMARKS;
+  if(!set.length) return [];
   var phys=(typeof metricsPhysical!=='undefined')?metricsPhysical:{};
-  return BENCHMARKS.map(function(b){
+  return set.map(function(b){
     var entries=(phys[b.key]||[]);
     var vals=entries.map(function(e){return Number(e.value);}).filter(function(v){return !isNaN(v);});
     var target=b[div];
@@ -10255,7 +10603,7 @@ function renderNutrition(){
   var td=todayStr();var log=nutritionLog[td]||[];
   var totals={calories:0,protein:0,carbs:0,fats:0};
   log.forEach(function(e){totals.calories+=e.cal||0;totals.protein+=e.pro||0;totals.carbs+=e.carb||0;totals.fats+=e.fat||0});
-  var waterToday=(hydration[td]||{entries:[]}).entries.reduce(function(s,e){return s+e.oz},0);
+  var waterToday=aosHydrationOz(td);
   function macroBar(label,cur,goal,color){
     var pct=goal?Math.min(100,Math.round(cur/goal*100)):0;
     return '<div class="macro-bar"><div class="macro-bar-header"><span>'+label+'</span><span style="color:'+color+'">'+cur+' / '+goal+'</span></div><div class="progress-bar"><div class="progress-fill" style="width:'+pct+'%;background:'+color+'"></div></div></div>';
@@ -13804,7 +14152,14 @@ function renderParent(){
     AppSDK.getItem('aos_season_events')
   ]).then(function(res){
     var myLinks=res[0]||{}, accs=res[1]||{}, commsLog=res[2]||[], playerLinks=res[3]||{}, allOrgTrainings=res[4]||[], allSeasonEvents=res[5]||[];
+    /* Both directions. A child who linked their parent from their own
+       Profile appeared everywhere else in the app but not as a card
+       here, because this read only the parent-linked-the-child map. */
     var myChildIds=Object.keys(myLinks[u.userId]||{});
+    Object.keys(playerLinks||{}).forEach(function(pid){
+      var l=(playerLinks[pid]||{})[u.userId];
+      if(l&&l.linkerRole==='parent'&&myChildIds.indexOf(pid)<0) myChildIds.push(pid);
+    });
 
     var html='<div style="padding:16px;max-width:600px;margin:0 auto">';
     html+='<div style="font-family:\'Barlow Condensed\',sans-serif;font-size:26px;font-weight:900;color:#ff88aa;letter-spacing:1px;margin-bottom:2px">👨‍👩‍👧 PARENT PORTAL</div>';
