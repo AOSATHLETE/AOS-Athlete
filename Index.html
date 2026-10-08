@@ -560,6 +560,80 @@ function _readLinks(key,uid){
     return map;
   });
 }
+/* ── canSee: who a link is allowed to be read by ──────────────────
+   The graph is built by reading every link in the database, because a
+   coach needs Ava's parents and is not a party to that link. That is
+   why every signed-in account can currently enumerate every family in
+   the system, and why one app session reads documents in proportion
+   to the size of the whole database rather than the size of your own
+   team.
+
+   The fix is to record, on each link, who may read it: everyone
+   around the athlete it concerns. Written here; the loader starts
+   using it in a later step, and the rules after that. Until then this
+   is additive and changes no behaviour.
+
+   Staleness is handled two ways. The loader will always also query by
+   parties, so you can never lose sight of your own links whatever
+   canSee says. And a late joiner - a coach who arrives after a link
+   was written - is repaired by aosRepairCanSee below, the same
+   problem republish solves for events. */
+function aosLinkCanSee(g,coll,outer,inner){
+  var out=[outer,inner];
+  function around(athlete){
+    if(!athlete) return;
+    out.push(athlete);
+    (aosStaffOfAthlete(g,athlete)||[]).forEach(function(sid){
+      out.push(sid);
+      (aosOrgsOf(g,sid)||[]).forEach(function(o){ out.push(o); });
+    });
+    (aosParentsOf(g,athlete)||[]).forEach(function(pid){ out.push(pid); });
+  }
+  if(coll==='links') around(outer);               /* outer is the athlete */
+  else if(coll==='parentLinks') around(inner);    /* inner is the child   */
+  else {
+    /* staff to staff: both, plus whichever orgs they answer to. */
+    [outer,inner].forEach(function(id){
+      (aosOrgsOf(g,id)||[]).forEach(function(o){ out.push(o); });
+    });
+  }
+  return _aosUniq(out).filter(Boolean).slice(0,400);
+}
+/* Links written before canSee existed, and links whose audience has
+   since grown - a coach who joined after the link was made. Runs for
+   whoever can actually write them: a party to the link. */
+window.aosRepairCanSee=function(){
+  var u=window.AOS_USER||{};
+  if(!u.userId||!window.fbDb) return Promise.resolve(0);
+  if(window._aosCanSeeRan) return Promise.resolve(0);
+  window._aosCanSeeRan=true;
+  return aosLoadGraph().then(function(g){
+    var jobs=[];
+    Object.keys(_LINK_KEYS).forEach(function(key){
+      var cfg=_LINK_KEYS[key];
+      jobs.push(fbDb.collection(cfg.coll).where('parties','array-contains',u.userId).get()
+        .then(function(sn){
+          var ops=[];
+          sn.forEach(function(d){
+            var v=d.data()||{};
+            var o=v[cfg.outer], i=v[cfg.inner];
+            if(!o||!i) return;
+            var want=aosLinkCanSee(g,cfg.coll,o,i);
+            var have=v.canSee||[];
+            var missing=want.filter(function(x){ return have.indexOf(x)<0; });
+            if(!missing.length) return;
+            ops.push(fbDb.collection(cfg.coll).doc(d.id)
+              .update({canSee:_aosUniq(have.concat(missing)).slice(0,400)})
+              .catch(function(e){ console.warn('AOS canSee repair failed',d.id,e); }));
+          });
+          return Promise.all(ops).then(function(){ return ops.length; });
+        }).catch(function(e){ console.warn('AOS canSee scan failed',cfg.coll,e); return 0; }));
+    });
+    return Promise.all(jobs).then(function(counts){
+      return counts.reduce(function(a,b){ return a+(b||0); },0);
+    });
+  }).catch(function(){ return 0; });
+};
 function _writeLinks(key,uid,val){
   var cfg=_LINK_KEYS[key], seen=_linkSeen[key]||{}, now={}, ops=[];
   val=val||{};
@@ -574,6 +648,19 @@ function _writeLinks(key,uid,val){
     var doc={parties:[now[docId].outer,now[docId].inner], rec:now[docId].rec, updatedAt:Date.now(),
              reqId:(now[docId].rec&&now[docId].rec.reqId)||''};
     doc[cfg.outer]=now[docId].outer; doc[cfg.inner]=now[docId].inner;
+    /* Best effort from whatever graph is already loaded; the repair
+       pass fills in anything this could not know yet. */
+    try{
+      if(window._aosGraph&&_aosGraph.p&&typeof aosLinkCanSee==='function'){
+        doc.canSee=[now[docId].outer,now[docId].inner];
+        _aosGraph.p.then(function(g){
+          var full=aosLinkCanSee(g,cfg.coll,now[docId].outer,now[docId].inner);
+          fbDb.collection(cfg.coll).doc(docId).update({canSee:full}).catch(function(){});
+        });
+      } else {
+        doc.canSee=[now[docId].outer,now[docId].inner];
+      }
+    }catch(e){ doc.canSee=[now[docId].outer,now[docId].inner]; }
     ops.push(fbDb.collection(cfg.coll).doc(docId).set(doc)
       .then(function(){ seen[docId]=cur; })
       .catch(function(e){ console.warn('AOS link write failed',docId,e); }));
@@ -5198,6 +5285,33 @@ function loadParentTab(tab,body,childName){
 
    Names only. No email, no phone, no way to start a conversation. A
    team program hands round a roster; this is that, and no more. */
+/* ── Forms that cannot work yet ───────────────────────────────────
+   Assign Training was the one that got caught: a full form, a big
+   button, and a toast telling you it could not work only after you
+   had filled it in. The warning was there, under the form, below the
+   fold on a phone.
+
+   Three more are the same shape - org training, the challenge builder
+   and team chat all post to athletes. One helper, so the next one
+   written inherits the behaviour instead of repeating the bug: say it
+   at the top, offer the fix, and make the button genuinely dead
+   rather than merely honest. */
+function aosNoAthletesCardHTML(whatFor){
+  return '<div class="card" style="margin-bottom:12px;border:1px solid rgba(243,156,18,0.4)">'+
+    '<div style="font-weight:800;color:#f39c12;font-size:13px;margin-bottom:4px">No athletes linked yet</div>'+
+    '<div style="font-size:11px;color:#8899aa;margin-bottom:10px">'+escH(whatFor)+'</div>'+
+    '<button class="btn btn-primary btn-full btn-sm" '+
+      'onclick="window._tth=\'roster\';renderTeamHubForStaff();">Invite families</button></div>';
+}
+/* A button that is dead when it cannot do anything, and says why. */
+function aosGatedButtonHTML(can,fn,liveLabel,deadLabel,accent){
+  return '<button '+(can?'onclick="'+fn+'"':'disabled')+
+    ' style="width:100%;background:'+(can?accent:'rgba(255,255,255,0.06)')+
+    ';color:'+(can?'#0A1A2F':'#6b7b8a')+';padding:11px;border-radius:20px;font-weight:800;'+
+    'font-size:13px;border:'+(can?'none':'1px solid #334')+
+    ';cursor:'+(can?'pointer':'not-allowed')+';margin-bottom:12px">'+
+    escH(can?liveLabel:deadLabel)+'</button>';
+}
 function aosParentsRosterHTML(g,teamId){
   var u=window.AOS_USER||{};
   /* Viewing, not sending — so here every hat counts. A coach who is
@@ -5799,6 +5913,22 @@ function aosTeamChatBodyHTML(){
       'and the coaching staff, use Parent Chat in the Parent Portal.</div>';
   } else {
     h+=aosSendingAsHTML();
+    /* Checked before the box, not after the send. aosSendTeamChat
+       still refuses, but being told once you have typed it is the
+       same mistake Assign Training was making. */
+    var _alone=(window._chatReach===0);
+    if(_alone){
+      /* The way out differs by who is standing there: a coach invites
+         families, an athlete joins a coach. Telling an athlete to go
+         to the Roster tab is advice she cannot act on. */
+      var _staffHere=['coach','trainer','org'].indexOf(u.role||'')>=0;
+      h+='<div style="background:rgba(243,156,18,0.08);border:1px solid rgba(243,156,18,0.3);'+
+        'border-radius:8px;padding:10px 12px;font-size:11px;color:#f8d9a8">'+
+        '\uD83D\uDC65 Nobody is linked to you yet, so there is no team to message. '+
+        (_staffHere
+          ? 'Invite your families from the Roster tab and this starts working.'
+          : 'Once you join a coach or club, their team chat appears here.')+'</div>';
+    } else {
     h+='<div style="display:flex;gap:8px">'+
       '<input id="chathub-input" type="text" placeholder="Message the team\u2026" '+
         'style="flex:1;padding:10px 12px;border-radius:8px;border:1px solid rgba(0,224,255,0.2);'+
@@ -5806,12 +5936,16 @@ function aosTeamChatBodyHTML(){
       '<button class="btn btn-primary" id="chathub-send" style="padding:10px 14px;'+
         'white-space:nowrap;touch-action:manipulation">Send</button>'+
     '</div>';
+    }
   }
   return h;
 }
 function aosRenderTeamChat(body){
   body.innerHTML='<div style="font-size:12px;color:#8899aa;padding:14px">Loading\u2026</div>';
-  Promise.all([aosLoadTeamChat(),aosLoadTeamChatLegacy(),aosLoadChatTeams()]).then(function(){
+  Promise.all([aosLoadTeamChat(),aosLoadTeamChatLegacy(),aosLoadChatTeams(),
+    aosLoadGraph().then(function(g){
+      window._chatReach=Math.max(0,(aosTeamChatAudience(g,(window._chatTeam||{}).team||'')||[]).length-1);
+    }).catch(function(){ window._chatReach=null; })]).then(function(){
     body.innerHTML=aosTeamChatBodyHTML();
     var sendBtn=document.getElementById('chathub-send');
     if(sendBtn) sendBtn.addEventListener('click',aosSendTeamChat);
@@ -6135,6 +6269,12 @@ async function initApp(){
      and the Schedule tab only, so a coach who lives in Assign Training
      never triggered it and the new family kept seeing an empty
      calendar. Once per sign-in, whatever they do next. */
+  /* Widen the canSee on links I am party to. Everyone runs this, not
+     only staff: a parent is the one party who can repair their own
+     parent link. */
+  setTimeout(function(){
+    if(typeof aosRepairCanSee==='function') aosRepairCanSee();
+  },5000);
   setTimeout(function(){
     var r=(window.AOS_USER||{}).role||'';
     if(['coach','trainer','org'].indexOf(r)<0) return;
@@ -8064,15 +8204,9 @@ function renderTeamHubForStaff(){
       /* The dead end goes at the top, with the thing that fixes it. It
          used to sit under the whole form, so on a phone you filled
          everything in, pressed the button and got a toast. */
-      if(!players.length){
-        html+='<div class="card" style="margin-bottom:12px;border:1px solid rgba(243,156,18,0.4)">'+
-          '<div style="font-weight:800;color:#f39c12;font-size:13px;margin-bottom:4px">No athletes linked yet</div>'+
-          '<div style="font-size:11px;color:#8899aa;margin-bottom:10px">'+
-            'Assigned training lands on an athlete\u2019s own Training tab, so there has to be '+
-            'somebody to send it to. Invite your families and this page starts working.</div>'+
-          '<button class="btn btn-primary btn-full btn-sm" onclick="window._tth=\'roster\';renderTeamHubForStaff();">'+
-            'Invite families</button></div>';
-      }
+      if(!players.length) html+=aosNoAthletesCardHTML(
+        'Assigned training lands on an athlete\u2019s own Training tab, so there has to be '+
+        'somebody to send it to.');
       html+='<div class="card" style="margin-bottom:12px'+(players.length?'':';opacity:0.55')+'">';
       html+='<div style="font-weight:800;color:'+roleColor+';margin-bottom:4px;font-size:13px">🏋️ ASSIGN TRAINING TO YOUR TEAM</div>';
       html+='<div style="font-size:11px;color:#8899aa;margin-bottom:12px">Creates this session on every currently linked athlete\'s Training tab for today. They\'ll see it tagged with your name and can mark it done like any other session.</div>';
@@ -8101,7 +8235,10 @@ function renderTeamHubForStaff(){
     }
 
     else if(tab==='orgtraining'){
-      html+='<div class="card" style="margin-bottom:12px">';
+      if(!players.length) html+=aosNoAthletesCardHTML(
+        'Org training is a sign-up sheet \u2014 athletes and parents claim the spots. '+
+        'Until somebody is linked there is nobody to offer them to.');
+      html+='<div class="card" style="margin-bottom:12px'+(players.length?'':';opacity:0.55')+'">';
       html+='<div style="font-weight:800;color:'+roleColor+';margin-bottom:4px;font-size:13px">🗓️ CREATE ORG TRAINING</div>';
       html+='<div style="font-size:11px;color:#8899aa;margin-bottom:12px">Athletes and parents sign up for a limited number of spots. Fills up on a first-come basis, and they can cancel if plans change.</div>';
       html+='<div class="form-group"><label>Title</label><input id="ot-title" placeholder="e.g. Fall Skills Clinic"></div>';
@@ -8126,7 +8263,7 @@ function renderTeamHubForStaff(){
       html+='<div style="font-size:11px;color:#8899aa;margin-bottom:4px">Repeat until</div>';
       html+='<input id="ot-until" type="date" style="width:100%;padding:8px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px;box-sizing:border-box">';
       html+='</div>';
-      html+='<button onclick="createOrgTraining()" style="width:100%;background:'+roleColor+';color:#0A1A2F;padding:11px;border-radius:20px;font-weight:800;font-size:13px;border:none;cursor:pointer">CREATE TRAINING</button>';
+      html+=aosGatedButtonHTML(players.length>0,'createOrgTraining()','\uD83D\uDCC5 CREATE TRAINING SESSION','NO ATHLETES LINKED YET',roleColor);
       html+='</div>';
 
       var myTrainingsRaw=orgTrainings.filter(function(t){return t.orgId===u.userId;});
@@ -8247,7 +8384,11 @@ function renderTeamHubForStaff(){
     }
 
     else if(tab==='challenges'){
-      html+='<button onclick="openChallengeBuilder([])" style="width:100%;background:'+roleColor+';color:#0A1A2F;padding:11px;border-radius:20px;font-weight:800;font-size:13px;border:none;cursor:pointer;margin-bottom:12px">🏆 CREATE CHALLENGE</button>';
+      if(!players.length) html+=aosNoAthletesCardHTML(
+        'A challenge is something a roster competes in. With nobody linked it would '+
+        'be posted to an empty team.');
+      html+=aosGatedButtonHTML(players.length>0,'openChallengeBuilder([])',
+        '\uD83C\uDFC6 CREATE CHALLENGE','NO ATHLETES LINKED YET',roleColor);
       if(!challenges.length){
         html+='<div class="card" style="text-align:center;padding:24px;color:#8899aa;font-size:13px">No active challenges yet.</div>';
       } else {
@@ -14253,7 +14394,10 @@ function aosCompleteJoin(inv,cb){
     teamId:inv.teamId||'', inviteCode:inv.code, linkedAt:Date.now()};
   var rec={playerId:u.userId, linkerId:inv.ownerId, linkerName:inv.ownerName,
     linkerRole:inv.ownerRole||'coach', parties:[u.userId,inv.ownerId],
-    inviteCode:inv.code, teamId:inv.teamId||'', linkedAt:Date.now(), rec:det};
+    inviteCode:inv.code, teamId:inv.teamId||'', linkedAt:Date.now(), rec:det,
+    /* Seeded with the two parties; the inviter's repair pass widens it
+       to the rest of the team on their next load. */
+    canSee:[u.userId,inv.ownerId]};
   /* The joiner can't write the coach's invite — only the owner can, and
      that's the right rule. Who joined is counted from the links each
      invite created, which the coach can already read. */
