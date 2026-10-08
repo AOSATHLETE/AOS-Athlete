@@ -655,9 +655,37 @@ function _writeRequests(uid,val){
      coach ↔ coach), which makes them reachable one-to-one.
    ══════════════════════════════════════════════════════════════════ */
 var AOS_STAFF_ROLES=['coach','trainer','org'];
-function aosLoadGraph(){
-  return Promise.all(['aos_local_accounts','aos_player_links','aos_parent_links','aos_staff_links','aos_teams','aos_team_members'].map(function(k){ return window.AppSDK.getItem(k); }))
+/* The connection graph, cached for the session.
+
+   This is six reads, and three of them (accounts, teams, team members)
+   come back whole, so the real cost is forty-odd documents every time.
+   It is called from twenty places: posting a session, sending a chat,
+   the republish scan, the roster, the digest. A day of ordinary use
+   measured 42 reads per write, which is almost exactly one uncached
+   graph load per action.
+
+   Caching the promise rather than the result also means two callers in
+   the same render share one fetch instead of racing.
+
+   Correctness comes from busting, not from a short clock: any write
+   that could change who is connected to whom clears it, as does
+   signing in or out. The TTL is only a backstop for a change made in
+   another tab or on another device. Treat the returned object as
+   read-only - every caller shares it. */
+var _AOS_GRAPH_KEYS={aos_local_accounts:1,aos_player_links:1,aos_parent_links:1,
+                     aos_staff_links:1,aos_teams:1,aos_team_members:1};
+var _aosGraph={p:null,at:0,ttl:120000,hits:0,misses:0};
+function aosBustGraph(){ _aosGraph.p=null; _aosGraph.at=0; }
+function aosLoadGraph(force){
+  var now=Date.now();
+  if(!force&&_aosGraph.p&&(now-_aosGraph.at)<_aosGraph.ttl){ _aosGraph.hits++; return _aosGraph.p; }
+  _aosGraph.misses++;
+  var p=Promise.all(Object.keys(_AOS_GRAPH_KEYS).map(function(k){ return window.AppSDK.getItem(k); }))
     .then(function(r){ return {accs:r[0]||{}, pl:r[1]||{}, parl:r[2]||{}, sl:r[3]||{}, teams:r[4]||{}, tm:r[5]||{}}; });
+  _aosGraph.p=p; _aosGraph.at=now;
+  /* A failure must never become the cached answer. */
+  p.catch(function(){ if(_aosGraph.p===p) aosBustGraph(); });
+  return p;
 }
 function _aosUniq(a){ var s={},o=[]; (a||[]).forEach(function(x){ if(x&&!s[x]){ s[x]=1; o.push(x); } }); return o; }
 function aosRoleOf(g,id){
@@ -1132,7 +1160,7 @@ function aosStaffEventsHTML(teamId){
      not only on the Schedule tab. One scan per load; the guard below is
      what stops the callback re-rendering into a loop. */
   if(!window._aosRepublish&&typeof aosRepublishRefresh==='function') setTimeout(function(){
-    aosRepublishRefresh(function(scan){ if(scan&&scan.events.length) _aosRerenderStaffScreen(); });
+    aosRepublishRefresh(function(scan){ if(scan&&scan.events.length) aosRepublishAuto(); });
   },0);
   var h=(typeof aosRepublishCardHTML==='function'?aosRepublishCardHTML():'')+'<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'+
     '<div style="font-weight:700;font-size:13px">Schedule</div>'+
@@ -1294,6 +1322,28 @@ function aosEventTimeLabel(ev){
 
    Only new posts are affected — an event already out there keeps the
    audience stored on it, and republish only ever adds people. */
+/* Staff who share a team with this person. A co-coach or an assistant
+   on 14U Gold counts; a private trainer an athlete happens to also see
+   does not, because they are on nobody's team.
+
+   That distinction is the point. Reaching every staff member linked to
+   any of my athletes would make a family's outside training visible to
+   their club, which is often exactly why they went outside. Sharing a
+   team is something both staff opted into; sharing an athlete is not.
+
+   Only matters for an unscoped post. A team-scoped one already goes
+   through aosTeamMembers, which carries the team's staff. */
+function aosCoStaffOf(g,me){
+  if(typeof aosTeamsFor!=='function'||typeof aosTeamStaff!=='function') return [];
+  var out=[];
+  /* aosCreateTeam writes teamId, not id. Reading t.id here returned
+     undefined against real data and the whole thing came back empty —
+     it only looked right because the test graph used id. */
+  (aosTeamsFor(g,me)||[]).forEach(function(t){
+    out=out.concat(aosTeamStaff(g,t.teamId||t.id)||[]);
+  });
+  return _aosUniq(out).filter(function(id){ return id&&id!==me; });
+}
 function aosEventAudience(g,me,role,teamId){
   if(teamId&&typeof aosTeamMembers==='function'){
     var scoped=aosTeamMembers(g,me,teamId)||[];
@@ -1303,7 +1353,7 @@ function aosEventAudience(g,me,role,teamId){
   if(role==='org'){
     out=out.concat(aosOrgAll(g,me));
   } else if(role==='coach'||role==='trainer'){
-    out=out.concat(aosTeam(g,me));
+    out=out.concat(aosTeam(g,me)).concat(aosCoStaffOf(g,me));
   }
   return _aosUniq(out);
 }
@@ -2304,7 +2354,11 @@ function aosDoWithUndo(key,message,mutate){
     });
   });
 }
-window.aosPickTeam=function(teamId){ window._staffTeam=teamId||''; _aosRerenderStaff(); };
+window.aosPickTeam=function(teamId){
+  window._staffTeam=teamId||'';
+  window._myTeamStaffFor=null; window._myTeamStaff=[];
+  _aosRerenderStaff();
+};
 window.aosNewTeamPrompt=function(){
   var name=prompt('New team name (e.g. Varsity, JV, 14U):','');
   if(name) aosCreateTeam(name,function(tid){ window._staffTeam=tid; _aosRerenderStaff(); });
@@ -2626,6 +2680,9 @@ window.AppSDK = {
     }).catch(function(e){ console.warn('AOS storage read error',key,e); return null; });
   },
   setItem: function(key,val){
+    /* Writing links, teams or accounts changes the graph, so the cached
+       copy stops being true the moment this lands. */
+    if(typeof _AOS_GRAPH_KEYS!=='undefined'&&_AOS_GRAPH_KEYS[key]) aosBustGraph();
     if(key==='aos_session'){
       try{
         if(val===null||val===undefined) localStorage.removeItem(key);
@@ -3217,7 +3274,7 @@ const SECONDARY_MAP = {
    the owner has somewhere to read both. No backend, so a report lands
    in Firestore and can also open the sender's own mail app.
    ══════════════════════════════════════════════════════════════════ */
-var AOS_VERSION='AOS V.8.0.3';   /* HTML and the rules file carry the same number */
+var AOS_VERSION='AOS V.8.0.4';   /* HTML and the rules file carry the same number */
 var AOS_SUPPORT_TO='ekuvaas@icloud.com';
 
 /* Which screen they were on, by section id — never the raw URL, which
@@ -3361,6 +3418,46 @@ function aosSupportLinkHTML(){
 }
 
 /* ── The owner's inbox ────────────────────────────────────────────── */
+/* Who came back. The only number that distinguishes "they tried it"
+   from "they use it", and the one the whole thing turns on. */
+window.aosRenderActivity=function(hostId){
+  var host=document.getElementById(hostId||'act-admin'); if(!host) return;
+  if(!isOwner()){ host.innerHTML=''; return; }
+  host.innerHTML='<div class="card"><div style="font-size:12px;color:var(--white-dim)">Loading activity\u2026</div></div>';
+  fbDb.collection('accounts').get().then(function(sn){
+    var rows=[]; sn.forEach(function(d){ var v=d.data()||{}; rows.push(v); });
+    var today=(typeof aosDateKey==='function')?aosDateKey():todayStr();
+    var ago=function(ds){
+      if(!ds) return 9999;
+      var a=new Date(ds+'T12:00:00'), b=new Date(today+'T12:00:00');
+      return Math.round((b-a)/86400000);
+    };
+    rows.sort(function(x,y){ return ago(x.lastSeen)-ago(y.lastSeen); });
+    var back=rows.filter(function(r){ return (Number(r.daysUsed)||0)>1; }).length;
+    var week=rows.filter(function(r){ return ago(r.lastSeen)<=7; }).length;
+    var never=rows.filter(function(r){ return !r.lastSeen; }).length;
+    var h='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:2px">\uD83D\uDCC8 Activity</div>'+
+      '<div style="font-size:11px;color:var(--white-dim);margin-bottom:10px">'+
+      rows.length+' account'+(rows.length===1?'':'s')+' \u00B7 '+back+' came back at least once \u00B7 '+
+      week+' in the last 7 days'+(never?(' \u00B7 '+never+' never opened it since this started'):'')+'</div>';
+    rows.slice(0,40).forEach(function(r){
+      var d=ago(r.lastSeen);
+      var col=d<=2?'#2ecc71':d<=7?'#f39c12':'#8899aa';
+      h+='<div style="display:flex;justify-content:space-between;gap:8px;padding:5px 0;'+
+        'border-top:1px solid rgba(255,255,255,0.06)">'+
+        '<span style="font-size:12px;color:#e8f4fd">'+escH(r.name||r.userId||'')+
+          '<span style="font-size:10px;color:#8899aa"> \u00B7 '+escH(r.lastRole||r.role||'')+'</span></span>'+
+        '<span style="font-size:10px;color:'+col+';flex-shrink:0">'+
+          (r.lastSeen?((d===0?'today':d===1?'yesterday':d+' days ago')+' \u00B7 '+(Number(r.daysUsed)||1)+'d'):'never')+
+          (r.lastVersion?'<span style="color:#556"> \u00B7 '+escH(r.lastVersion)+'</span>':'')+'</span></div>';
+    });
+    if(rows.length>40) h+='<div style="font-size:10px;color:#667;margin-top:6px">and '+(rows.length-40)+' more.</div>';
+    host.innerHTML=h+'</div>';
+  }).catch(function(e){
+    console.warn('AOS activity failed',e);
+    host.innerHTML='<div class="card"><div style="font-size:12px;color:#ff8899">Could not load activity.</div></div>';
+  });
+};
 window.aosRenderSupportInbox=function(hostId){
   var host=document.getElementById(hostId||'sup-admin'); if(!host) return;
   if(!isOwner()){ host.innerHTML=''; return; }
@@ -3395,6 +3492,72 @@ window.aosRenderSupportInbox=function(hostId){
     host.innerHTML='<div class="card"><div style="font-size:12px;color:#ff8899">Could not load reports.</div></div>';
   });
 };
+
+
+/* ── Add to Home Screen ───────────────────────────────────────────
+   The manifest tag has been in the head with no href since the app
+   was written. iPhone did not care - it reads the apple-mobile-*
+   meta tags instead, which is why the icon and the name have always
+   worked there. Android reads the manifest and got nothing: no
+   install prompt, no name, no icon.
+
+   Built at runtime as a blob, because the whole app is one file and
+   there is nowhere to put a second one. */
+function aosInstallManifest(){
+  try{
+    var link=document.getElementById('aos-manifest');
+    if(!link||link.getAttribute('href')) return;
+    var icon=(document.querySelector('link[rel="apple-touch-icon"]')||{}).href||'';
+    var mf={
+      name:'AOS \u2014 Athlete Operating System',
+      short_name:'AOS',
+      start_url:'.',
+      scope:'.',
+      display:'standalone',
+      orientation:'portrait',
+      background_color:'#0A1A2F',
+      theme_color:'#111111',
+      description:'The athlete owns the record of their own development.'
+    };
+    if(icon){
+      mf.icons=[{src:icon,sizes:'192x192',type:'image/svg+xml',purpose:'any'},
+                {src:icon,sizes:'512x512',type:'image/svg+xml',purpose:'any'}];
+    }
+    var blob=new Blob([JSON.stringify(mf)],{type:'application/manifest+json'});
+    link.setAttribute('href',URL.createObjectURL(blob));
+  }catch(e){ /* an install prompt is not worth breaking a page over */ }
+}
+aosInstallManifest();
+
+/* ── Did anyone come back? ────────────────────────────────────────
+   Signups were visible; returns were not. Nothing anywhere recorded
+   that a person opened the app a second time, so silence from a
+   family and never-opened-it looked identical.
+
+   One write per session on the account record the directory already
+   reads. No new collection, no new rule - you may always update your
+   own account. Deliberately not an analytics layer: last seen, how
+   many sessions, and what they signed in as. */
+function aosMarkSeen(){
+  var u=window.AOS_USER||{};
+  if(!u.userId||!window.fbDb) return;
+  if(window._aosSeenMarked) return;
+  window._aosSeenMarked=true;
+  var today=(typeof aosDateKey==='function')?aosDateKey():todayStr();
+  fbDb.collection('accounts').doc(u.userId).get().then(function(d){
+    var prev=(d.exists?d.data():{})||{};
+    /* Sessions counted by day, not by reload: opening the app five
+       times on a Tuesday is one day of use, and days of use is the
+       number that means anything. */
+    if(prev.lastSeen===today) return null;
+    return fbDb.collection('accounts').doc(u.userId).update({
+      lastSeen:today,
+      daysUsed:(Number(prev.daysUsed)||0)+1,
+      lastRole:u.role||'',
+      lastVersion:(typeof AOS_VERSION!=='undefined')?AOS_VERSION:''
+    });
+  }).catch(function(e){ console.warn('AOS last-seen failed',e); });
+}
 
 var AOS_BENCHMARK_REVIEW={reviewed:'2026-09', next:'2027-03'};
 /* The owner's twice-yearly review: edit the thresholds in the app,
@@ -3538,6 +3701,58 @@ function aosLoggableMetrics(sport){
   if(set.length) return set;
   return BENCHMARKS.filter(function(b){ return AOS_BENCH_GENERAL_KEYS.indexOf(b.key)>=0; })
     .map(function(b){ return {m:b.m,u:b.u,hb:b.hb,key:b.key}; });
+}
+
+/* Where each table came from and when it was last checked.
+
+   Recruiting numbers drift - average D1 exit velocity moved several
+   mph in three years - so a table with no date on it quietly stops
+   being true while still looking authoritative. Athletes see the
+   freshness; the owner also sees the provenance, because one of these
+   two tables does not have any recorded.
+
+   Baseball, added 2026-10, was taken from several independent
+   recruiting guides that agreed within a few mph, using the lower end
+   of each division's range (the recruiting minimum, not the average
+   of players who committed - those differ by 5 to 8 mph). The
+   softball table predates this record: its numbers may be sound, but
+   nothing says where they came from, which is its own problem. */
+var AOS_BENCH_PROVENANCE={
+  Softball:{reviewed:'', next:'', basis:'', note:'No source or review date recorded for this table.'},
+  Baseball:{reviewed:'2026-10', next:'2027-04',
+            basis:'Recruiting minimums, cross-checked across several independent recruiting guides',
+            note:''}
+};
+function aosBenchStampHTML(){
+  var sp=aosBenchSport();
+  var pv=AOS_BENCH_PROVENANCE[sp];
+  if(!pv) return '';
+  var bits=[];
+  if(pv.basis) bits.push(escH(pv.basis));
+  if(pv.reviewed) bits.push('reviewed '+escH(pv.reviewed));
+  var h='';
+  if(bits.length){
+    h+='<div style="font-size:10px;color:#667;margin-top:6px">'+bits.join(' \u00B7 ')+'</div>';
+  }
+  /* Overdue is worth saying out loud, to everyone. */
+  var over=pv.next&&aosBenchOverdue(pv.next);
+  if(over){
+    h+='<div style="font-size:10px;color:#f39c12;margin-top:4px">'+
+       'Due for review '+escH(pv.next)+'. Treat these as a guide until they are checked again.</div>';
+  }
+  if(!pv.reviewed){
+    h+='<div style="font-size:10px;color:#f39c12;margin-top:4px">'+
+       'No review date on this table yet.</div>';
+  }
+  if(pv.note&&typeof isOwner==='function'&&isOwner()){
+    h+='<div style="font-size:10px;color:#ff8899;margin-top:4px">Owner: '+escH(pv.note)+'</div>';
+  }
+  return h;
+}
+function aosBenchOverdue(ym){
+  if(!ym) return false;
+  var now=(typeof aosDateKey==='function')?aosDateKey():todayStr();
+  return String(ym)<now.slice(0,7);
 }
 function aosBenchNoteHTML(){
   var sp=aosBenchSport();
@@ -4985,9 +5200,16 @@ function loadParentTab(tab,body,childName){
    team program hands round a roster; this is that, and no more. */
 function aosParentsRosterHTML(g,teamId){
   var u=window.AOS_USER||{};
+  /* Viewing, not sending — so here every hat counts. A coach who is
+     also a parent should see both rosters they belong to, which is the
+     opposite of what the send paths need. */
+  var hubs=[];
+  ((typeof aosMyRoles==='function')?aosMyRoles():[u.role||'player']).forEach(function(r){
+    hubs=hubs.concat(aosHubsOf(g,u.userId,r)||[]);
+  });
+  hubs=_aosUniq(hubs);
   var ath=teamId?(aosTeamAthletes(g,teamId)||[])
-                :_aosUniq((aosHubsOf(g,u.userId,u.role||'player')||[])
-                    .reduce(function(acc,h){ return acc.concat(aosAthletesOf(g,h)||[]); },[u.userId]));
+                :_aosUniq(hubs.reduce(function(acc,h){ return acc.concat(aosAthletesOf(g,h)||[]); },[u.userId]));
   ath=_aosUniq(ath).sort(function(a,b){ return aosNameOf(g,a).localeCompare(aosNameOf(g,b)); });
   var h='<div style="font-size:11px;color:#8899aa;margin-bottom:10px">'+
     '\uD83D\uDC6A Who is linked to whom. Names only \u2014 no contact details, and nothing to send.</div>';
@@ -5074,6 +5296,8 @@ function aosChatAudience(g,teamId,excludeAthletes){
     hubs.forEach(function(hub){
       people=people.concat(aosTeam(g,hub)||[]);
       athletes=athletes.concat(aosAthletesOf(g,hub)||[]);
+      /* Co-staff on a shared team, same rule as events. */
+      people=people.concat(aosCoStaffOf(g,hub)||[]);
     });
     if(u.role==='org'){
       people=people.concat(aosOrgAll(g,u.userId)||[]);
@@ -5101,7 +5325,7 @@ function aosLoadChatTeams(){
     /* A team they have left should not stay selected. */
     ['team','parent'].forEach(function(k){
       var cur=(window._chatTeam||{})[k];
-      if(cur&&!window._chatTeamList.some(function(t){ return t.id===cur; })) window._chatTeam[k]='';
+      if(cur&&!window._chatTeamList.some(function(t){ return (t.teamId||t.id)===cur; })) window._chatTeam[k]='';
     });
     return window._chatTeamList;
   }).catch(function(){ window._chatTeamList=[]; return []; });
@@ -5125,7 +5349,8 @@ function aosChatTeamPickerHTML(which){
     'background:#0A1A2F;color:#fff;font-size:13px;margin-bottom:10px">';
   h+='<option value=""'+(cur?'':' selected')+'>Everyone I\u2019m connected to</option>';
   teams.forEach(function(t){
-    h+='<option value="'+escH(t.id)+'"'+(cur===t.id?' selected':'')+'>'+escH(t.name||'Team')+'</option>';
+    var tid=t.teamId||t.id||'';
+    h+='<option value="'+escH(tid)+'"'+(cur===tid?' selected':'')+'>'+escH(t.name||'Team')+'</option>';
   });
   return h+'</select>';
 }
@@ -5257,6 +5482,7 @@ function aosRenderParentChat(body){
   }
   h+='</div>';
   if(u.role!=='player'){
+    h+=aosSendingAsHTML();
     h+='<div style="display:flex;gap:8px">'+
       '<input id="pchat-input" type="text" placeholder="Message the other parents\u2026" '+
         'style="flex:1;padding:10px 12px;border-radius:8px;border:1px solid #334;background:#0A1A2F;'+
@@ -5498,6 +5724,29 @@ window.aosDeleteTeamChat=function(id){
   }).catch(function(e){ console.warn('AOS team chat delete failed',e); showToast('Could not remove it.'); });
 };
 
+/* Which hat this message goes out under.
+
+   aosHubsOf resolves one role at a time, and that is right for
+   sending: a coach who is also a parent at another club must not have
+   the two merged, or a note to their own team lands with the other
+   club. But the person could not see which hat was selected, and the
+   hat decides who receives it. So anyone holding more than one says
+   so above the box, with a way to change it. One role, nothing shown. */
+function aosSendingAsHTML(){
+  var roles=(typeof aosMyRoles==='function')?aosMyRoles():[];
+  if(roles.length<2) return '';
+  var cur=(window.AOS_USER||{}).role||roles[0];
+  var h='<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;'+
+    'font-size:11px;color:#8899aa;margin-bottom:8px">Sending as';
+  roles.forEach(function(r){
+    var on=r===cur;
+    h+='<button onclick="aosSwitchRole(\''+escH(r)+'\')" style="padding:3px 10px;border-radius:12px;'+
+      'font-size:11px;font-weight:700;cursor:pointer;border:1px solid '+(on?'#00E0FF':'#334')+';'+
+      'background:'+(on?'rgba(0,224,255,0.15)':'transparent')+';color:'+(on?'#00E0FF':'#8899aa')+'">'+
+      escH((typeof aosRoleLabel==='function')?aosRoleLabel(r):r)+'</button>';
+  });
+  return h+'<span style="width:100%;font-size:10px;color:#667">This decides who receives it.</span></div>';
+}
 function aosTeamChatBodyHTML(){
   var u=window.AOS_USER||{};
   var teamId=(window._chatTeam||{}).team||'';
@@ -5549,6 +5798,7 @@ function aosTeamChatBodyHTML(){
       '\uD83D\uDC40 You can read Team Chat but not post to it. To reach the other parents '+
       'and the coaching staff, use Parent Chat in the Parent Portal.</div>';
   } else {
+    h+=aosSendingAsHTML();
     h+='<div style="display:flex;gap:8px">'+
       '<input id="chathub-input" type="text" placeholder="Message the team\u2026" '+
         'style="flex:1;padding:10px 12px;border-radius:8px;border:1px solid rgba(0,224,255,0.2);'+
@@ -5879,6 +6129,20 @@ async function initApp(){
   if(typeof navigateTo==='function') navigateTo('home'); else renderHome();
   setInterval(updateLastDrink,30000);
   setTimeout(checkAgeTransfer,2000);
+  setTimeout(function(){ if(typeof aosMarkSeen==='function') aosMarkSeen(); },4000);
+  /* Catching up a late-joining family cannot depend on which screen
+     the coach happens to open. It used to run on the staff dashboard
+     and the Schedule tab only, so a coach who lives in Assign Training
+     never triggered it and the new family kept seeing an empty
+     calendar. Once per sign-in, whatever they do next. */
+  setTimeout(function(){
+    var r=(window.AOS_USER||{}).role||'';
+    if(['coach','trainer','org'].indexOf(r)<0) return;
+    if(window._aosHealRan) return;
+    window._aosHealRan=true;
+    if(typeof aosRepublishRefresh!=='function') return;
+    aosRepublishRefresh(function(scan){ if(scan&&scan.events.length) aosRepublishAuto(); });
+  },3500);
   // Age-mode banner
   var _am=profile.ageMode;
   if((_am==='youth'||_am==='teen')&&!document.getElementById('age-banner')){
@@ -7071,8 +7335,20 @@ function renderParentTeamScreen(){
       var kids=Object.keys(pl[u.userId]||{});
       Object.keys(links).forEach(function(pid){ var l=links[pid][u.userId];
         if(l&&l.linkerRole==='parent'&&kids.indexOf(pid)<0) kids.push(pid); });
-      var cid=(window._parentChild&&window._parentChild.id)||kids[0];
+      /* The remembered child, then the selected one, then the first.
+         Without the first branch a parent who picked Bree yesterday
+         lands on Ava this morning. */
+      var _last=''; try{ _last=localStorage.getItem('aos_last_child')||''; }catch(e){}
+      var cid=(window._parentChild&&window._parentChild.id)
+            ||(kids.indexOf(_last)>=0?_last:'')
+            ||kids[0];
+      if(cid&&!window._parentChild) window._parentChild={id:cid,name:(accs[cid]||{}).name||'Your Athlete'};
       var body=safeGet('pteam-body'); if(!body) return;
+      /* Same chip row as the child home, so the two screens agree about
+         who you are looking at. */
+      if(kids.length>1&&typeof aosLoadKidList==='function'&&(window._aosKids||[]).length<2){
+        aosLoadKidList(function(k){ if(k.length>1) renderParentTeamScreen(); });
+      }
       if(!cid){ body.innerHTML='<div class="card" style="font-size:13px;color:var(--white-dim)">Link to your athlete from My Profile to follow their team.</div>'; return; }
       var childLinks=links[cid]||{};
       var staffIds=Object.keys(childLinks).filter(function(k){ return (childLinks[k]||{}).linkerRole!=='parent'; });
@@ -7104,7 +7380,8 @@ function renderParentTeamScreen(){
             (m.date?' \u00B7 '+escH(m.date):'')+'</div></div>';
       });
       h+='</div>';
-      body.innerHTML=h;
+      var _kidChips=(typeof aosKidChipsHTML==='function')?aosKidChipsHTML():'';
+      body.innerHTML=_kidChips+h;
     }).catch(function(e){ console.warn('AOS parent team failed',e);
       var body=safeGet('pteam-body'); if(body) body.innerHTML='<div class="card">Could not load the team.</div>'; });
 }
@@ -7745,6 +8022,19 @@ function renderTeamHubForStaff(){
 
     if(tab==='roster'){
       html+=aosInvitePanelHTML(window._staffTeam||'',window._staffTeamName||'');
+      /* Names for the staff panel, and anyone who joined by invite
+         folded into the team — only the owner can write that. */
+      if(window._staffTeam&&window._myTeamStaffFor!==window._staffTeam){
+        window._myTeamStaffFor=window._staffTeam;
+        setTimeout(function(){
+          aosSyncTeamStaff().then(function(nAdded){
+            aosLoadTeamStaff(window._staffTeam,function(){
+              if(window._tth==='roster') renderTeamHubForStaff();
+            });
+            if(nAdded) showToast(nAdded+' coach'+(nAdded===1?'':'es')+' added to the team.');
+          });
+        },0);
+      }
       if(!players.length){
         html+='<div class="card" style="text-align:center;padding:24px;color:#8899aa;font-size:13px">No athletes linked yet.</div>';
       } else {
@@ -7766,14 +8056,24 @@ function renderTeamHubForStaff(){
       /* The scan needs the connection graph, which is a round trip, so
          the tab paints first and the card appears when it knows. */
       if(!window._aosRepublish) setTimeout(function(){
-        aosRepublishRefresh(function(scan){
-          if(scan&&scan.events.length&&window._tth==='schedule') renderTeamHubForStaff();
-        });
+        aosRepublishRefresh(function(scan){ if(scan&&scan.events.length) aosRepublishAuto(); });
       },0);
     }
 
     else if(tab==='assign'){
-      html+='<div class="card" style="margin-bottom:12px">';
+      /* The dead end goes at the top, with the thing that fixes it. It
+         used to sit under the whole form, so on a phone you filled
+         everything in, pressed the button and got a toast. */
+      if(!players.length){
+        html+='<div class="card" style="margin-bottom:12px;border:1px solid rgba(243,156,18,0.4)">'+
+          '<div style="font-weight:800;color:#f39c12;font-size:13px;margin-bottom:4px">No athletes linked yet</div>'+
+          '<div style="font-size:11px;color:#8899aa;margin-bottom:10px">'+
+            'Assigned training lands on an athlete\u2019s own Training tab, so there has to be '+
+            'somebody to send it to. Invite your families and this page starts working.</div>'+
+          '<button class="btn btn-primary btn-full btn-sm" onclick="window._tth=\'roster\';renderTeamHubForStaff();">'+
+            'Invite families</button></div>';
+      }
+      html+='<div class="card" style="margin-bottom:12px'+(players.length?'':';opacity:0.55')+'">';
       html+='<div style="font-weight:800;color:'+roleColor+';margin-bottom:4px;font-size:13px">🏋️ ASSIGN TRAINING TO YOUR TEAM</div>';
       html+='<div style="font-size:11px;color:#8899aa;margin-bottom:12px">Creates this session on every currently linked athlete\'s Training tab for today. They\'ll see it tagged with your name and can mark it done like any other session.</div>';
       /* Activities come from the sport config — the coach's own sport,
@@ -7788,11 +8088,16 @@ function renderTeamHubForStaff(){
       html+='<div style="flex:1"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Intensity (1-10)</div><input type="number" id="tth-assign-int" value="5" min="1" max="10" style="width:100%;padding:8px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:14px;box-sizing:border-box"></div>';
       html+='</div>';
       html+='<textarea id="tth-assign-notes" placeholder="Notes for the team (optional)" rows="2" style="width:100%;padding:9px;border-radius:8px;border:1px solid #334;background:#0A1A2F;color:#fff;font-size:13px;box-sizing:border-box;resize:vertical;margin-bottom:10px"></textarea>';
-      html+='<button onclick="assignTrainingToTeam()" style="width:100%;background:'+roleColor+';color:#0A1A2F;padding:11px;border-radius:20px;font-weight:800;font-size:13px;border:none;cursor:pointer">'+(players.length?'ASSIGN TO '+players.length+' ATHLETE'+(players.length===1?'':'S'):'NO ATHLETES LINKED YET')+'</button>';
+      var _can=players.length>0;
+      /* Pressable only when it can do something. It already said
+         "no athletes linked yet", but looked and behaved like a live
+         button, so you filled the whole form before finding out. */
+      html+='<button '+(_can?'onclick="assignTrainingToTeam()"':'disabled')+
+        ' style="width:100%;background:'+(_can?roleColor:'rgba(255,255,255,0.06)')+
+        ';color:'+(_can?'#0A1A2F':'#6b7b8a')+';padding:11px;border-radius:20px;font-weight:800;'+
+        'font-size:13px;border:'+(_can?'none':'1px solid #334')+';cursor:'+(_can?'pointer':'not-allowed')+'">'+
+        (_can?'ASSIGN TO '+players.length+' ATHLETE'+(players.length===1?'':'S'):'NO ATHLETES LINKED YET')+'</button>';
       html+='</div>';
-      if(!players.length){
-        html+='<div class="card" style="text-align:center;padding:20px;color:#8899aa;font-size:13px">Link athletes first — see the Roster tab or Profile page.</div>';
-      }
     }
 
     else if(tab==='orgtraining'){
@@ -8831,7 +9136,7 @@ function renderMetricsPhysical(){
     }
     tableHTML+='<tr><td style="text-align:left;font-weight:600">'+escH(b.m)+'</td><td>'+b.p4+'</td><td>'+b.d1+'</td><td>'+b.d2+'</td><td>'+b.d3+'</td><td>'+b.juco+'</td><td>'+b.naia+'</td><td style="color:var(--gold);font-weight:700">'+(best!==null?best:'—')+'</td><td>'+status+'</td></tr>';
   });
-  tableHTML+='</tbody></table></div>'+aosBenchNoteHTML()+'</div>';
+  tableHTML+='</tbody></table></div>'+aosBenchNoteHTML()+aosBenchStampHTML()+'</div>';
   }
   c.innerHTML=html+pbHTML+tableHTML;
   var mpSave=safeGet('mp-save');if(mpSave)mpSave.addEventListener('click',function(){
@@ -11834,6 +12139,7 @@ function renderAdmin(){
   '<div class="stat-grid"><div class="stat-card"><div class="stat-value">'+roster.length+'</div><div class="stat-label">Players Tracked</div></div><div class="stat-card"><div class="stat-value">'+totalSess+'</div><div class="stat-label">Sessions Logged</div></div><div class="stat-card"><div class="stat-value">'+totalGoals+'</div><div class="stat-label">Goals Created</div></div></div>'+
   '<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:6px">Recent Activity</div>'+(adminLog.length?adminLog.slice(0,8).map(function(a){var t=new Date(a.time);return '<div style="font-size:11px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.04);color:var(--white-dim)"><span style="color:var(--gold)">'+t.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})+'</span> '+escH(a.action)+'</div>'}).join(''):'<div style="font-size:12px;color:var(--white-dim)">No activity yet</div>')+'</div>'+
   '<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Data Management</div><button class="btn btn-secondary btn-full btn-sm" id="admin-export" style="margin-bottom:8px">📦 Export All Data (JSON)</button><button class="btn btn-danger btn-full btn-sm" id="admin-clear">🗑️ Clear All Data</button></div>'+
+  '<div id="act-admin"></div>'+
   '<div id="sup-admin"></div>'+
   '<div id="bm-admin"></div>'+
   '<div id="admin-export-area"></div>'+
@@ -11854,6 +12160,7 @@ function renderAdmin(){
   var exitBtn=safeGet('admin-exit');if(exitBtn)exitBtn.addEventListener('click',function(){setMode('player');navigateTo('home')});
   if(typeof aosRenderBenchmarkAdmin==='function') aosRenderBenchmarkAdmin('bm-admin');
   if(typeof aosRenderSupportInbox==='function') aosRenderSupportInbox('sup-admin');
+  if(typeof aosRenderActivity==='function') aosRenderActivity('act-admin');
 }
 
 /* ========== WIRE NAV ========== */
@@ -12029,6 +12336,9 @@ window.aosSwitchRole=function(role){
   var u=window.AOS_USER||{};
   if(!role||aosMyRoles().indexOf(role)<0) return;
   u.role=role; window.AOS_USER=u;
+  if(typeof aosBustGraph==='function') aosBustGraph();
+  /* A different hat means a different roster to catch up. */
+  window._aosHealRan=false; window._aosRepublish=null;
   window._staffTeam=''; window._parentChild=null;
   AppSDK.getItem('aos_session').then(function(sess){
     sess=sess||{}; sess.role=role; sess.roles=aosMyRoles();
@@ -13544,9 +13854,13 @@ function aosRepublishRefresh(cb){
     if(cb) cb(scan);
   }).catch(function(e){ console.warn('AOS republish scan failed',e); if(cb) cb(null); });
 }
-window.aosRepublish=function(){
+window.aosRepublish=function(cb){
   var scan=window._aosRepublish;
-  if(!scan||!scan.events.length){ showToast('Everyone on the team already has these.'); return; }
+  if(!scan||!scan.events.length){
+    if(!cb) showToast('Everyone on the team already has these.');
+    if(cb) cb(false,0,[]);
+    return;
+  }
   var u=window.AOS_USER||{};
   showToast('Republishing '+scan.events.length+'\u2026');
   var ops=scan.events.slice();
@@ -13562,18 +13876,61 @@ window.aosRepublish=function(){
     });
   },Promise.resolve()).then(function(){
     scan.events.forEach(function(o){ o.ev.viewers=o.viewers; });
-    var nP=scan.people.length;
-    showToast(scan.events.length+' event'+(scan.events.length===1?'':'s')+' now reach '+nP+' more '+(nP===1?'person':'people')+'.');
-    window._aosRepublish=null;
-    if(typeof renderTeamHubForStaff==='function') renderTeamHubForStaff();
-    if(typeof aosRefreshEventViews==='function') aosRefreshEventViews();
+    var nP=scan.people.length, nE=scan.events.length, names=(scan.names||[]).slice();
+    window._aosRepublish={events:[],people:[],ops:0,names:[]};
+    if(cb){ cb(true,nE,names); }
+    else {
+      showToast(nE+' event'+(nE===1?'':'s')+' now reach '+nP+' more '+(nP===1?'person':'people')+'.');
+      if(typeof renderTeamHubForStaff==='function') renderTeamHubForStaff();
+      if(typeof aosRefreshEventViews==='function') aosRefreshEventViews();
+    }
   }).catch(function(e){
-    console.warn('AOS republish failed',e); showToast('Could not republish \u2014 nothing was changed.');
+    console.warn('AOS republish failed',e);
+    /* Leave the scan in place: the card falls back to a button so the
+       coach can see something is outstanding rather than nothing. */
+    if(cb) cb(false,0,[]);
+    else showToast('Could not republish \u2014 nothing was changed.');
   });
 };
+/* Season events, messages, challenges, polls and comms already caught
+   up their own audience silently whenever their creator opened the
+   app. Scheduled events alone needed a button. Two behaviours for one
+   problem is the thing a coach cannot reason about: some of what they
+   posted reaches a late joiner and some does not, with no way to tell
+   which.
+
+   So this heals too — but it reports afterwards rather than asking
+   first. The people it adds are the coach's own roster, whom they
+   already chose to link; what was missing was not permission, it was
+   being told. */
+window._aosRepublishDone=null;
+function aosRepublishAuto(){
+  var scan=window._aosRepublish;
+  if(!scan||!scan.events.length||window._aosRepublishBusy) return;
+  window._aosRepublishBusy=true;
+  aosRepublish(function(ok,nEv,people){
+    window._aosRepublishBusy=false;
+    if(ok) window._aosRepublishDone={events:nEv,names:people};
+    _aosRerenderStaffScreen();
+  });
+}
 function aosRepublishCardHTML(){
+  var done=window._aosRepublishDone;
+  if(done&&done.events){
+    var who=(done.names||[]).slice(0,4).join(', ');
+    var extra=(done.names||[]).length>4?(' and '+((done.names||[]).length-4)+' more'):'';
+    return '<div class="card" style="margin-bottom:12px;border:1px solid rgba(46,204,113,0.35)">'+
+      '<div style="font-size:12px;color:#2ecc71;font-weight:700;margin-bottom:2px">\u2713 Caught up</div>'+
+      '<div style="font-size:11px;color:#8899aa">'+done.events+' upcoming event'+(done.events===1?'':'s')+
+      ' now also reach'+(done.events===1?'es':'')+' '+escH(who||'the rest of the team')+escH(extra)+
+      ', who joined after you posted.</div>'+
+      '<button class="btn btn-sm" style="font-size:10px;margin-top:8px" '+
+        'onclick="window._aosRepublishDone=null;_aosRerenderStaffScreen();">Dismiss</button></div>';
+  }
   var scan=window._aosRepublish;
   if(!scan||!scan.events.length) return '';
+  /* Only reached if the automatic pass could not write — then it is a
+     button again, because something needs the coach's attention. */
   var names=(scan.names||[]).slice(0,6).join(', ');
   var more=(scan.names||[]).length>6?(' and '+((scan.names||[]).length-6)+' more'):'';
   return '<div class="card" style="margin-bottom:12px;border:1px solid rgba(255,215,0,0.35)">'+
@@ -13632,15 +13989,19 @@ function aosInviteLink(code){
   var base=location.href.split('#')[0];
   return base+'#join='+code;
 }
-window.aosCreateInvite=function(teamId,teamName,cb){
+/* kind: 'family' brings an athlete onto the roster, 'staff' brings
+   another coach or trainer onto the team. They are different grants
+   and the rules check which, so one code cannot buy the other. */
+window.aosCreateInvite=function(teamId,teamName,cb,kind){
   var u=window.AOS_USER||{};
   var code=aosInviteCode();
-  var inv={code:code, ownerId:u.userId, ownerName:u.name||'Your coach', ownerRole:u.role||'coach',
+  var inv={code:code, kind:(kind==='staff'?'staff':'family'),
+    ownerId:u.userId, ownerName:u.name||'Your coach', ownerRole:u.role||'coach',
     teamId:teamId||'', teamName:teamName||'', revoked:false,
     createdAt:Date.now(), expiresAt:Date.now()+AOS_INVITE_DAYS*86400000, joined:[]};
   fbDb.collection('invites').doc(code).set(inv).then(function(){
     myInvites.unshift(inv);
-    showToast('Invite ready \u2014 share the link.');
+    showToast(inv.kind==='staff'?'Coach invite ready \u2014 share the link.':'Invite ready \u2014 share the link.');
     if(cb) cb(inv);
   }).catch(function(e){ console.warn('AOS invite create failed',e); showToast('Could not create an invite.'); });
 };
@@ -13678,9 +14039,71 @@ window.aosCopyInvite=function(code){
       function(){ showToast(msg); });
   } else { showToast('Code '+code); }
 };
+/* Another coach on the team.
+
+   This existed only on the org dashboard, where a club assigns its own
+   coaches. A coach running a team without a club had no way to put an
+   assistant on it at all - the team supported multiple staff, nothing
+   could add one. An invite is the on-ramp, the same shape as the
+   family one but a different grant. */
+function aosStaffPanelHTML(teamId,teamName,liveStaff){
+  var u=window.AOS_USER||{};
+  var mine=(window._myTeamStaff||[]);
+  var h='<div class="card" style="margin-bottom:12px">'+
+    '<div style="font-weight:700;font-size:13px;margin-bottom:4px">Coaching staff</div>';
+  if(!teamId){
+    h+='<div style="font-size:11px;color:var(--white-dim)">'+
+       'Pick a team above to invite another coach to it.</div></div>';
+    return h;
+  }
+  h+='<div style="font-size:11px;color:var(--white-dim);margin-bottom:8px">'+
+     'Anyone you add sees this team\u2019s athletes and schedule, and can post sessions. '+
+     'They do not get your other teams.</div>';
+  if(mine.length){
+    h+='<div style="margin-bottom:8px">'+mine.map(function(m){
+      return '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 0">'+
+        '<span style="font-size:12px;color:#e8f4fd">'+escH(m.name||'Coach')+
+          '<span style="font-size:10px;color:#8899aa"> \u00B7 '+escH(m.role||'coach')+'</span></span>'+
+        '<button class="btn btn-sm" style="font-size:10px;flex-shrink:0" '+
+          'onclick="aosSetTeamStaff(\''+escH(teamId)+'\',\''+escH(m.id)+'\',false)">Remove</button></div>';
+    }).join('')+'</div>';
+  } else {
+    h+='<div style="font-size:11px;color:#8899aa;margin-bottom:8px">Just you on this team.</div>';
+  }
+  (liveStaff||[]).forEach(function(i){
+    var days=Math.max(0,Math.round((i.expiresAt-Date.now())/86400000));
+    h+='<div style="border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:9px;margin-bottom:8px">'+
+      '<div style="font-family:monospace;font-size:17px;font-weight:800;color:var(--gold);letter-spacing:2px">'+escH(i.code)+'</div>'+
+      '<div style="font-size:10px;color:var(--white-dim);margin:3px 0 6px">Coach invite \u00B7 '+
+        (i.teamName?escH(i.teamName)+' \u00B7 ':'')+days+' days left</div>'+
+      '<div style="display:flex;gap:6px">'+
+        '<button class="btn btn-sm" style="flex:1;font-size:11px" onclick="aosCopyInvite(\''+escH(i.code)+'\')">Copy</button>'+
+        '<button class="btn btn-sm" style="font-size:11px" onclick="aosRevokeInvite(\''+escH(i.code)+'\',renderTeamHubForStaff)">Revoke</button>'+
+      '</div></div>';
+  });
+  if(!(liveStaff||[]).length){
+    h+='<button class="btn btn-full btn-sm" onclick="aosCreateInvite(\''+escH(teamId)+'\',\''+
+      escH((teamName||'').replace(/\'/g,''))+'\',function(){renderTeamHubForStaff();},\'staff\')">'+
+      '+ Invite another coach</button>';
+  }
+  return h+'</div>';
+}
+/* Who is on this team besides me, resolved to names for the panel. */
+function aosLoadTeamStaff(teamId,cb){
+  if(!teamId){ window._myTeamStaff=[]; if(cb) cb([]); return; }
+  aosLoadGraph().then(function(g){
+    var ids=(aosTeamStaff(g,teamId)||[]).filter(function(x){ return x!==(window.AOS_USER||{}).userId; });
+    window._myTeamStaff=ids.map(function(id){
+      return {id:id,name:aosNameOf(g,id),role:aosRoleOf(g,id)||'coach'};
+    });
+    if(cb) cb(window._myTeamStaff);
+  }).catch(function(){ window._myTeamStaff=[]; if(cb) cb([]); });
+}
 function aosInvitePanelHTML(teamId,teamName){
-  var live=myInvites.filter(function(i){ return !i.revoked&&i.expiresAt>Date.now(); });
-  var h='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">Invite your families</div>'+
+  var allLive=myInvites.filter(function(i){ return !i.revoked&&i.expiresAt>Date.now(); });
+  var live=allLive.filter(function(i){ return i.kind!=='staff'; });
+  var h=aosStaffPanelHTML(teamId,teamName,allLive.filter(function(i){ return i.kind==='staff'; }));
+  h+='<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:4px">Invite your families</div>'+
     '<div style="font-size:11px;color:var(--white-dim);margin-bottom:8px">One link for the whole team. They open it, sign up, and land on your roster \u2014 no codes to read out. Expires in '+AOS_INVITE_DAYS+' days, and you can revoke it any time.</div>';
   if(!live.length){
     h+='<button class="btn btn-primary btn-full btn-sm" onclick="aosCreateInvite(\''+escH(teamId||'')+'\',\''+escH((teamName||'').replace(/'/g,''))+'\',function(){renderTeamHubForStaff();})">Create an invite link</button>';
@@ -13717,16 +14140,24 @@ window.aosRedeemInvite=function(code,cb){
   var u=window.AOS_USER||{};
   code=(code||'').toUpperCase();
   if(!code) return;
-  if(u.role!=='player'){
-    showToast('Invites are for athletes. Share the link with your athlete.');
-    aosClearInvite(); if(cb) cb(false); return;
-  }
   fbDb.collection('invites').doc(code).get().then(function(d){
     if(!d.exists){ showToast('That invite code isn\u2019t valid.'); aosClearInvite(); if(cb) cb(false); return; }
     var inv=d.data();
     if(inv.revoked){ showToast('That invite has been revoked.'); aosClearInvite(); if(cb) cb(false); return; }
     if(inv.expiresAt<=Date.now()){ showToast('That invite has expired.'); aosClearInvite(); if(cb) cb(false); return; }
     if(inv.ownerId===u.userId){ aosClearInvite(); if(cb) cb(false); return; }
+    /* Checked after the lookup, so the message can name what the code
+       actually is rather than guessing from the reader's role. */
+    var staffInv=inv.kind==='staff';
+    var amStaff=['coach','trainer','org'].indexOf(u.role)>=0;
+    if(staffInv&&!amStaff){
+      showToast('That code is for a coach or trainer, not an athlete.');
+      aosClearInvite(); if(cb) cb(false); return;
+    }
+    if(!staffInv&&u.role!=='player'){
+      showToast('That code is for an athlete. Share the link with them.');
+      aosClearInvite(); if(cb) cb(false); return;
+    }
     aosConfirmJoin(inv,cb);
   }).catch(function(e){ console.warn('AOS invite lookup failed',e); if(cb) cb(false); });
 };
@@ -13736,14 +14167,19 @@ function aosConfirmJoin(inv,cb){
   var wrap=document.createElement('div');
   wrap.id='aos-join';
   wrap.style.cssText='position:fixed;inset:0;z-index:9999;background:rgba(3,10,20,0.85);display:flex;align-items:center;justify-content:center;padding:16px';
+  var _staff=inv.kind==='staff';
   wrap.innerHTML='<div style="background:#0B1A2E;border:1px solid rgba(255,255,255,0.12);border-radius:16px;padding:18px;max-width:420px;width:100%">'+
-    '<div style="font-weight:800;font-size:17px;color:var(--gold);margin-bottom:6px">Join '+escH(inv.teamName||inv.ownerName)+'?</div>'+
+    '<div style="font-weight:800;font-size:17px;color:var(--gold);margin-bottom:6px">'+
+      (_staff?'Coach ':'Join ')+escH(inv.teamName||inv.ownerName)+'?</div>'+
     '<div style="font-size:13px;color:#e8f4fd;line-height:1.6;margin-bottom:10px">'+
-      escH(inv.ownerName)+' invited you'+(inv.teamName?(' to '+escH(inv.teamName)):'')+'.</div>'+
+      escH(inv.ownerName)+' invited you'+(_staff?' to help coach':'')+
+      (inv.teamName?(' '+(_staff?'':'to ')+escH(inv.teamName)):'')+'.</div>'+
     '<div style="font-size:11px;color:var(--white-dim);line-height:1.6;margin-bottom:14px">'+
-      'They\u2019ll be able to see your training, check-ins and numbers, and assign you work. Your record stays yours \u2014 if you leave, it goes with you.</div>'+
+      (_staff
+        ? 'You\u2019ll see this team\u2019s athletes, their schedule and who has trained, and you can post sessions to them. Their records belong to the families, not to you or the club.'
+        : 'They\u2019ll be able to see your training, check-ins and numbers, and assign you work. Your record stays yours \u2014 if you leave, it goes with you.')+'</div>'+
     '<div style="display:flex;gap:8px">'+
-      '<button class="btn btn-primary btn-sm" style="flex:1" id="join-yes">Join</button>'+
+      '<button class="btn btn-primary btn-sm" style="flex:1" id="join-yes">'+(_staff?'Join as coach':'Join')+'</button>'+
       '<button class="btn btn-sm" style="flex:1" id="join-no">Not now</button>'+
     '</div></div>';
   document.body.appendChild(wrap);
@@ -13755,12 +14191,69 @@ function aosConfirmJoin(inv,cb){
     aosCompleteJoin(inv,function(ok){ wrap.remove(); if(cb) cb(ok); });
   });
 }
-function aosCompleteJoin(inv,cb){
+/* Joining as staff. A staffLinks doc, not a player link — the new
+   coach is not on anyone's roster, they are alongside the one who
+   invited them.
+
+   They cannot add themselves to the team's staff list: only the team's
+   owner may write that document, which is the right rule. So the
+   invite records who joined and the owner's own next load picks it up
+   (see aosSyncTeamStaff). */
+function aosCompleteStaffJoin(inv,cb){
   var u=window.AOS_USER||{};
   var linkId=u.userId+'__'+inv.ownerId;
+  var det={otherName:inv.ownerName, otherRole:inv.ownerRole||'coach',
+    teamId:inv.teamId||'', role:u.role||'coach', inviteCode:inv.code, linkedAt:Date.now()};
+  var rec={staffId:u.userId, otherId:inv.ownerId, otherName:inv.ownerName,
+    otherRole:inv.ownerRole||'coach', parties:[u.userId,inv.ownerId],
+    inviteCode:inv.code, teamId:inv.teamId||'', role:u.role||'coach',
+    linkedAt:Date.now(), rec:det};
+  fbDb.collection('staffLinks').doc(linkId).set(rec).then(function(){
+    aosClearInvite();
+    showToast('You\u2019re on the staff \u2014 '+(inv.teamName||inv.ownerName)+'.');
+    if(typeof aosBustGraph==='function') aosBustGraph();
+    if(typeof renderHome==='function') renderHome();
+    if(cb) cb(true);
+  }).catch(function(e){
+    console.warn('AOS staff join failed',e);
+    showToast('Could not join as staff with that invite.');
+    if(cb) cb(false);
+  });
+}
+/* The owner's side of that: anyone who joined through a staff invite
+   for one of my teams gets added to its staff list. Only I can write
+   it, so it happens when I next load. */
+function aosSyncTeamStaff(){
+  var u=window.AOS_USER||{};
+  if(!u.userId||['coach','trainer','org'].indexOf(u.role)<0) return Promise.resolve(0);
+  return Promise.all([AppSDK.getItem('aos_teams'),AppSDK.getItem('aos_staff_links')])
+    .then(function(r){
+      var teams=r[0]||{}, sl=r[1]||{}, changed=0;
+      Object.keys(sl).forEach(function(staffId){
+        var rec=(sl[staffId]||{})[u.userId];
+        if(!rec||!rec.teamId) return;
+        var t=teams[rec.teamId];
+        if(!t||t.ownerId!==u.userId) return;
+        var list=t.staff||[];
+        if(list.indexOf(staffId)<0){ list.push(staffId); t.staff=list; changed++; }
+      });
+      if(!changed) return 0;
+      return AppSDK.setItem('aos_teams',teams).then(function(){ return changed; });
+    }).catch(function(e){ console.warn('AOS team staff sync failed',e); return 0; });
+}
+function aosCompleteJoin(inv,cb){
+  var u=window.AOS_USER||{};
+  if(inv.kind==='staff') return aosCompleteStaffJoin(inv,cb);
+  var linkId=u.userId+'__'+inv.ownerId;
+  /* _readLinks keeps only what is under rec, so flat fields here were
+     being dropped: a family who joined by invite produced a link with
+     no linkerRole and no linkerName at all. The top-level copies stay
+     for the rules, which read them. */
+  var det={linkerName:inv.ownerName, linkerRole:inv.ownerRole||'coach',
+    teamId:inv.teamId||'', inviteCode:inv.code, linkedAt:Date.now()};
   var rec={playerId:u.userId, linkerId:inv.ownerId, linkerName:inv.ownerName,
     linkerRole:inv.ownerRole||'coach', parties:[u.userId,inv.ownerId],
-    inviteCode:inv.code, teamId:inv.teamId||'', linkedAt:Date.now()};
+    inviteCode:inv.code, teamId:inv.teamId||'', linkedAt:Date.now(), rec:det};
   /* The joiner can't write the coach's invite — only the owner can, and
      that's the right rule. Who joined is counted from the links each
      invite created, which the coach can already read. */
@@ -13800,9 +14293,64 @@ function aosChildData(childId,key){
     .then(function(s){ return (s.exists?s.data().value:null); })
     .catch(function(e){ console.warn('AOS child read failed',key,e); return null; });
 }
+/* ── Switching between children ───────────────────────────────────
+   A parent with two athletes had to back out to the Portal, scroll
+   past the safeguards banner and the other cards, and open the other
+   one. Three taps and a scroll, every time, to compare two numbers.
+
+   A chip row instead, in place of the back button. It keeps the tab
+   you are on, so comparing cost per session between two children no
+   longer throws you back to Now. One child and it does not appear. */
+window._aosKids=[];
+function aosLoadKidList(cb){
+  var u=window.AOS_USER||{};
+  if(!u.userId){ if(cb) cb([]); return; }
+  aosLoadGraph().then(function(g){
+    var kids=(aosChildrenOf(g,u.userId)||[]).map(function(id){
+      return {id:id,name:aosNameOf(g,id)};
+    });
+    /* Alphabetical. "Whichever I linked first" is not an order a
+       parent thinks in. */
+    kids.sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); });
+    window._aosKids=kids;
+    if(cb) cb(kids);
+  }).catch(function(){ if(cb) cb(window._aosKids||[]); });
+}
+window.aosSwitchChild=function(childId){
+  var k=(window._aosKids||[]).filter(function(x){ return x.id===childId; })[0];
+  if(!k) return;
+  window._parentChild={id:k.id,name:k.name};
+  /* Remembered, so opening the app at 6am lands on whoever has
+     practice rather than whoever sorts first. */
+  try{ localStorage.setItem('aos_last_child',k.id); }catch(e){}
+  var sec=['parent','calendar','team'].filter(function(x){
+    var el=document.getElementById('sec-'+x); return el&&el.classList.contains('active');
+  })[0];
+  if(sec==='calendar'&&typeof renderCalendar==='function') renderCalendar();
+  else if(sec==='team'&&typeof renderTeam==='function') renderTeam();
+  else if(typeof renderParentChildHome==='function') renderParentChildHome();
+};
+function aosKidChipsHTML(){
+  var kids=window._aosKids||[];
+  if(kids.length<2) return '';
+  var cur=(window._parentChild||{}).id||'';
+  var h='<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px">';
+  kids.forEach(function(k){
+    var on=k.id===cur;
+    h+='<button onclick="aosSwitchChild(\''+escH(k.id)+'\')" style="padding:6px 12px;border-radius:16px;'+
+      'font-size:12px;font-weight:700;cursor:pointer;border:1px solid '+(on?'#ff88aa':'#334')+';'+
+      'background:'+(on?'rgba(255,136,170,0.18)':'transparent')+';color:'+(on?'#ff88aa':'#8899aa')+'">'+
+      escH(k.name)+'</button>';
+  });
+  h+='<button class="btn btn-sm" onclick="aosCloseChildHome()" style="font-size:10px;margin-left:auto">Portal</button>';
+  return h+'</div>';
+}
 window.aosOpenChildHome=function(childId,childName){
   window._parentChild={id:childId,name:childName||'Your Athlete'};
+  try{ localStorage.setItem('aos_last_child',childId); }catch(e){}
   renderParentChildHome();
+  /* The chip row needs the sibling list; it paints in on arrival. */
+  aosLoadKidList(function(kids){ if(kids.length>1) renderParentChildHome(); });
 };
 window.aosCloseChildHome=function(){ window._parentChild=null; renderParent(); };
 function renderParentChildHome(){
@@ -13814,7 +14362,9 @@ function renderParentChildHome(){
      write, or a slow earlier one lands on top of it. */
   var _renderToken=(window._pcRenderToken=(window._pcRenderToken||0)+1);
   el.innerHTML='<div style="padding:16px;max-width:600px;margin:0 auto">'+
-    '<button class="btn btn-sm" onclick="aosCloseChildHome()" style="margin-bottom:10px">\u2190 Back to Parent Portal</button>'+
+    ((window._aosKids||[]).length>1
+      ? aosKidChipsHTML()
+      : '<button class="btn btn-sm" onclick="aosCloseChildHome()" style="margin-bottom:10px">\u2190 Back to Parent Portal</button>')+
     '<div style="font-family:\'Barlow Condensed\',sans-serif;font-size:24px;font-weight:900;color:#ff88aa;letter-spacing:1px">'+escH(cname)+'</div>'+
     '<div class="tab-pills" style="margin:10px 0">'+tabs.map(function(t){
       return '<button class="tab-pill pc-tab'+(tab===t[0]?' active':'')+'" data-pc="'+t[0]+'">'+t[1]+'</button>';
@@ -15565,6 +16115,7 @@ var AOS_AUTH = {
       if(_hdr)_hdr.style.display='';
       if(_nav)_nav.style.display='';
       window.AOS_USER = session;
+      if(typeof aosBustGraph==='function') aosBustGraph();
       updateMoreNavLabel();
 
       var _failsafe=setTimeout(function(){
@@ -15627,6 +16178,7 @@ var AOS_AUTH = {
     // Always clear local session first
     AppSDK.setItem('aos_session', null);
     window.AOS_USER = null;
+    if(typeof aosBustGraph==='function') aosBustGraph();
     // Reset app state
     if(typeof profile !== 'undefined') profile = {};
     // Sign out of Firebase Auth
@@ -15981,6 +16533,7 @@ var AOS_AUTH = {
       // Validate session has required fields
       if(session && session.userId && session.role && session.name){
         window.AOS_USER = session;
+        if(typeof aosBustGraph==='function') aosBustGraph();
         updateMoreNavLabel();
         var _auth=document.getElementById('auth-screen');
         if(_auth){_auth.classList.add('hidden');_auth.style.display='none';}
