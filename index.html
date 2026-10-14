@@ -927,7 +927,16 @@ function aosLoadGraph(force){
           });
           window._aosScopeIds=_aosUniq(window._aosScopeIds.concat(more)).filter(Boolean);
           return window.AppSDK.getItem('aos_local_accounts').then(function(accs){
-            return {accs:accs||{}, pl:pl, parl:parl, sl:sl, teams:teams, tm:tm};
+            var g={accs:accs||{}, pl:pl, parl:parl, sl:sl, teams:teams, tm:tm};
+            /* Who this org's coaches and trainers are, so the roster can
+               roll up through them. Needs the accounts map to tell a
+               coach from an athlete, so it waits until now. */
+            try{
+              var _u=window.AOS_USER||{};
+              window._aosOrgStaffIds=((_u.role==='org'&&typeof aosOrgStaff==='function')
+                ? aosOrgStaff(g,_u.userId) : [])||[];
+            }catch(e){ window._aosOrgStaffIds=[]; }
+            return g;
           });
         });
     });
@@ -958,6 +967,17 @@ function aosChildrenOf(g,parentId){
 function aosStaffLinksOf(g,id){ return Object.keys(g.sl[id]||{}); }
 function aosOrgsOf(g,staffId){ return aosStaffLinksOf(g,staffId).filter(function(k){ return aosRoleOf(g,k)==='org'; }); }
 function aosOrgStaff(g,orgId){ return aosStaffLinksOf(g,orgId).filter(function(k){ var r=aosRoleOf(g,k); return r==='coach'||r==='trainer'; }); }
+/* Who a staff member's Team screen is about. For a coach or trainer
+   that is the athletes linked to them. For an org it is the whole club
+   - its own athletes plus every athlete under its coaches and trainers
+   - which is why an org used to open the Team tab and see nobody. */
+function aosMyRosterIds(g,me,role){
+  if(role==='org'&&typeof aosOrgAthletes==='function'){
+    var all=aosOrgAthletes(g,me)||[];
+    if(all.length) return all;
+  }
+  return (typeof aosAthletesOf==='function')?(aosAthletesOf(g,me)||[]):[];
+}
 function aosTeam(g,hub){
   var ath=aosAthletesOf(g,hub), par=[];
   ath.forEach(function(p){ par=par.concat(aosParentsOf(g,p)); });
@@ -1736,6 +1756,13 @@ window.aosCancelEvent=function(eventId,cb){
 function aosLoadEvents(){
   var u=window.AOS_USER||{};
   if(!u.userId) return Promise.resolve([]);
+  /* The demo keeps its week in memory with the rest of its data. */
+  if(AOS_DEMO){
+    scheduledEvents=((_demoStore&&_demoStore.sched)||[]).filter(function(e){
+      return (e.viewers||[]).indexOf(u.userId)>=0;
+    }).sort(function(a,b){ return (a.date+(a.start||'')).localeCompare(b.date+(b.start||'')); });
+    return Promise.resolve(scheduledEvents);
+  }
   return fbDb.collection('scheduledEvents').where('viewers','array-contains',u.userId).get()
     .then(function(snap){
       var out=[];
@@ -2368,6 +2395,8 @@ window._selfSkillCache={};
 function aosLoadSelfSkills(playerIds){
   var todo=(playerIds||[]).filter(function(id){ return !(id in window._selfSkillCache); });
   if(!todo.length) return Promise.resolve(window._selfSkillCache);
+  if(AOS_DEMO){ todo.forEach(function(id){ window._selfSkillCache[id]=(id==='demo_a1'&&_demoStore.personal&&_demoStore.personal.sb_self_skills)||{}; });
+    return Promise.resolve(window._selfSkillCache); }
   return Promise.all(todo.map(function(id){
     return fbDb.collection('users').doc(id).collection('appdata').doc('sb_self_skills').get()
       .then(function(sn){ window._selfSkillCache[id]=(sn.exists&&sn.data().value)||{}; })
@@ -2789,18 +2818,139 @@ function _writeScopedList(key,uid,val){
    ══════════════════════════════════════════════════════════════════ */
 var AOS_DEMO=false, _demoStore={}, _demoUsers={};
 function _demoDate(offset){ return aosDayOffset(offset||0); }
+/* The demo athlete is the AOS ad's athlete: five years in the app,
+   started at 13, an elbow that cost her six weeks, a 421-day streak
+   after the comeback, varsity made, college next. Every number on My
+   Record is computed from this history, the same way it is for a real
+   athlete, so nothing on screen is typed in. Seeded, so every demo
+   starts identical. Dates step on the calendar, not in 24-hour jumps,
+   so a daylight-saving change can't skip or repeat a day. */
+function _demoKeyShift(key,days){
+  var p=key.split('-'), d=new Date(Date.UTC(+p[0],+p[1]-1,+p[2])+days*86400000);
+  return d.getUTCFullYear()+'-'+String(d.getUTCMonth()+1).padStart(2,'0')+'-'+String(d.getUTCDate()).padStart(2,'0');
+}
+function aosDemoHistory(){
+  var today=aosDayOffset(0), seed=20260913;
+  function rnd(){ seed=(seed*1664525+1013904223)%4294967296; return seed/4294967296; }
+  function pick(a){ return a[Math.floor(rnd()*a.length)]; }
+  /* First day chosen so My Record reads exactly 1,829 days right now. */
+  var first=null;
+  for(var o=1826;o<=1832&&!first;o++){
+    var k0=_demoKeyShift(today,-o);
+    if(Math.max(1,Math.round((Date.now()-new Date(k0))/86400000))===1829) first=k0;
+  }
+  first=first||_demoKeyShift(today,-1829);
+  var keys=[]; for(var k=first;k<=today;k=_demoKeyShift(k,1)) keys.push(k);
+  var N=keys.length;
+  /* Elbow, out six weeks, about three years ago (age 15). */
+  var injA=N-1-1100, injB=injA+42;
+  /* Check-ins: the longest run is the 421 days after the comeback; the
+     current run is 96 days; every other run is 160 days or shorter,
+     so the longest streak on My Record is exactly 421. */
+  var on=new Array(N).fill(false);
+  function fill(a,b){ for(var i=Math.max(0,a);i<=b&&i<N;i++) on[i]=true; }
+  function runs(a,b){ var i=a; while(i<=b){ var e=Math.min(b,i+14+Math.floor(rnd()*146)); fill(i,e); i=e+2+Math.floor(rnd()*3); } }
+  var longA=injB+3, curA=N-96;
+  runs(0,longA-2); fill(longA,longA+420); runs(longA+422,curA-2); fill(curA,N-1);
+  var recovery={};
+  keys.forEach(function(d,i){
+    if(!on[i]) return;
+    var hurt=i>=injA&&i<=injB;
+    var r=hurt?4+Math.floor(rnd()*3):(i>=N-3?9:6+Math.floor(rnd()*5));
+    recovery[d]={readiness:Math.min(10,r),sleep:pick([7,7.5,8,8,8.5,9]),energy:hurt?5:7+Math.floor(rnd()*3),
+      mood:'\uD83D\uDE42',soreness:hurt?{elbow:6}:{},methods:hurt?['Ice','Rehab']:['Stretch']};
+  });
+  /* Training: 1,247 sessions, none while she was out, 3,248 hours. */
+  var avail=[]; for(var j=1;j<N;j++) if(j<injA||j>injB) avail.push(j);
+  for(var x=avail.length-1;x>0;x--){ var y=Math.floor(rnd()*(x+1)); var t=avail[x]; avail[x]=avail[y]; avail[y]=t; }
+  var days=[0].concat(avail.slice(0,1246)).sort(function(a,b){return a-b;});
+  var DUR=[90,105,120,135,150,165,180,195,210,240];
+  var durs=days.map(function(){ return pick(DUR); });
+  var diff=194880-durs.reduce(function(a,c){return a+c;},0), q=0;
+  while(diff!==0){ var st=diff>0?15:-15, cand=durs[q]+st;
+    if(cand>=90&&cand<=240){ durs[q]=cand; diff-=st; } q=(q+1)%durs.length; }
+  var TYPES=['Tee Work','Batting Practice','Catching','Strength','Speed & Agility','Team Practice','Game'];
+  var NOTES={'Tee Work':'Tee work + front toss','Catching':'Blocking + throw-downs','Batting Practice':'Live BP',
+             'Strength':'Lower body','Speed & Agility':'Sprints + pro agility','Team Practice':'Team practice','Game':'Game'};
+  var training={};
+  days.forEach(function(i,n){
+    var ty=n===0?'Tee Work':pick(TYPES);
+    (training[keys[i]]=training[keys[i]]||[]).push({id:'t'+n,type:ty,activity:ty,duration:durs[n],
+      intensity:6+Math.floor(rnd()*4),notes:n===0?'Day one':NOTES[ty],done:true});
+  });
+  /* Benchmarks: 17 measured, clearing D2 (14 of 17), D1 next (12 of 17).
+     Exit velo starts at 41, the number she had on day one. */
+  function series(vals,startFrac){
+    return vals.map(function(v,n){ var i=Math.round((startFrac+(1-startFrac)*n/Math.max(1,vals.length-1))*(N-8));
+      return {id:'pm'+i+'_'+n,value:v,date:keys[i]}; });
+  }
+  var phys={
+    exitVeloLive:series([41,44,47,49,52,54,56,58,60,62,64],0),
+    exitVeloTee:series([45,50,55,59,63,66,68,70],0),
+    batSpeed:series([49,54,58,62,65,67],0.15), throwIF:series([44,48,51,53,55],0.2),
+    popTime:series([2.35,2.2,2.08,2.0,1.94],0.15), h1RH:series([3.55,3.4,3.3,3.2],0.3),
+    dash20:series([3.45,3.3,3.18,3.12],0.3), sprint10:series([1.98,1.88,1.83,1.80],0.3),
+    proAg:series([5.3,5.1,4.95],0.4), fly5:series([1.85,1.78,1.74],0.4), fly10:series([1.75,1.68,1.62],0.4),
+    cmj:series([13,15,17,19],0.35), vertJump:series([14,16,18,20],0.35), maxF:series([170,200,225,240],0.45),
+    maxLF:series([160,185,205,215],0.45), avgRFD:series([380,450,520,580],0.45), gpa:series([3.5,3.6],0.6)
+  };
+  return {keys:keys,N:N,recovery:recovery,training:training,phys:phys,streak:96,
+          injA:keys[injA],injB:keys[injB],checkIns:Object.keys(recovery).length,
+          at:function(frac){ return keys[Math.max(0,Math.min(N-1,Math.round(frac*(N-1))))]; }};
+}
+/* The club this staff member answers to, by name. Both dashboards were
+   printing u.orgCode - an invite code, usually absent - so every staff
+   account read "Org: —" even when it plainly had one. */
+function aosMyOrgLabel(cb){
+  var u=window.AOS_USER||{};
+  if(!u.userId||typeof aosLoadGraph!=='function'){ if(cb) cb(''); return; }
+  aosLoadGraph().then(function(g){
+    if(u.role==='org'){ if(cb) cb(u.name||''); return; }
+    var orgs=(typeof aosOrgsOf==='function')?(aosOrgsOf(g,u.userId)||[]):[];
+    var nm=orgs.length?aosNameOf(g,orgs[0]):'';
+    if(cb) cb(nm&&nm!=='Member'?nm:'');
+  }).catch(function(){ if(cb) cb(''); });
+}
+function aosOrgLabelHTML(id){
+  setTimeout(function(){
+    aosMyOrgLabel(function(nm){
+      var el=document.getElementById(id);
+      if(el) el.textContent=nm||'Independent';
+    });
+  },0);
+  return '<span id="'+id+'">\u2026</span>';
+}
 function aosBuildDemoData(){
   var org={userId:'demo_org',name:'Northside Fastpitch',role:'org',roles:['org'],email:'org@demo.aos',orgCode:'AOS-DEMO-ORG'};
   var coach={userId:'demo_coach',name:'Coach Rivera',role:'coach',roles:['coach'],email:'coach@demo.aos',coachCode:'AOS-DEMO-COACH',sport:'Softball'};
   var trainer={userId:'demo_trainer',name:'Sam Doyle',role:'trainer',roles:['trainer'],email:'trainer@demo.aos',sport:'Softball'};
   var parent={userId:'demo_parent',name:'Jordan Blake',role:'parent',roles:['parent'],email:'parent@demo.aos'};
   var athletes=[
-    {userId:'demo_a1',name:'Maya Blake',readiness:8,streak:12,sport:'Softball',sports:['Softball','Volleyball'],position:'Catcher',jersey:'12',challengePoints:120},
+    {userId:'demo_a1',name:'Maya Blake',readiness:9,streak:96,sport:'Softball',position:'Catcher',jersey:'12',challengePoints:320,
+      totalSessions:1247,completedGoals:5,recoveryDays:0,ageMode:'teen'},
     {userId:'demo_a2',name:'Ari Chen',readiness:6,streak:4,sport:'Softball',position:'Pitcher',jersey:'7',challengePoints:80},
     {userId:'demo_a3',name:'Tess Moreau',readiness:9,streak:21,sport:'Softball',position:'SS',jersey:'3',challengePoints:210},
     {userId:'demo_a4',name:'Priya Nair',readiness:5,streak:2,sport:'Softball',position:'CF',jersey:'24',challengePoints:45},
-    {userId:'demo_a5',name:'Robin Vega',readiness:7,streak:9,sport:'Softball',position:'1B',jersey:'18',challengePoints:95}
-  ].map(function(a){ a.role='player'; a.roles=['player']; a.email=a.userId+'@demo.aos'; a.athleteCode='AOS-DEMO-'+a.jersey; a.lastCheckIn=_demoDate(0); return a; });
+    {userId:'demo_a5',name:'Robin Vega',readiness:7,streak:9,sport:'Softball',position:'1B',jersey:'18',challengePoints:95},
+    {userId:'demo_a6',name:'Jada Brooks',readiness:8,streak:15,sport:'Softball',position:'2B',jersey:'5',challengePoints:110},
+    {userId:'demo_a7',name:'Kenzie Hart',readiness:7,streak:6,sport:'Softball',position:'3B',jersey:'22',challengePoints:70},
+    {userId:'demo_a8',name:'Lena Ortiz',readiness:8,streak:11,sport:'Softball',position:'LF',jersey:'9',challengePoints:90},
+    {userId:'demo_a9',name:'Sofia Reyes',readiness:6,streak:3,sport:'Softball',position:'RF',jersey:'14',challengePoints:40},
+    {userId:'demo_a10',name:'Ella Novak',readiness:9,streak:18,sport:'Softball',position:'Pitcher',jersey:'31',challengePoints:150},
+    {userId:'demo_a11',name:'Nora Ellis',readiness:7,streak:8,sport:'Softball',position:'Catcher',jersey:'2',challengePoints:60},
+    {userId:'demo_a12',name:'Ivy Tran',readiness:8,streak:10,sport:'Softball',position:'DP',jersey:'16',challengePoints:85}
+  ].map(function(a){
+    /* Teammates' session counts sit in a 30-day range on purpose: the parent
+       view compares a child's last 30 days against these totals (see the note
+       at _sessions30), so lifetime-sized numbers would make Maya look idle. */
+    if(a.totalSessions===undefined){ a.totalSessions=14+(a.streak%11); a.completedGoals=1+(a.streak%3); a.recoveryDays=a.streak; }
+    a.role='player'; a.roles=['player']; a.email=a.userId+'@demo.aos'; a.athleteCode='AOS-DEMO-'+a.jersey;
+    a.lastCheckIn=_demoDate(0);
+    /* A good Tuesday, not a perfect one. The three who have not trained
+       are the three with the shortest streaks, which is the point of
+       the screen - a coach should be able to see who is drifting. */
+    a.lastTrainingDate=(a.streak>=6)?_demoDate(0):_demoDate(-2);
+    return a; });
   var accounts={};
   [org,coach,trainer,parent].concat(athletes).forEach(function(a){ accounts[a.userId]=a; });
   var links={};
@@ -2812,7 +2962,7 @@ function aosBuildDemoData(){
   });
   links['demo_a1'][coach.userId].captain=true;
   links['demo_a1'][parent.userId]={linkerId:parent.userId,linkerName:parent.name,linkerRole:'parent',linkedAt:Date.now()};
-  var teams={ demo_team_14u:{teamId:'demo_team_14u',name:'14U Gold',ownerId:org.userId,ownerName:org.name,ownerRole:'org',staff:[coach.userId,trainer.userId],createdAt:Date.now()} };
+  var teams={ demo_team_14u:{teamId:'demo_team_14u',name:'18U Gold',ownerId:org.userId,ownerName:org.name,ownerRole:'org',staff:[coach.userId,trainer.userId],createdAt:Date.now()} };
   var members={demo_team_14u:{}};
   athletes.forEach(function(a){ members.demo_team_14u[a.userId]={teamId:'demo_team_14u',athleteId:a.userId,addedBy:org.userId,addedAt:Date.now()}; });
   var msgs=[
@@ -2825,34 +2975,71 @@ function aosBuildDemoData(){
   ].map(function(m,i){
     m._mid='demo_m'+i;
     m.recipients=[coach.userId,trainer.userId,org.userId,parent.userId].concat(athletes.map(function(a){return a.userId;}));
-    m.audience=m.audience||{type:'squad',id:'demo_team_14u',label:'14U Gold'};
+    m.audience=m.audience||{type:'squad',id:'demo_team_14u',label:'18U Gold'};
     return m;
+  });
+  /* The week ahead. An empty schedule is the one thing that makes a
+     team app look unused, and it was the first screen a coach saw. */
+  var sched=[
+    {id:'demo_ev1',kind:'attendance',title:'Practice \u2014 hitting + situational',date:_demoDate(0),
+     start:'17:30',end:'19:30',location:'Northside Dome, field 2',type:'Practice'},
+    {id:'demo_ev2',kind:'attendance',title:'vs Lakeside Thunder',date:_demoDate(3),
+     start:'10:00',end:'12:00',location:'Memorial Field',type:'Game'},
+    {id:'demo_ev3',kind:'attendance',title:'Team lift',date:_demoDate(4),
+     start:'07:00',end:'08:00',location:'Weight room',type:'Training'},
+    {id:'demo_ev4',kind:'signup',title:'Catcher\u2019s extra \u2014 throw-downs',date:_demoDate(5),
+     start:'16:00',end:'17:00',location:'Dome, bullpen',type:'Training',capacity:4}
+  ].map(function(e){
+    e.hostId=coach.userId; e.hostName=coach.name; e.hostRole='coach';
+    e.teamId='demo_team_14u'; e.allDay=false; e.cancelled=false; e.createdAt=Date.now();
+    e.viewers=[coach.userId,trainer.userId,org.userId,parent.userId]
+      .concat(athletes.map(function(a){return a.userId;}));
+    e.responses={};
+    /* Most of the team has answered tonight's practice. */
+    if(e.id==='demo_ev1') athletes.forEach(function(a,i){ e.responses[a.userId]=(i%5===0)?'out':'in'; });
+    return e;
   });
   var challenges=[
     {id:'demo_ch1',title:'14-Day Check-In Streak',desc:'Log your readiness every day',type:'streak',target:14,points:75,emoji:'\uD83D\uDD25',
      participants:['demo_a1','demo_a2','demo_a3','demo_a5'],completed:['demo_a3'],createdBy:'Coach Rivera',createdByRole:'coach',
-     creatorId:coach.userId,hubs:[coach.userId],endDate:_demoDate(-21)},
+     creatorId:coach.userId,hubs:[coach.userId],endDate:_demoDate(9),
+     progressBy:{demo_a1:11,demo_a2:4,demo_a3:14,demo_a5:7}},
     {id:'demo_ch2',title:'Positive Energy All Week',desc:'Bring it every session',type:'smile',target:7,unit:'sessions',points:30,emoji:'\u2B50',
      participants:['demo_a1','demo_a4'],completed:[],progressBy:{demo_a1:4},createdBy:'Maya Blake',createdByRole:'player',
-     creatorId:'demo_a1',hubs:[coach.userId],endDate:_demoDate(-7)}
+     creatorId:'demo_a1',hubs:[coach.userId],endDate:_demoDate(3)}
   ];
-  var recovery={}, training={}, hydration={};
-  for(var d=0;d<10;d++){
-    var key=_demoDate(d);
-    recovery[key]={readiness:[8,7,9,6,8,7,9,8,7,8][d],sleep:[8,7.5,8,6.5,7,8,8.5,7,7.5,8][d],energy:7,mood:'\uD83D\uDE42',soreness:{},methods:['Stretch']};
-    if(d%2===0) training[key]=[{id:'t'+d,type:'Batting Practice',duration:60,intensity:7,notes:'Tee work + front toss'}];
-    hydration[key]={entries:[{oz:24,time:'8:00'},{oz:32,time:'13:00'}]};
-  }
+  var H=aosDemoHistory(), recovery=H.recovery, training=H.training, hydration={};
+  accounts.demo_a1.recoveryDays=H.checkIns;
+  for(var d=0;d<10;d++) hydration[_demoDate(d)]={entries:[{oz:24,time:'8:00'},{oz:32,time:'13:00'}]};
+  var tsAt=function(frac){ return new Date(H.at(frac)+'T17:00:00').getTime(); };
   return {
-    accounts:accounts, links:links, teams:teams, members:members, msgs:msgs, challenges:challenges,
+    accounts:accounts, links:links, teams:teams, members:members, msgs:msgs, challenges:challenges, sched:sched,
     personal:{
-      sb_profile:{firstName:'Maya',lastName:'Blake',sport:'Softball',sports:['Softball','Volleyball'],position:'Catcher',jersey:'12',
-        school:'Northside HS',teamName:'14U Gold',streak:12,teamRole:'captain',gradYear:'2029'},
+      sb_profile:{firstName:'Maya',lastName:'Blake',sport:'Softball',sports:['Softball'],position:'Catcher',jersey:'12',
+        school:'Northside HS',teamName:'18U Gold',streak:H.streak,teamRole:'captain',gradYear:'2026',ageMode:'teen'},
       sb_recovery:recovery, sb_training:training, sb_hydration:hydration,
-      sb_goals:[{id:'g1',text:'Throw-down under 2.0s',completed:false,target:'2.0s'},{id:'g2',text:'Hit .350 this season',completed:false}],
+      /* Goals use the same fields the Goals screen reads (title, not
+         text, which left the old demo's goals without names). */
+      sb_goals:[
+        {id:'g_varsity',title:'Make Varsity',category:'Hitting',target:1,progress:1,targetDate:H.at(0.55),priority:'High',completed:true},
+        {id:'g_ev60',title:'Exit velo 60 mph',category:'Hitting',target:60,progress:60,targetDate:H.at(0.7),priority:'High',completed:true},
+        {id:'g_pop',title:'Pop time under 2.0s',category:'Fielding',target:1,progress:1,targetDate:H.at(0.78),priority:'Med',completed:true},
+        {id:'g_350',title:'Hit .350 this season',category:'Hitting',target:1,progress:1,targetDate:H.at(0.85),priority:'Med',completed:true},
+        {id:'g_commit',title:'Commit to a college program',category:'Recruiting',target:1,progress:1,targetDate:H.at(0.93),priority:'High',completed:true},
+        {id:'g_fresh',title:'Start as a Freshman',category:'General',target:1,progress:0,targetDate:_demoDate(-180),priority:'High',completed:false}],
+      sb_injuries:[{id:'inj_elbow',part:'Elbow',status:'cleared',started:H.injA,cleared:H.injB,note:'Sling, then rehab',
+        updates:[{status:'limited',date:_demoKeyShift(H.injA,21)},{status:'returning',date:_demoKeyShift(H.injA,35)},{status:'cleared',date:H.injB}],ts:tsAt(0.4)}],
+      sb_metrics_physical:H.phys, sb_recruit_path:{},
       sb_calendar:[{id:'e1',title:'Scrimmage vs Lakeside',date:_demoDate(-2),time:'16:00'},{id:'e2',title:'Team lift',date:_demoDate(-4),time:'07:00'}],
       sb_tasks:[{id:'k1',text:'Foam roll 10 min',cat:'Recovery',done:false,date:_demoDate(0)}],
-      sb_metrics_custom:{}, sb_metrics_physical:{}, sb_metrics_batting:[], sb_metrics_pitching:[]
+      sb_metrics_custom:{}, sb_metrics_batting:[], sb_metrics_pitching:[]
+    },
+    other:{
+      aos_dev_skills:{demo_a1:{speed:88,strength:94,technique:90,iq:86,updatedAt:tsAt(0.97),updatedBy:'Coach Rivera'}},
+      aos_dev_plans:{demo_a1:[
+        {from:'Coach Rivera',fromId:'demo_coach',role:'coach',msg:'You have improved so much!',ts:tsAt(0.97)},
+        {from:'Coach Rivera',fromId:'demo_coach',role:'coach',msg:'Throw-downs are college-ready. Keep the footwork.',ts:tsAt(0.8)},
+        {from:'Sam Doyle',fromId:'demo_trainer',role:'trainer',msg:'Tee Work - 3 Times a week',ts:tsAt(0.15)}]}
     }
   };
 }
@@ -2895,7 +3082,7 @@ function _demoWrite(key,val){
       var u=window.AOS_USER||{};
       d.msgs.unshift({_mid:'demo_m'+Date.now()+Math.random().toString(36).slice(2,5),kind:kind,fromId:u.userId,fromName:u.name,
         fromRole:u.role,text:item.text||item.msg||'',title:item.title||'',ts:item.ts||Date.now(),legacy:item,doneBy:{},dismissedBy:{},
-        recipients:Object.keys(d.accounts),audience:{type:'squad',id:'demo_team_14u',label:'14U Gold'}});
+        recipients:Object.keys(d.accounts),audience:{type:'squad',id:'demo_team_14u',label:'18U Gold'}});
     });
     return;
   }
@@ -2910,14 +3097,36 @@ window.aosStartDemo=function(role){
   window.AOS_USER={userId:acc.userId,name:acc.name,role:acc.role,roles:acc.roles,email:acc.email,athleteCode:acc.athleteCode};
   /* Anything that broke before sign-in can be written now. */
   if(typeof aosFlushSupportQueue==='function') setTimeout(aosFlushSupportQueue,1200);
-  profile=_demoStore.personal.sb_profile;
-  recovery=_demoStore.personal.sb_recovery;
-  training=_demoStore.personal.sb_training;
-  hydration=_demoStore.personal.sb_hydration;
-  goals=_demoStore.personal.sb_goals;
-  tasks=_demoStore.personal.sb_tasks;
-  calendar=_demoStore.personal.sb_calendar;
-  metricsCustom=_demoStore.personal.sb_metrics_custom;
+  /* Only the athlete has an athlete's record. Every role used to be
+     handed Maya's - so a coach opening My Record read "everything
+     you've done since 2021" over her five years, and Metrics showed
+     her batting tabs. A coach has a profile, not a training history. */
+  var P=_demoStore.personal;
+  if(acc.role==='player'){
+    profile=P.sb_profile;
+    recovery=P.sb_recovery; training=P.sb_training; hydration=P.sb_hydration;
+    goals=P.sb_goals; tasks=P.sb_tasks; calendar=P.sb_calendar;
+    metricsCustom=P.sb_metrics_custom;
+    metricsPhysical=P.sb_metrics_physical||{};
+    injuries=P.sb_injuries||[]; recruitPath=P.sb_recruit_path||{};
+  } else {
+    var nm=(acc.name||'').split(' ');
+    profile={firstName:nm[0]||'',lastName:nm.slice(1).join(' '),
+      sport:acc.sport||'Softball',role:acc.role,
+      teamName:(acc.role==='org')?acc.name:'18U Gold',
+      startedAt:_demoDate(0)};
+    recovery={}; training={}; hydration={};
+    goals=[]; tasks=[]; calendar=P.sb_calendar;   /* the team's schedule is theirs too */
+    metricsCustom={}; metricsPhysical={}; injuries=[]; recruitPath={};
+  }
+  /* The demo athlete is in Teen Mode, so the demo shows what a family
+     gets: the same banner a real teen account shows. */
+  if(acc.role==='player'&&profile.ageMode==='teen'&&!document.getElementById('age-banner')){
+    var _ab=document.createElement('div');_ab.id='age-banner';
+    _ab.style.cssText='position:fixed;top:0;left:0;right:0;text-align:center;font-size:11px;font-weight:700;padding:4px 0;z-index:998;letter-spacing:.7px;pointer-events:none;background:linear-gradient(90deg,#f39c12,#e67e22);color:#0A1A2F';
+    _ab.textContent='TEEN MODE - Parent Monitoring Active';
+    document.body.appendChild(_ab);
+  }
   var scr=document.getElementById('auth-screen'); if(scr) scr.style.display='none';
   document.body.classList.add('aos-demo');
   var bar=document.getElementById('aos-demo-bar');
@@ -3557,7 +3766,7 @@ const SECONDARY_MAP = {
    the owner has somewhere to read both. No backend, so a report lands
    in Firestore and can also open the sender's own mail app.
    ══════════════════════════════════════════════════════════════════ */
-var AOS_VERSION='AOS V.8.0.6';   /* HTML and the rules file carry the same number */
+var AOS_VERSION='AOS V.8.0.7';   /* HTML and the rules file carry the same number */
 var AOS_SUPPORT_TO='ekuvaas@icloud.com';
 
 /* Which screen they were on, by section id — never the raw URL, which
@@ -7034,7 +7243,9 @@ var trainingTab='today';
 function renderTraining(){
   var el=safeGet('sec-training');if(!el)return;
   var _uRole=(window.AOS_USER&&window.AOS_USER.role)||'player';
-  if(_uRole==='coach'||_uRole==='trainer'){ renderTrainingHubForStaff(); return; }
+  /* An org is staff. It was dropping through to the athlete's own
+     training log, which is a personal diary it has no entries in. */
+  if(_uRole==='coach'||_uRole==='trainer'||_uRole==='org'){ renderTrainingHubForStaff(); return; }
   el.innerHTML='<div class="section-title">🏋️ Training Log</div>'+
   '<div class="tab-pills"><button class="tab-pill t-tab'+(trainingTab==='today'?' active':'')+'" data-tt="today">Today</button><button class="tab-pill t-tab'+(trainingTab==='history'?' active':'')+'" data-tt="history">History</button><button class="tab-pill t-tab'+(trainingTab==='insights'?' active':'')+'" data-tt="insights">📈 Insights</button></div>'+
   '<div id="training-content"></div>';
@@ -7974,7 +8185,9 @@ function renderTeam(){
       // Team Development Focus from any linked coach/trainer
       var proIds=Object.keys(myLinks).filter(function(id){return myLinks[id]&&(myLinks[id].linkerRole==='coach'||myLinks[id].linkerRole==='trainer');});
       var focusEntries=proIds.map(function(id){return allFocus[id];}).filter(function(f){return f&&f.focus;});
-      var MS=[{lbl:'Attend First Team Practice',done:true,dt:'Aug 1'},{lbl:'Complete Tryout Evaluation',done:true,dt:'Aug 10'},{lbl:'Hit 10-Day Training Streak',done:(profile.streak||0)>=10,dt:(profile.streak||0)>=10?'Done':'Pending'},{lbl:'Log 20 Training Sessions',done:false,dt:'Pending'},{lbl:'Achieve 8+ Readiness Score',done:false,dt:'Pending'},{lbl:'Dev Plan Review with Coach',done:thread.length>0,dt:thread.length>0?'Done':'Pending'}];
+      var _msSess=Object.keys(training||{}).reduce(function(n,k){ return n+((training[k]||[]).length||0); },0);
+      var _msReady=Object.keys(recovery||{}).some(function(k){ return Number((recovery[k]||{}).readiness)>=8; });
+      var MS=[{lbl:'Attend First Team Practice',done:true,dt:'Aug 1'},{lbl:'Complete Tryout Evaluation',done:true,dt:'Aug 10'},{lbl:'Hit 10-Day Training Streak',done:(profile.streak||0)>=10,dt:(profile.streak||0)>=10?'Done':'Pending'},{lbl:'Log 20 Training Sessions',done:_msSess>=20,dt:_msSess>=20?'Done':'Pending'},{lbl:'Achieve 8+ Readiness Score',done:_msReady,dt:_msReady?'Done':'Pending'},{lbl:'Dev Plan Review with Coach',done:thread.length>0,dt:thread.length>0?'Done':'Pending'}];
       tb.innerHTML=
         (focusEntries.length?'<div class="card" style="margin-bottom:12px;border-color:rgba(255,215,0,0.3)">'+
           '<div style="font-weight:700;font-size:13px;margin-bottom:8px;color:var(--gold)">&#127919; Team Development Focus</div>'+
@@ -11035,9 +11248,14 @@ function renderRecord(){
   var u=window.AOS_USER||{};
   var s=aosCareerStats(), pbs=aosPersonalBests(), trend=aosMonthlyTrend(6);
   var hist=((window._athHistory||{})[u.userId])||[];
+  /* A coach or trainer has no athlete history, so there is no date to
+     count from. It read "since \u2014", which is worse than saying so. */
+  var _sinceTxt=s.since
+    ? 'Everything you\u2019ve done since '+_recFmtDate(s.since)+
+      '. This is yours \u2014 it stays with you when coaches or clubs change.'
+    : 'Nothing logged yet. Anything you record as an athlete lands here, and it stays yours.';
   var html='<div class="section-title">\uD83D\uDCD6 My Record</div>'+
-    '<div style="font-size:11px;color:var(--white-dim);margin:-6px 0 12px">Everything you\u2019ve done since '+
-      _recFmtDate(s.since)+'. This is yours \u2014 it stays with you when coaches or clubs change.</div>';
+    '<div style="font-size:11px;color:var(--white-dim);margin:-6px 0 12px">'+_sinceTxt+'</div>';
   html+='<div class="stat-grid">'+
     '<div class="stat-card"><div class="stat-value">'+s.days+'</div><div class="stat-label">Days in AOS</div></div>'+
     '<div class="stat-card"><div class="stat-value">'+s.sessions+'</div><div class="stat-label">Sessions</div>'+
@@ -11618,16 +11836,30 @@ function denyConnRequest(reqId,cb){
    session — reading aos_player_links, the one canonical store that
    approveConnRequest writes into — instead of every player account on
    the device regardless of who they belong to. */
+/* An org's roster is the whole club, not just athletes linked to the
+   org account directly. Coaches hold the links; the org holds the
+   coaches. Reading only direct links is why an org opened the Team tab
+   to "0 Athletes" while its own dashboard said twelve.
+   _aosOrgStaffIds is kept up to date by the graph loader below. */
 function getMyLinkedPlayers(accs, links, session){
   links = links || {}; accs = accs || {};
   var myId = session && session.userId;
   if(!myId) return [];
-  var out = [];
+  var mine = {}; mine[myId] = 1;
+  if((session.role||'')==='org'){
+    (window._aosOrgStaffIds||[]).forEach(function(id){ mine[id]=1; });
+  }
+  var out = [], seen = {};
   Object.keys(links).forEach(function(playerId){
-    if(links[playerId] && links[playerId][myId]){
-      var p = accs[playerId] || Object.values(accs).find(function(a){return a.userId===playerId;});
-      if(p) out.push(p);
-    }
+    var l = links[playerId]; if(!l) return;
+    var reached = Object.keys(l).some(function(linkerId){
+      /* A parent link never makes somebody your athlete. */
+      return mine[linkerId] && (l[linkerId]||{}).linkerRole !== 'parent';
+    });
+    if(!reached || seen[playerId]) return;
+    seen[playerId] = 1;
+    var p = accs[playerId] || Object.values(accs).find(function(a){return a.userId===playerId;});
+    if(p) out.push(p);
   });
   return out;
 }
@@ -11873,7 +12105,7 @@ function renderCoach(){
 
     var html='<div style="padding:16px;max-width:600px;margin:0 auto">';
     html+='<div style="font-family:\'Barlow Condensed\',sans-serif;font-size:26px;font-weight:900;color:#00E0FF;letter-spacing:1px;margin-bottom:2px">📋 COACH DASHBOARD</div>';
-    html+='<div style="color:#8899aa;font-size:12px;margin-bottom:16px">Welcome, Coach '+(u.name||'')+' · Org: '+(u.orgCode||'—')+'</div>';
+    html+='<div style="color:#8899aa;font-size:12px;margin-bottom:16px">Welcome, Coach '+(u.name||'')+' · '+aosOrgLabelHTML('coach-org-lbl')+'</div>';
 
     /* Stats — 2x2, daily-relevant */
     html+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px">';
@@ -12350,7 +12582,7 @@ function renderOrg(){
 
     var html='<div style="padding:16px;max-width:640px;margin:0 auto">';
     html+='<div style="font-family:\'Barlow Condensed\',sans-serif;font-size:26px;font-weight:900;color:#00E0FF;letter-spacing:1px;margin-bottom:2px">🏢 ORG DASHBOARD</div>';
-    html+='<div style="color:#8899aa;font-size:12px;margin-bottom:16px">Organization: '+(u.orgCode||'—')+' · Admin: '+(u.name||'')+'</div>';
+    html+='<div style="color:#8899aa;font-size:12px;margin-bottom:16px">Organization: '+escH(u.name||'')+'</div>';
 
     /* Stats row */
     var stats=[['Players',players.length,'#00E0FF'],['Coaches',coaches.length,'#FFD700'],['Trainers',trainers.length,'#00ff88'],['Parents',parents.length,'#ff88aa'],['Avg Readiness',players.length?avgR:'—','#fff']];
@@ -12589,6 +12821,7 @@ function aosParentMetricsHTML(prof,custom,phys,batting,pitching){
   return h+'</div>';
 }
 function aosParentWriteChild(childId,key,value){
+  if(AOS_DEMO){ if(childId==='demo_a1'&&_demoStore.personal) _demoStore.personal[key]=value; return Promise.resolve(); }
   return fbDb.collection('users').doc(childId).collection('appdata').doc(key).set({value:value});
 }
 function aosBindParentMetrics(cid,prof,custom,phys,refresh){
@@ -12792,6 +13025,7 @@ function aosExportChildData(childId,childName){
 function aosDeleteChildData(childId,childName){
   var typed=prompt('This permanently deletes '+(childName||'your athlete')+'\u2019s logged data, profile and directory entry.\n\nIt cannot be undone. Type DELETE to confirm.');
   if((typed||'').trim().toUpperCase()!=='DELETE'){ showToast('Cancelled.'); return Promise.resolve(false); }
+  if(AOS_DEMO){ showToast('Not in the demo \u2014 nothing here is saved anyway.'); return Promise.resolve(false); }
   var ref=fbDb.collection('users').doc(childId).collection('appdata');
   return Promise.all(AOS_CHILD_KEYS.map(function(k){
     return ref.doc(k).delete().catch(function(){});
@@ -12942,7 +13176,7 @@ window.aosSuggestTraining=function(childId,childName){
     aosChildData(childId,'sb_suggestions').then(function(list){
       list=Array.isArray(list)?list:[];
       list.unshift(sug);
-      return fbDb.collection('users').doc(childId).collection('appdata').doc('sb_suggestions').set({value:list});
+      return aosParentWriteChild(childId,'sb_suggestions',list);
     }).then(function(){
       showToast('Suggested to '+(childName||'your athlete'));
       box.style.display='none';
@@ -13528,7 +13762,7 @@ window.aosAddToChildCalendar=function(childId,childName,cb){
         type:safeVal('pc-ev-type')||'Practice',personal:true,seriesId:series,
         addedBy:(window.AOS_USER||{}).name||'Parent',addedByRole:'parent'});
     });
-    return fbDb.collection('users').doc(childId).collection('appdata').doc('sb_calendar').set({value:list});
+    return aosParentWriteChild(childId,'sb_calendar',list);
   }).then(function(){
     showToast(dates.length>1?(dates.length+' added to '+(childName||'their')+' calendar.'):'Added to '+(childName||'their')+' calendar.');
     var t=safeGet('pc-ev-title'); if(t) t.value='';
@@ -14629,6 +14863,9 @@ function aosJoinByCodeHTML(){
    Age note: this is on for every age. To limit teenagers to the summary
    view, gate the button below on childAcc.ageMode==='youth'. */
 function aosChildData(childId,key){
+  /* Demo mode: the child's data is the in-memory demo athlete. Reading
+     Firebase here left the demo parent looking at an empty child. */
+  if(AOS_DEMO) return Promise.resolve(childId==='demo_a1'&&_demoStore.personal&&_demoStore.personal[key]!==undefined?_demoStore.personal[key]:null);
   return fbDb.collection('users').doc(childId).collection('appdata').doc(key).get()
     .then(function(s){ return (s.exists?s.data().value:null); })
     .catch(function(e){ console.warn('AOS child read failed',key,e); return null; });
@@ -14781,6 +15018,9 @@ function renderParentChildHome(){
     function _sessions30(id){
       var n=0;
       if(id===cid){ for(var i=0;i<30;i++){ n+=((tr||{})[_pDay(i)]||[]).length; } return n; }
+      /* KNOWN BUG (V.8.0.7): this is a lifetime total compared against the
+         child's 30 days above. Needs a 30-day count published on each account
+         (a rules change), so it is noted here rather than patched. */
       var a=accs[id]||{}; return Number(a.totalSessions||a.sessions||0);
     }
     function _avg(ids){
@@ -14995,7 +15235,7 @@ function renderParentChildHome(){
         email:safeVal('pci-email'), phone:safeVal('pci-phone'),
         updatedByParent:(window.AOS_USER||{}).name||'', updatedByParentAt:Date.now()
       });
-      fbDb.collection('users').doc(cid).collection('appdata').doc('sb_profile').set({value:updated})
+      aosParentWriteChild(cid,'sb_profile',updated)
         .then(function(){
           /* keep the directory record in step so coaches see the change */
           return AppSDK.getItem('aos_local_accounts').then(function(accs){
@@ -15762,7 +16002,7 @@ function renderTrainer(){
 
     var html='<div style="padding:16px;max-width:600px;margin:0 auto">';
     html+='<div style="font-family:\'Barlow Condensed\',sans-serif;font-size:26px;font-weight:900;color:#00ff88;letter-spacing:1px;margin-bottom:2px">💪 TRAINER DASHBOARD</div>';
-    html+='<div style="color:#8899aa;font-size:12px;margin-bottom:16px">Trainer: '+(u.name||'')+' · Org: '+(u.orgCode||'—')+'</div>';
+    html+='<div style="color:#8899aa;font-size:12px;margin-bottom:16px">Trainer: '+(u.name||'')+' · '+aosOrgLabelHTML('trainer-org-lbl')+'</div>';
 
     /* Stats — 2x2, daily-relevant, same pattern as Coach */
     html+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px">';
