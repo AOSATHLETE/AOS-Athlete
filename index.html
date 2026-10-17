@@ -3159,6 +3159,9 @@ function _demoWrite(key,val){
 }
 window.aosStartDemo=function(role){
   AOS_DEMO=true;
+  /* Reloading used to drop you back to sign-in, which on a phone is
+     what happens the moment anything interrupts you. */
+  try{ sessionStorage.setItem('aos_demo_role',role||'player'); }catch(e){}
   _demoStore=aosBuildDemoData();
   var byRole={player:'demo_a1',coach:'demo_coach',trainer:'demo_trainer',org:'demo_org',parent:'demo_parent'};
   var acc=_demoStore.accounts[byRole[role]||'demo_a1'];
@@ -3210,7 +3213,20 @@ window.aosStartDemo=function(role){
   navigateTo('home');
   showToast('Demo mode \u00B7 '+acc.name+' ('+acc.role+')');
 };
-window.aosExitDemo=function(){ AOS_DEMO=false; _demoStore={}; location.reload(); };
+window.aosExitDemo=function(){
+  AOS_DEMO=false; _demoStore={};
+  try{ sessionStorage.removeItem('aos_demo_role'); }catch(e){}
+  location.reload();
+};
+/* Resume the demo after a reload. sessionStorage, so it lasts the visit
+   and not beyond - a demo that outlived the tab would be worse. */
+function aosResumeDemo(){
+  var r='';
+  try{ r=sessionStorage.getItem('aos_demo_role')||''; }catch(e){}
+  if(!r) return false;
+  try{ aosStartDemo(r); return true; }
+  catch(e){ console.warn('AOS demo resume failed',e); return false; }
+}
 
 window.AppSDK = {
   getItem: function(key){
@@ -3689,7 +3705,9 @@ let profile={},training={},teamInfo={},roster=[],goals=[];
 let metricsBatting=[],metricsPitching=[],metricsFielding=[];
 let metricsPhysical={},metricsBlast=[],metricsRadar=[],metricsRapsodo=[],metricsGarmin=[];
 let recovery={},hydration={},calEvents=[],requests=[];
-let nutritionGoals={calories:2200,protein:130,carbs:280,fats:70,water:80};
+/* Water lives with Hydration, not here - Nutrition showing 80oz beside
+   Hydration's 64oz meant two screens disagreeing about the same goal. */
+let nutritionGoals={calories:2200,protein:130,carbs:280,fats:70,water:64};
 let nutritionLog={},tasks=[],tasksDate='';
 let gameday={items:[],custom:[]};
 let timerInterval=null,timerRunning=false,timerSeconds=0,timerTotal=0;
@@ -4071,8 +4089,11 @@ function aosInstallManifest(){
     var mf={
       name:'AOS \u2014 Athlete Operating System',
       short_name:'AOS',
-      start_url:'.',
-      scope:'.',
+      /* Absolute, because a blob-URL manifest has no base to resolve a
+         relative path against - the browser discarded both and ignored
+         the manifest. Mine, shipped on the 9th. */
+      start_url:location.origin+location.pathname,
+      scope:location.origin+location.pathname.replace(/[^/]*$/,''),
       display:'standalone',
       orientation:'portrait',
       background_color:'#0A1A2F',
@@ -4280,7 +4301,15 @@ function aosLoggableMetrics(sport){
    softball table predates this record: its numbers may be sound, but
    nothing says where they came from, which is its own problem. */
 var AOS_BENCH_PROVENANCE={
-  Softball:{reviewed:'', next:'', basis:'', note:'No source or review date recorded for this table.'},
+  /* Compiled from published recruiting guidance found online. That is
+     the same kind of source the baseball rows use; the difference is
+     that these have not been cross-checked against each other, and
+     published figures for the same division vary widely. Said plainly
+     rather than left blank - a table with no provenance invites more
+     trust than one that tells you what it is. */
+  Softball:{reviewed:'', next:'',
+            basis:'Compiled from published recruiting guidance; not yet cross-checked',
+            note:''},
   Baseball:{reviewed:'2026-10', next:'2027-04',
             basis:'Recruiting minimums, cross-checked across several independent recruiting guides',
             note:''}
@@ -4594,10 +4623,10 @@ function navigateTo(sec){
   if(!_ghb){
     _ghb=document.createElement('div');
     _ghb.id='global-home-bar';
-    /* This bar sits at the very top of the screen, so it has to clear the
-       status bar and Dynamic Island like everything else. Without the
-       inset it printed under the clock. */
-    _ghb.style.cssText='position:fixed;top:0;left:50%;transform:translateX(-50%);width:100%;max-width:430px;z-index:200;display:none;align-items:center;gap:10px;padding:calc(8px + var(--aos-top-inset, env(safe-area-inset-top, 0px))) 16px 8px;background:rgba(17,17,17,0.97);border-bottom:1px solid rgba(0,224,255,0.15);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);box-sizing:border-box';
+    /* Below the header, not on top of it. At top:0 with z-index 200 it
+       covered the avatar and the Sign Out button - both still rendered,
+       neither reachable, because the bar swallowed every tap. */
+    _ghb.style.cssText='position:fixed;top:calc(56px + var(--aos-top-inset, env(safe-area-inset-top, 0px)));left:50%;transform:translateX(-50%);width:100%;max-width:430px;z-index:99;display:none;align-items:center;gap:10px;padding:8px 16px;background:var(--navy);border-bottom:1px solid var(--border);box-sizing:border-box';
     _ghb.innerHTML='<button onclick="navigateTo(&#39;home&#39;)" style="background:rgba(0,224,255,0.12);border:1px solid rgba(0,224,255,0.25);border-radius:8px;padding:5px 14px;color:var(--gold);font-size:13px;font-weight:700;cursor:pointer;font-family:Inter,sans-serif;flex-shrink:0">&#8962; Home</button>'
       +'<span id="ghb-title" style="font-size:14px;font-weight:700;color:var(--white-dim);font-family:Barlow Condensed,sans-serif;letter-spacing:1px;text-transform:uppercase"></span>';
     document.body.appendChild(_ghb);
@@ -4605,7 +4634,8 @@ function navigateTo(sec){
     var _style=document.createElement('style');
     /* …and the offset it forces on screens has to include the inset too,
        otherwise it undoes the safe-area padding on every screen. */
-    _style.textContent='.section.active{padding-top:calc(88px + var(--aos-top-inset, env(safe-area-inset-top, 0px)))!important}';
+    /* Header (56) + this bar (~41) + breathing room. */
+    _style.textContent='.section.active{padding-top:calc(112px + var(--aos-top-inset, env(safe-area-inset-top, 0px)))!important}';
     document.head.appendChild(_style);
   }
   if(navHighlight==='home'){
@@ -6636,7 +6666,7 @@ async function initApp(){
     hydration=await AppSDK.getItem('sb_hydration')||{};
     checkHydrationDayReset();
     calEvents=await AppSDK.getItem('sb_calendar')||[];
-    nutritionGoals=await AppSDK.getItem('sb_nutrition_goals')||{calories:2200,protein:130,carbs:280,fats:70,water:80};
+    nutritionGoals=await AppSDK.getItem('sb_nutrition_goals')||{calories:2200,protein:130,carbs:280,fats:70,water:64};
     nutritionLog=await AppSDK.getItem('sb_nutrition_log')||{};
     tasks=await AppSDK.getItem('sb_tasks')||[];
     tasksDate=await AppSDK.getItem('sb_tasks_date')||'';
@@ -6718,7 +6748,7 @@ async function initApp(){
   if(!profile.sport && (window.AOS_USER&&window.AOS_USER.role)==='player'){
     var _ob=document.createElement('div');_ob.id='aos-onboarding';
     _ob.style.cssText='position:fixed;top:0;right:0;bottom:0;left:0;background:#111111;z-index:99999;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;overflow-y:auto';
-    var _si={Softball:'&#x1F94E;',Baseball:'&#x26BE;',Basketball:'&#x1F3C0;',Football:'&#x1F3C8;',Soccer:'&#x26BD;',Volleyball:'&#x1F3D0;','Track & Field':'&#x1F3C3;',Wrestling:'&#x1F93C;',Swimming:'&#x1F3CA;',Other:'&#x1F3C6;'};
+    var _si={Softball:'&#x1F94E;',Baseball:'&#x26BE;',Basketball:'&#x1F3C0;',Football:'&#x1F3C8;',Soccer:'&#x26BD;',Volleyball:'&#x1F3D0;','Track & Field':'&#x1F3C3;',Wrestling:'&#x1F93C;',Swimming:'&#x1F3CA;','Ice Hockey':'&#x1F3D2;',Lacrosse:'&#x1F94D;',Tennis:'&#x1F3BE;',Other:'&#x1F3C6;'};
     var _sl=aosSportList();
     _ob.innerHTML='<div style="font-family:Barlow Condensed,sans-serif;font-size:36px;font-weight:900;color:var(--gold);letter-spacing:2px;margin-bottom:4px">WELCOME TO AOS</div>'
       +'<div style="font-size:13px;color:var(--white-dim);margin-bottom:24px;letter-spacing:2px">TRACK &middot; TRAIN &middot; TRANSFORM</div>'
@@ -6735,7 +6765,10 @@ async function initApp(){
     });});
   }
   var splash=safeGet('splash');
-  if(splash){splash.classList.add('out');setTimeout(function(){splash.style.display='none'},700)}
+  /* pointer-events off the moment it starts fading: for most of a
+     second the splash was invisible and still swallowing taps on the
+     sign-in page. */
+  if(splash){splash.style.pointerEvents='none';splash.classList.add('out');setTimeout(function(){splash.style.display='none'},700)}
   // navigateTo('home') instead of a direct renderHome() call so Coach/
   // Trainer/Org land on their own dashboard immediately on login, same
   // redirect logic used every time "Home" is clicked later.
@@ -7022,44 +7055,45 @@ function renderLeaderboard(){
   });
 }
 
+/* Refer & Earn used to promise "EARN $1 PER SIGNUP", show a running
+   dollar credit, and offer a Team Captain Bonus. None of that exists:
+   there is no billing, no payout and nothing a credit buys. Promising
+   a teenager money the app cannot pay is the same mistake as the org
+   report that invented its numbers, and it goes the same way.
+
+   The sharing half is real and worth keeping, so that is what is left. */
 function renderReferral(){
   var el=safeGet('sec-referral');if(!el)return;
   var _u=window.AOS_USER||{};
-  var refCode=_u.userId?_u.userId.slice(-6).toUpperCase():'AOS000';
+  var refCode=_u.userId||'AOS000';
   var shareUrl='https://aos-athlete.netlify.app?ref='+refCode;
-  AppSDK.getItem('aos_referrals').then(function(refs){
-    refs=refs||[];
-    var credits=refs.filter(function(r){return r.refCode===refCode&&r.converted;}).length;
-    var el2=document.getElementById('ref-stats');
-    if(el2)el2.innerHTML=credits+' athlete'+(credits!==1?'s':'')+' joined &mdash; <b style="color:var(--gold)">$'+credits+'.00 credit</b> earned!';
-  });
-  el.innerHTML='<div class="section-title">&#x1F381; Refer &amp; Earn</div>'
+  el.innerHTML='<div class="section-title">&#x1F381; Invite a teammate</div>'
   +'<div class="card" style="text-align:center;padding:24px 16px;border-color:rgba(0,224,255,0.3)">'
-  +'<div style="font-size:36px;margin-bottom:8px">&#x1F4B0;</div>'
-  +'<div style="font-size:18px;font-weight:800;font-family:Barlow Condensed,sans-serif;letter-spacing:1px;margin-bottom:6px">EARN $1 PER SIGNUP</div>'
-  +'<div style="font-size:13px;color:var(--white-dim);margin-bottom:16px">Share AOS with teammates. Every athlete who signs up with your code earns you $1 off your next month.</div>'
+  +'<div style="font-size:13px;color:var(--white-dim);margin-bottom:16px">'
+    +'Share AOS with someone who should be keeping their own record.</div>'
   +'<div style="background:rgba(0,224,255,0.1);border:1px solid rgba(0,224,255,0.3);border-radius:10px;padding:12px;margin-bottom:12px">'
-  +'<div style="font-size:11px;color:var(--white-dim);margin-bottom:4px;text-transform:uppercase;letter-spacing:.8px">Your Referral Code</div>'
-  +'<div style="font-family:JetBrains Mono,monospace;font-size:24px;font-weight:700;color:var(--gold);letter-spacing:4px">'+refCode+'</div></div>'
-  +'<div id="ref-stats" style="font-size:13px;margin-bottom:12px;color:var(--white-dim)">Loading&#8230;</div>'
-  +'<button id="ref-copy" class="btn btn-primary btn-full">&#x1F4CB; Copy Referral Link</button></div>'
-  +'<div class="card">'
-  +'<div style="font-weight:700;font-size:13px;margin-bottom:8px">&#x1F3C6; Team Captain Bonus</div>'
-  +'<div style="font-size:13px;color:var(--white-dim);line-height:1.6">Bring your teammates in \u2014 the more of your team that\u2019s here, the more your coach can do with it.</div></div>';
+  +'<div style="font-size:11px;color:var(--white-dim);margin-bottom:4px;text-transform:uppercase;letter-spacing:.8px">Your invite link</div>'
+  +'<div style="font-family:JetBrains Mono,monospace;font-size:12px;color:var(--gold);word-break:break-all">'+escH(shareUrl)+'</div></div>'
+  +'<button id="ref-copy" class="btn btn-primary btn-full">&#x1F4CB; Copy invite link</button></div>'
+  +'<div class="card" style="margin-top:8px">'
+  +'<div style="font-weight:700;font-size:13px;margin-bottom:6px">&#x1F381; Referral rewards</div>'
+  +'<div style="font-size:12px;color:var(--white-dim);line-height:1.6">Coming soon. '
+    +'The invite link above works now \u2014 rewards for sharing are not live yet.</div></div>';
   setTimeout(function(){
     var cb=safeGet('ref-copy');
-    if(cb)cb.onclick=function(){if(navigator.clipboard)navigator.clipboard.writeText(shareUrl).then(function(){showToast('Referral link copied!');});else{var t=document.createElement('textarea');t.value=shareUrl;document.body.appendChild(t);t.select();document.execCommand('copy');t.remove();showToast('Copied!');}};
+    if(cb)cb.onclick=function(){
+      if(navigator.clipboard)navigator.clipboard.writeText(shareUrl).then(function(){showToast('Invite link copied.');});
+      else showToast(shareUrl);
+    };
   },0);
 }
-
 function renderSubscription(){
   var el=safeGet('sec-subscription');if(!el)return;
   var _u=window.AOS_USER||{};
   var _plan=_u.plan||'free';
-  var _credits=parseInt(_u.credits||0);
   var _role=(_u.role||'player');
   var planBadge=_plan==='pro'?'<span style="background:var(--gold);color:var(--navy);padding:2px 10px;border-radius:12px;font-size:11px;font-weight:800">PRO</span>':'<span style="background:rgba(255,255,255,0.1);color:var(--white-dim);padding:2px 10px;border-radius:12px;font-size:11px;font-weight:700">FREE</span>';
-  el.innerHTML='<div class="section-title">⭐ Subscription & Credits</div>'
+  el.innerHTML='<div class="section-title">\u2B50 Subscription</div>'
   +'<div class="card" style="text-align:center;padding:24px 16px">'
   +'<div style="font-size:28px;margin-bottom:8px">🏟️</div>'
   +'<div style="font-size:20px;font-weight:800;font-family:Barlow Condensed,sans-serif;letter-spacing:1px">ATHLETE OPERATING SYSTEM</div>'
@@ -7068,13 +7102,12 @@ function renderSubscription(){
   +'<div style="font-size:13px;color:var(--white-dim)">Role: <b style="color:var(--cyan)">'+(_role.charAt(0).toUpperCase()+_role.slice(1))+'</b></div>'
   +'</div>'
   +'<div class="card" style="margin-top:8px">'
-  +'<div style="font-weight:700;font-size:14px;margin-bottom:10px">🪙 AOS Credits</div>'
-  +'<div style="display:flex;justify-content:space-between;align-items:center">'
-  +'<div><div style="font-size:32px;font-weight:800;color:var(--gold)">'+_credits+'</div><div style="font-size:11px;color:var(--white-dim)">Available Credits</div></div>'
-  +'<div style="text-align:right;font-size:12px;color:var(--white-dim);line-height:1.8">'
-  +'<div>🏆 Earn credits by logging</div><div>🔥 training & completing goals</div><div>📊 Streaks = bonus credits</div></div></div>'
-  +'<div style="margin-top:12px;border-top:1px solid rgba(255,255,255,0.07);padding-top:10px;font-size:12px;color:var(--white-dim)">'
-  +'Credits are a work in progress \u2014 nothing to spend them on yet.</div></div>'
+  /* Credits used to show a balance, explain how to earn more, and then
+     admit there was nothing to spend them on. A number with nothing
+     behind it reads as a promise; "coming soon" is a plan. */
+  +'<div class="card" style="margin-top:8px">'
+  +'<div style="font-weight:700;font-size:14px;margin-bottom:6px">\uD83E\uDE99 AOS Credits</div>'
+  +'<div style="font-size:12px;color:var(--white-dim);line-height:1.6">Coming soon.</div></div>'
   /* Pricing hidden: Pro isn't live, there is no checkout behind the
      upgrade button, and the block deal isn't a deal anyone can take.
      Showing a price for something that cannot be bought is the same
@@ -8084,7 +8117,7 @@ function renderTeam(){
           return '<div style="background:rgba(0,224,255,0.07);border:1px solid rgba(0,224,255,0.2);border-radius:10px;padding:10px;text-align:center">'+
             '<div style="font-size:9px;color:#00E0FF;font-weight:800;text-transform:uppercase;letter-spacing:.8px;margin-bottom:4px">Team Readiness</div>'+
             '<div style="font-size:22px;font-weight:900;color:'+teamC+';line-height:1">'+avg+'<span style="font-size:11px;color:#8899aa">/10</span></div>'+
-            '<div style="font-size:10px;color:#8899aa;margin-top:3px">'+active.length+' active players</div>'+
+            '<div style="font-size:10px;color:#8899aa;margin-top:3px">'+active.length+' active player'+(active.length===1?'':'s')+'</div>'+
           '</div>'+
           '<div style="background:rgba(255,215,0,0.07);border:1px solid rgba(255,215,0,0.2);border-radius:10px;padding:10px;text-align:center">'+
             '<div style="font-size:9px;color:var(--gold);font-weight:800;text-transform:uppercase;letter-spacing:.8px;margin-bottom:4px">Your Readiness</div>'+
@@ -8426,7 +8459,7 @@ function renderTeam(){
               (feed.length?feed.map(function(msg){return '<div class="card" style="padding:10px;'+(msg.pinned?'border-color:rgba(255,215,0,0.35)':'')+'"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><span style="font-weight:700;font-size:12px;color:'+(msg.isCoach?'#2ecc71':msg.system?'#3498db':'var(--gold)')+'">'+(msg.pinned?'&#128205; ':'')+(msg.isCoach?'&#127942; ':'')+escH(msg.from)+'</span><span style="font-size:10px;color:#8899aa">'+escH(msg.time||'')+'</span></div><div style="font-size:13px;color:#F5FAFF">'+escH(msg.text)+'</div></div>';}).join(''):'<div class="card" style="text-align:center;padding:24px;color:#8899aa;font-size:13px">No posts yet — be the first!</div>')+
               '</div>'+
               '<div style="display:flex;gap:8px">'+
-                '<input id="feed-inp" type="text" placeholder="Post as '+(me||'Athlete')+'..." style="flex:1;padding:10px 12px;border-radius:8px;border:1px solid rgba(0,224,255,0.2);background:rgba(255,255,255,0.04);color:#F5FAFF;font-size:13px">'+
+                '<input id="feed-inp" type="text" maxlength="1000" placeholder="Post as '+(me||'Athlete')+'..." style="flex:1;padding:10px 12px;border-radius:8px;border:1px solid rgba(0,224,255,0.2);background:rgba(255,255,255,0.04);color:#F5FAFF;font-size:13px">'+
                 '<button class="btn btn-primary" style="padding:10px 14px;white-space:nowrap" onclick="postToTeamFeedAsPlayer()">Post</button>'+
               '</div>';
           }
@@ -8459,8 +8492,15 @@ function renderTeam(){
     });
   }
 }
+var AOS_FEED_MAX=1000;
 window.postToTeamFeedAsPlayer=function(){
   var inp=document.getElementById('feed-inp');
+  /* A 3,000-character post rendered as a wall nobody could scroll past.
+     The limit is on the field as well, so it cannot be reached. */
+  if(inp&&(inp.value||'').length>AOS_FEED_MAX){
+    showToast('Keep it under '+AOS_FEED_MAX+' characters.');
+    return;
+  }
   if(!inp||!inp.value.trim())return;
   var myName=((profile.firstName||'')+' '+(profile.lastName||'')).trim()||'Athlete';
   var text=inp.value.trim();
@@ -8713,7 +8753,21 @@ function renderTeamHubForStaff(){
         ' style="width:100%;background:'+(_can?roleColor:'rgba(255,255,255,0.06)')+
         ';color:'+(_can?'#0A1A2F':'#6b7b8a')+';padding:11px;border-radius:20px;font-weight:800;'+
         'font-size:13px;border:'+(_can?'none':'1px solid #334')+';cursor:'+(_can?'pointer':'not-allowed')+'">'+
-        (_can?'ASSIGN TO '+players.length+' ATHLETE'+(players.length===1?'':'S'):'NO ATHLETES LINKED YET')+'</button>';
+        (_can?'<span id="tth-assign-count">ASSIGN TO '+players.length+' ATHLETE'+(players.length===1?'':'S')+'</span>':'NO ATHLETES LINKED YET')+'</button>';
+      /* The button read "ASSIGN TO 12 ATHLETES" even with one picked in
+         the dropdown above it. It follows the selection now. */
+      if(_can) setTimeout(function(){
+        var sel=document.getElementById('tth-assign-to');
+        var lbl=document.getElementById('tth-assign-count');
+        if(!sel||!lbl) return;
+        var sync=function(){
+          var one=sel.value&&sel.value!=='';
+          lbl.textContent=one
+            ? 'ASSIGN TO '+(sel.options[sel.selectedIndex].text||'1 ATHLETE').toUpperCase()
+            : 'ASSIGN TO '+players.length+' ATHLETE'+(players.length===1?'':'S');
+        };
+        sel.addEventListener('change',sync); sync();
+      },0);
       html+='</div>';
     }
 
@@ -8980,6 +9034,11 @@ window.assignTrainingToTeam=function(){
   var duration=parseInt(document.getElementById('tth-assign-dur').value)||30;
   var intensity=parseInt(document.getElementById('tth-assign-int').value)||5;
   var notes=document.getElementById('tth-assign-notes').value.trim();
+  /* The label says 1-10 intensity; nothing enforced it, and a duration
+     could be any number at all. */
+  if(!(duration>=1&&duration<=600)){ showToast('Duration should be 1 to 600 minutes.'); return; }
+  if(!(intensity>=1&&intensity<=10)){ showToast('Intensity should be 1 to 10.'); return; }
+  if(notes.length>1000){ showToast('Keep the notes under 1000 characters.'); return; }
   var _toEl=document.getElementById('tth-assign-to');
   var onlyId=_toEl?_toEl.value:'';
   var td=getTodayKey();
@@ -9809,7 +9868,20 @@ function renderMetricsBatting(){
   '<button class="btn btn-primary btn-full btn-sm" id="mb-save">Log Batting</button></div>'+
   '<div style="font-size:12px;color:var(--white-dim);margin-top:8px">Career: '+totalAB+' AB · '+totalH+' H · '+totalHR+' HR · '+totalRBI+' RBI</div>';
   var mbSave=safeGet('mb-save');if(mbSave)mbSave.addEventListener('click',function(){
-    metricsBatting.push({id:uid(),ab:parseInt(safeVal('mb-ab'))||0,h:parseInt(safeVal('mb-h'))||0,d:parseInt(safeVal('mb-d'))||0,t:parseInt(safeVal('mb-t'))||0,hr:parseInt(safeVal('mb-hr'))||0,rbi:parseInt(safeVal('mb-rbi'))||0,bb:parseInt(safeVal('mb-bb'))||0,k:parseInt(safeVal('mb-k'))||0,hbp:0,sf:0,date:safeVal('mb-date')||todayStr()});
+    /* A box score has to be internally possible. Hits above at-bats
+       logged a 2.500 batting average straight into career totals, and
+       the record is the whole product - a number nobody can explain is
+       worse than a missing one. */
+    var _n=function(id){ var v=parseInt(safeVal(id),10); return (isNaN(v)||v<0)?0:v; };
+    var _ab=_n('mb-ab'), _h=_n('mb-h'), _d=_n('mb-d'), _t=_n('mb-t'), _hr=_n('mb-hr');
+    var _bb=_n('mb-bb'), _k=_n('mb-k'), _rbi=_n('mb-rbi');
+    var _err='';
+    if(!_ab&&!_bb&&!_h) _err='Enter at least one at-bat or walk.';
+    else if(_h>_ab) _err='Hits ('+_h+') can\u2019t be more than at-bats ('+_ab+').';
+    else if(_d+_t+_hr>_h) _err='Doubles, triples and home runs ('+(_d+_t+_hr)+') can\u2019t be more than hits ('+_h+').';
+    else if(_k>_ab) _err='Strikeouts can\u2019t be more than at-bats.';
+    if(_err){ showToast(_err); return; }
+    metricsBatting.push({id:uid(),ab:_ab,h:_h,d:_d,t:_t,hr:_hr,rbi:_rbi,bb:_bb,k:_k,hbp:0,sf:0,date:safeVal('mb-date')||todayStr()});
     saveItem('sb_metrics_batting',metricsBatting);showToast('Logged!');renderMetricsBatting();
   });
 }
@@ -9973,9 +10045,21 @@ function renderRecovery(){
     var r=recovery[ds];
     if(r){histHTML+='<div style="display:flex;justify-content:space-between;font-size:11px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05)"><span>'+ds.slice(5)+'</span><span>\uD83D\uDCA4'+r.sleep+'h \u26A1'+(r.energy||'-')+' '+(r.mood||'—')+' ✅'+(r.readiness||0)+'/10</span></div>';}
   }
-  var rdVal=rec.readiness||5;
-  var rdClr=rdVal>=8?'var(--green)':rdVal>=5?'var(--warning)':'var(--danger)';
-  var rdLabel=rdVal>=8?'<span style="color:var(--green);font-weight:700">Peak Ready \u2705</span>':rdVal>=5?'<span style="color:var(--warning);font-weight:700">Moderate \u26A0\uFE0F</span>':(rdVal>0?'<span style="color:var(--danger);font-weight:700">Low \uD83D\uDD34</span>':'<span style="color:var(--white-dim)">Not set</span>');
+  /* Nothing saved today means no score. The form pre-filled Sleep 7h
+     and Energy 5, computed "Overall Readiness 5/10" from those, and
+     showed it next to a green dot - a number the athlete never
+     entered, on a screen that then disagreed with Home ("Not logged
+     today") and Team ("6/10"). */
+  var _savedToday=!!recovery[aosDateKey()];
+  var rdVal=_savedToday?(rec.readiness||5):null;
+  var rdClr=rdVal===null?'var(--white-dim)':rdVal>=8?'var(--green)':rdVal>=5?'var(--warning)':'var(--danger)';
+  /* One indicator, matching the score - it used to show a green dot
+     beside "Moderate" and a warning triangle at the same time. */
+  var _dot=rdVal===null?'\u26AA':rdVal>=8?'\uD83D\uDFE2':rdVal>=5?'\uD83D\uDFE1':'\uD83D\uDD34';
+  var rdLabel=rdVal===null?'<span style="color:var(--white-dim)">not logged yet today</span>'
+    :rdVal>=8?'<span style="color:var(--green);font-weight:700">Peak Ready</span>'
+    :rdVal>=5?'<span style="color:var(--warning);font-weight:700">Moderate</span>'
+    :'<span style="color:var(--danger);font-weight:700">Low \u2014 take it easy</span>';
   el.innerHTML='<div class="section-title">\uD83D\uDC9A Recovery</div>'
   +aosRecoveryVisibilityHTML()
   +'<div class="card"><div class="form-group"><label>\uD83D\uDCA4 Sleep (hours): <span id="rec-sleep-val">'+rec.sleep+'</span>h</label>'
@@ -9986,8 +10070,8 @@ function renderRecovery(){
   +'<div class="form-group"><label>\uD83D\uDE80 Mood Today</label>'+moodHTML+'</div>'
   +'<div class="form-group"><label>\uD83D\uDDFA\uFE0F Body Soreness (tap zone to cycle severity)</label>'+zoneHTML+'</div>'
   +'<div class="form-group"><label>\uD83D\uDCAA Recovery Methods Used</label>'+methHTML+'</div>'
-  +'<div class="form-group"><label>\uD83D\uDFE2 Overall Readiness: <span id="rec-readiness-val" style="color:'+rdClr+';font-weight:700">'+rdVal+'</span>/10 — '+rdLabel+'</label>'
-  +'<input type="range" id="rec-readiness" min="0" max="10" step="1" value="'+rdVal+'" style="width:100%;accent-color:'+rdClr+'" oninput="(function(v){if(!recovery[\''+td+'\'])recovery[\''+td+'\']=JSON.parse(JSON.stringify({sleep:7,quality:3,energy:5,readiness:parseInt(v),mood:\'\',soreness:{},methods:[]}));else recovery[\''+td+'\'].readiness=parseInt(v);var el=document.getElementById(\'rec-readiness-val\');if(el)el.textContent=v;})(this.value)"></div>'
+  +'<div class="form-group"><label>'+_dot+' Overall Readiness: <span id="rec-readiness-val" style="color:'+rdClr+';font-weight:700">'+(rdVal===null?'\u2014':rdVal)+'</span>'+(rdVal===null?'':'/10')+' \u2014 '+rdLabel+'</label>'
+  +'<input type="range" id="rec-readiness" min="0" max="10" step="1" value="'+(rdVal===null?5:rdVal)+'" style="width:100%;accent-color:'+rdClr+'" oninput="(function(v){if(!recovery[\''+td+'\'])recovery[\''+td+'\']=JSON.parse(JSON.stringify({sleep:7,quality:3,energy:5,readiness:parseInt(v),mood:\'\',soreness:{},methods:[]}));else recovery[\''+td+'\'].readiness=parseInt(v);var el=document.getElementById(\'rec-readiness-val\');if(el)el.textContent=v;})(this.value)"></div>'
   +'<button class="btn btn-primary btn-full" id="rec-save" style="margin-top:8px">\uD83D\uDCBE Save Recovery Log</button></div>'
   +(histHTML?'<div class="card" style="margin-top:8px"><div style="font-weight:700;font-size:13px;margin-bottom:8px">\uD83D\uDCC5 7-Day History</div>'+histHTML+'</div>':'');
   var recSave=safeGet('rec-save');
@@ -11556,7 +11640,7 @@ function renderNutrition(){
   var tips=['Stay hydrated — drink water before meals for better performance.','Protein within 30 min post-workout helps recovery.','Complex carbs before games fuel sustained energy.','Don\'t skip breakfast — your body needs fuel to train.','Eat the rainbow — diverse fruits & veggies cover all micronutrients.','Healthy fats support joint health and hormone balance.','Post-game snack: chocolate milk is an excellent recovery drink.'];
   var tip=tips[new Date().getDay()];
   el.innerHTML='<div class="section-title">🥗 Nutrition</div>'+
-  '<div class="card">'+macroBar('Calories',totals.calories,nutritionGoals.calories,'var(--gold)')+macroBar('Protein (g)',totals.protein,nutritionGoals.protein,'var(--danger)')+macroBar('Carbs (g)',totals.carbs,nutritionGoals.carbs,'#3498db')+macroBar('Fats (g)',totals.fats,nutritionGoals.fats,'var(--green)')+macroBar('Water (oz)',waterToday,nutritionGoals.water,'#3498db')+'</div>'+
+  '<div class="card">'+macroBar('Calories',totals.calories,nutritionGoals.calories,'var(--gold)')+macroBar('Protein (g)',totals.protein,nutritionGoals.protein,'var(--danger)')+macroBar('Carbs (g)',totals.carbs,nutritionGoals.carbs,'#3498db')+macroBar('Fats (g)',totals.fats,nutritionGoals.fats,'var(--green)')+macroBar('Water (oz)',waterToday,aosHydrationGoal(todayStr()),'#3498db')+'</div>'+
   '<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:6px">Quick Add</div><div class="quick-food-grid">'+quickFoods.map(function(f){return '<div class="quick-food nq-food" data-cal="'+f.cal+'" data-pro="'+f.pro+'" data-carb="'+f.carb+'" data-fat="'+f.fat+'" data-name="'+f.name+'"><div>'+f.emoji+'</div><div class="quick-food-lbl">'+f.name+'</div></div>'}).join('')+'</div></div>'+
   '<div class="card"><div style="font-weight:700;font-size:13px;margin-bottom:8px">Log Food</div>'+
   '<div class="form-row"><div class="form-group"><label>Meal</label><select id="nf-meal">'+MEAL_TYPES.map(function(m){return '<option>'+m+'</option>'}).join('')+'</select></div><div class="form-group"><label>Food Name</label><input id="nf-name" placeholder="Food item"></div></div>'+
@@ -15008,6 +15092,12 @@ window.aosOpenChildHome=function(childId,childName){
   aosLoadKidList(function(kids){ if(kids.length>1) renderParentChildHome(); });
 };
 window.aosCloseChildHome=function(){ window._parentChild=null; renderParent(); };
+/* Revoking a coach is not something to do with a stray tap - it cuts
+   their access to the athlete's record. */
+window.aosConfirmRevoke=function(childId,linkerId){
+  if(!confirm('Remove this connection?\n\nThey will lose access to your athlete\u2019s record. You can link again later.')) return;
+  if(typeof parentVetoLink==='function') parentVetoLink(childId,linkerId);
+};
 function renderParentChildHome(){
   var el=safeGet('sec-parent'); if(!el||!window._parentChild) return;
   var cid=window._parentChild.id, cname=window._parentChild.name;
@@ -15436,7 +15526,7 @@ function renderParent(){
             html+='<div style="background:#0A1A2F;border-radius:8px;padding:8px 12px;margin-bottom:6px;display:flex;align-items:center;gap:10px">';
             html+='<div style="flex:1"><div style="font-weight:700;color:#e8f4fd;font-size:12px">'+escH(la.linkerName||la.linkerId||'Adult')+'</div>';
             html+='<div style="font-size:10px;color:#8899aa">'+escH(la.linkerRole||'adult')+'</div></div>';
-            html+='<button onclick="parentVetoLink(\''+escH(ch.childId)+'\',\''+escH(la.linkerId)+'\')" style="background:#ff446622;color:#ff4466;padding:6px 12px;border-radius:14px;font-size:11px;border:1px solid #ff446644;cursor:pointer">REVOKE</button>';
+            html+='<button onclick="aosConfirmRevoke(\''+escH(ch.childId)+'\',\''+escH(la.linkerId)+'\')" style="background:#ff446622;color:#ff4466;padding:6px 12px;border-radius:14px;font-size:11px;border:1px solid #ff446644;cursor:pointer">REVOKE</button>';
             html+='</div>';
           });
         }
@@ -15638,8 +15728,28 @@ function renderProfile() {
     },0);
     AppSDK.getItem('aos_player_links').then(function(_allLinks){
       _allLinks=_allLinks||{};
+      /* The read can finish before the card is in the DOM. Returning
+         early left "Loading..." on screen for good - which is what a
+         coach and an org saw every time. Wait for the element, then
+         render into it. */
       var _lb=document.getElementById('prof-linked-body');
-      if(!_lb) return;
+      if(!_lb){
+        var _tries=0;
+        var _wait=setInterval(function(){
+          var el=document.getElementById('prof-linked-body');
+          if(el){ clearInterval(_wait); _fillLinked(el,_allLinks); }
+          else if(++_tries>25){ clearInterval(_wait); }
+        },120);
+        return;
+      }
+      _fillLinked(_lb,_allLinks);
+    }).catch(function(e){
+      console.warn('AOS linked accounts failed',e);
+      var _lb3=document.getElementById('prof-linked-body');
+      if(_lb3) _lb3.innerHTML='<span style="color:#ff8899">Couldn\u2019t load linked accounts.</span>';
+    });
+
+    function _fillLinked(_lb,_allLinks){
       var _lines=[];
       var _roleIcon={coach:'&#x1F3EB; Coach',trainer:'&#x1F3CB; Trainer',org:'&#x1F3E2; Org',parent:'&#x1F468;&#x200D;&#x1F469;&#x200D;&#x1F467; Parent'};
       if(_s.role==='player'){
@@ -15665,12 +15775,15 @@ function renderProfile() {
               _lines.push('&#x26BE; Athlete: '+escH((pAcc&&pAcc.name)||playerId));
             }
           });
-          _lb.innerHTML=_lines.length?_lines.join(''):'<span style="color:var(--white-dim)">No linked accounts yet. Share your AOS ID above.</span>';
+          _lb.innerHTML=_lines.length?_lines.join(''):'<span style="color:var(--white-dim)">Nobody linked to you yet. Share your AOS ID above, or invite families from the Roster.</span>';
+        }).catch(function(e){
+          console.warn('AOS linked accounts failed',e);
+          _lb.innerHTML='<span style="color:#ff8899">Couldn\u2019t load linked accounts.</span>';
         });
         return;
       }
       _lb.innerHTML=_lines.length?_lines.join('<br>'):'<span style="color:var(--white-dim)">No linked accounts yet. Share your AOS ID above.</span>';
-    });
+    }
   })();
 
   // Coach/Trainer/Org get a compact professional profile instead of the
@@ -16868,6 +16981,9 @@ var AOS_AUTH = {
     var nav = document.querySelector('.bottom-nav');
     if(hdr) hdr.style.display = 'none';
     if(nav) nav.style.display = 'none';
+    /* Were we in the demo before this reload? Resume it rather than
+       dropping back to sign-in. */
+    if(typeof aosResumeDemo==='function'&&aosResumeDemo()) return;
     // Show auth
     var auth = document.getElementById('auth-screen');
     if(auth){
@@ -17353,6 +17469,19 @@ var AOS_AUTH = {
 
 /* ── Boot auth on DOM ready ───────────────────────────────────────── */
 document.addEventListener('DOMContentLoaded', function(){
+  /* A reload mid-demo used to land on sign-in. Resumed here rather than
+     inside showAuthScreen, because the boot path does not always reach
+     that function - it only looked fixed in testing. */
+  if(typeof aosResumeDemo==='function'){
+    try{
+      if(sessionStorage.getItem('aos_demo_role')){
+        setTimeout(function(){
+          if(!window.AOS_DEMO) aosResumeDemo();
+        },600);
+        return;
+      }
+    }catch(e){}
+  }
   AOS_AUTH.init();
 });
 
