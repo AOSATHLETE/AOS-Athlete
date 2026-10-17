@@ -1014,7 +1014,17 @@ function aosAudienceOptions(g,me,role){
       opts.push({type:'squad',id:t.teamId,label:t.name+' (athletes + parents)',recipients:aosTeamMembers(g,me,t.teamId)});
     });
     opts.push({type:'team',id:me,label:_teams.length?'Everyone I coach (all teams)':'My team (athletes + parents)',recipients:aosTeam(g,me)});
-    opts.push({type:'athletes',id:me,label:'My athletes',recipients:_aosUniq([me].concat(aosAthletesOf(g,me)))});
+    /* "My athletes" deliberately excludes parents, which is fine for an
+       adult roster and not for a minor one. Guardians of the minors are
+       added, and the label stops implying otherwise. */
+    var _ath=aosAthletesOf(g,me)||[], _g=[];
+    _ath.forEach(function(a){
+      if(aosIsMinorPublic((g.accs||{})[a]||{})) _g=_g.concat(aosParentsOf(g,a)||[]);
+    });
+    _g=_aosUniq(_g).filter(function(x){ return x&&x!==me; });
+    opts.push({type:'athletes',id:me,
+      label:_g.length?'My athletes (+ parents of under-18s)':'My athletes',
+      recipients:_aosUniq([me].concat(_ath).concat(_g))});
     aosOrgsOf(g,me).forEach(function(o){
       opts.push({type:'orgstaff',id:o,label:'Staff at '+aosNameOf(g,o),recipients:_aosUniq([me,o].concat(aosOrgStaff(g,o)))});
       opts.push({type:'org',id:o,label:'Everyone at '+aosNameOf(g,o),recipients:_aosUniq([me].concat(aosOrgAll(g,o)))});
@@ -1022,7 +1032,16 @@ function aosAudienceOptions(g,me,role){
   } else if(role==='org'){
     opts.push({type:'org',id:me,label:'Everyone in the org',recipients:aosOrgAll(g,me)});
     opts.push({type:'orgstaff',id:me,label:'All staff',recipients:_aosUniq([me].concat(aosOrgStaff(g,me)))});
-    opts.push({type:'orgathletes',id:me,label:'All athletes',recipients:_aosUniq([me].concat(aosOrgAthletes(g,me)))});
+    /* Same rule for a club: athletes only, except that the guardians of
+       the minors come with them. */
+    var _oa=aosOrgAthletes(g,me)||[], _og=[];
+    _oa.forEach(function(a){
+      if(aosIsMinorPublic((g.accs||{})[a]||{})) _og=_og.concat(aosParentsOf(g,a)||[]);
+    });
+    _og=_aosUniq(_og).filter(function(x){ return x&&x!==me; });
+    opts.push({type:'orgathletes',id:me,
+      label:_og.length?'All athletes (+ parents of under-18s)':'All athletes',
+      recipients:_aosUniq([me].concat(_oa).concat(_og))});
     /* The org's own teams — these span whichever coaches are assigned. */
     aosTeamsFor(g,me).forEach(function(t){
       opts.push({type:'squad',id:t.teamId,label:t.name+' (athletes + parents)',recipients:aosTeamMembers(g,me,t.teamId)});
@@ -1063,7 +1082,26 @@ function aosAudienceOptions(g,me,role){
     });
   }
   Object.keys(people).forEach(function(id){
-    opts.push({type:'user',id:id,label:aosNameOf(g,id)+' ('+people[id]+')',recipients:[me,id]});
+    var acc=(g.accs||{})[id]||{};
+    var recips=[me,id], label=aosNameOf(g,id)+' ('+people[id]+')';
+    /* Safe Sport: an adult does not get a private channel to somebody
+       else's child. A note to a minor also goes to their guardians, and
+       the option says so before it is sent - the Parent Portal promises
+       parents they see every coach and trainer message, and until now
+       a one-to-one note to a 13-year-old was invisible to them.
+       An athlete messaging their own coach is unaffected, and an adult
+       athlete has no guardian to add. */
+    if(people[id]==='athlete'&&aosIsMinorPublic(acc)
+       &&['coach','trainer','org'].indexOf(role)>=0){
+      var guardians=(aosParentsOf(g,id)||[]).filter(function(x){ return x&&x!==me; });
+      if(guardians.length){
+        recips=_aosUniq(recips.concat(guardians));
+        label+=' + '+(guardians.length===1?'their parent':'their parents');
+      } else {
+        label+=' \u00B7 no parent linked';
+      }
+    }
+    opts.push({type:'user',id:id,label:label,recipients:recips});
   });
   return opts;
 }
@@ -1082,9 +1120,19 @@ function _aosMsgId(){ return 'm_'+Date.now().toString(36)+Math.random().toString
 function _aosClean(o){ return JSON.parse(JSON.stringify(o||{})); }
 function aosMyMessages(uid){
   if(!uid) return Promise.resolve([]);
+  /* The demo has no Firebase session, so this read rejected - and it
+     sits inside a Promise.all that had no catch, which left the parent
+     looking at "Loading..." forever. Messages come from the demo store
+     there, and a real failure returns nothing rather than throwing. */
+  if(typeof AOS_DEMO!=='undefined'&&AOS_DEMO){
+    var all=((typeof _demoStore!=='undefined'&&_demoStore.msgs)||[]);
+    return Promise.resolve(all.filter(function(m){
+      return (m.recipients||[]).indexOf(uid)>=0;
+    }));
+  }
   return fbDb.collection('messages').where('recipients','array-contains',uid).get().then(function(snap){
     var out=[]; snap.forEach(function(d){ var m=d.data(); m._mid=d.id; out.push(m); }); return out;
-  });
+  }).catch(function(e){ console.warn('AOS message read failed',e); return []; });
 }
 function _msgToLegacy(kind,m,uid){
   var x=Object.assign({},m.legacy||{});
@@ -1185,6 +1233,22 @@ function aosIsMinorAccount(acc){
   var m=(acc&&acc.ageMode)||'';
   return m==='youth'||m==='teen';
 }
+/* Is this account a minor, judged from the public record?
+
+   ageMode itself is private, but followPolicy is derived from it and
+   is public: 'none' for under-13, 'approve' for 13-17, 'open' for an
+   adult. Good enough to decide who else belongs on a message. */
+function aosIsMinorPublic(acc){
+  if(!acc) return false;
+  var p=acc.followPolicy;
+  if(p==='none'||p==='approve') return true;
+  if(p==='open') return false;
+  /* No policy recorded - fall back to ageMode if we happen to have it,
+     and otherwise treat an athlete as a minor. Erring the other way
+     would mean a private adult-to-child message. */
+  if(acc.ageMode) return aosIsMinorAccount(acc);
+  return (acc.role||'')==='player';
+}
 function aosFollowableState(acc){
   if(!acc) return {ok:false,why:'Not found'};
   var policy=acc.followPolicy||
@@ -1233,6 +1297,8 @@ window.aosAnswerFollower=function(followerId,accept,cb){
 };
 function aosLoadFollows(){
   var u=window.AOS_USER||{};
+  /* The demo has no Firebase session; this read would reject. */
+  if(typeof AOS_DEMO!=='undefined'&&AOS_DEMO) return Promise.resolve((myFollows=[],myFollowers=[],undefined));
   if(!u.userId) return Promise.resolve();
   return Promise.all([
     fbDb.collection('follows').where('followerId','==',u.userId).get(),
@@ -1280,6 +1346,8 @@ window.aosDeletePost=function(id,cb){
 };
 function aosLoadFeed(){
   var u=window.AOS_USER||{};
+  /* The demo has no Firebase session; this read would reject. */
+  if(typeof AOS_DEMO!=='undefined'&&AOS_DEMO) return Promise.resolve((feedPosts=[]));
   var ids=myFollows.filter(function(f){ return f.status==='active'; }).map(function(f){ return f.targetId; });
   ids.push(u.userId);
   var chunks=[];
@@ -4100,6 +4168,8 @@ function aosBenchmarkReviewLine(){
 }
 /* Overrides from Firestore, so a revision doesn't need a new build. */
 function aosLoadBenchmarkOverrides(){
+  /* The demo has no Firebase session; this read would reject. */
+  if(typeof AOS_DEMO!=='undefined'&&AOS_DEMO) return Promise.resolve(null);
   return fbDb.collection('benchmarks').get().then(function(snap){
     var meta=null;
     snap.forEach(function(d){
@@ -5912,6 +5982,8 @@ function _aosParentChatAudienceLegacy(g){
 
 function aosLoadParentChat(){
   var u=window.AOS_USER||{};
+  /* The demo has no Firebase session; this read would reject. */
+  if(typeof AOS_DEMO!=='undefined'&&AOS_DEMO) return Promise.resolve((parentChatMsgs=[]));
   if(!u.userId||!window.fbDb) return Promise.resolve([]);
   return fbDb.collection('parentChat').where('viewers','array-contains',u.userId).get()
     .then(function(snap){
@@ -6181,6 +6253,8 @@ function aosTeamChatAudience(g,teamId){
 
 function aosLoadTeamChat(){
   var u=window.AOS_USER||{};
+  /* The demo has no Firebase session; this read would reject. */
+  if(typeof AOS_DEMO!=='undefined'&&AOS_DEMO) return Promise.resolve((teamChatMsgs=[]));
   if(!u.userId||!window.fbDb) return Promise.resolve([]);
   return fbDb.collection('teamChat').where('viewers','array-contains',u.userId).get()
     .then(function(snap){
@@ -9404,6 +9478,8 @@ function aosSportPositions(sport){ return (aosSportConfig(sport).positions)||['A
 function aosSportActivities(sport){ return (aosSportConfig(sport).activities)||aosSportConfig('Other').activities; }
 function aosSportGroups(sport){ return (aosSportConfig(sport).groups)||[]; }
 function aosLoadSportConfigs(){
+  /* The demo has no Firebase session; this read would reject. */
+  if(typeof AOS_DEMO!=='undefined'&&AOS_DEMO) return Promise.resolve(null);
   return fbDb.collection('sports').get().then(function(snap){
     var extra={};
     snap.forEach(function(d){ var v=d.data()||{}; extra[v.name||d.id]=v; });
@@ -14585,6 +14661,8 @@ window.aosRevokeInvite=function(code,cb){
 };
 function aosLoadMyInvites(){
   var u=window.AOS_USER||{};
+  /* The demo has no Firebase session; this read would reject. */
+  if(typeof AOS_DEMO!=='undefined'&&AOS_DEMO) return Promise.resolve((myInvites=[]));
   if(!u.userId||['coach','trainer','org'].indexOf(u.role)<0) return Promise.resolve([]);
   return fbDb.collection('invites').where('ownerId','==',u.userId).get().then(function(sn){
     myInvites=[]; sn.forEach(function(d){ myInvites.push(d.data()); });
@@ -15250,6 +15328,15 @@ function renderParentChildHome(){
         .then(function(){ msg.style.color='#2ecc71'; msg.textContent='Saved.'; prof=updated; })
         .catch(function(e){ msg.style.color='#e74c3c'; msg.textContent='Could not save: '+((e&&e.message)||'error'); });
     });
+  }).catch(function(e){
+    /* One failed read used to leave this on "Loading..." for good.
+       Say so instead, and give them a way out. */
+    console.warn('AOS child home load failed',e);
+    if(_renderToken!==window._pcRenderToken) return;
+    var body=safeGet('pch-body');
+    if(body) body.innerHTML='<div style="padding:14px;font-size:12px;color:#ff8899">'+
+      'Could not load this athlete\u2019s record just now.</div>'+
+      '<button class="btn btn-sm" onclick="renderParentChildHome()">Try again</button>';
   });
 }
 
